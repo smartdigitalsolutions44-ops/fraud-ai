@@ -1,0 +1,21 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+.venv/
+venv/
+
+# local configuration and secrets
+.env
+
+# local runtime data (databases, generated keys, model artifacts)
+data/*
+!data/.gitkeep
+models/*
+!models/.gitkeep
