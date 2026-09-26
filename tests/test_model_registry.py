@@ -72,11 +72,24 @@ def test_record_prediction(session: Session, processor: object) -> None:
         feature_snapshot_reference="snapshots/abc.json",
     )
     assert p.predicted_class == 1 and p.model.algorithm == "logistic_regression"
+    from sqlalchemy.exc import IntegrityError
+
+    with session.begin_nested(), pytest.raises(IntegrityError):  # one per event per version
+        record_prediction(
+            session,
+            event_id=ev.event_id,
+            model_name="baseline_lr",
+            model_version="1.0.0",
+            fraud_probability=0.2,
+            threshold=0.5,
+            feature_version="fv1",
+        )
+    _register(session, "1.0.1")
     low = record_prediction(
         session,
         event_id=ev.event_id,
         model_name="baseline_lr",
-        model_version="1.0.0",
+        model_version="1.0.1",
         fraud_probability=0.2,
         threshold=0.5,
         feature_version="fv1",
@@ -115,40 +128,52 @@ def test_record_prediction(session: Session, processor: object) -> None:
 
 
 class _ConstantModel(FraudModel):
-    """Minimal test double proving the interface is implementable."""
+    """Minimal test double proving the Stage 3 contract is implementable."""
 
-    name, version, feature_version, feature_names = "const", "0", "fv1", ("a",)
+    model_name, version, feature_version = "const", "0", "fraud-features-1.0.0"
 
     def __init__(self, p: float = 0.6) -> None:
         self.p = p
 
-    def train(self, features, labels):  # type: ignore[no-untyped-def]
+    def train(self, matrix, labels):  # type: ignore[no-untyped-def]
         self.p = sum(labels) / len(labels)
 
-    def predict_proba(self, features):  # type: ignore[no-untyped-def]
-        return [self.p for _ in features]
+    def predict_proba(self, matrix):  # type: ignore[no-untyped-def]
+        import numpy as np
 
-    def evaluate(self, features, labels, threshold=0.5):  # type: ignore[no-untyped-def]
-        preds = self.predict(features, threshold)
-        acc = sum(int(p == y) for p, y in zip(preds, labels, strict=True)) / len(labels)
-        return EvaluationResult({"accuracy": acc}, len(labels), threshold)
+        return np.full(len(matrix), self.p)
 
-    def save(self, path: Path) -> None:
-        path.write_text(str(self.p))
+    def evaluate(self, matrix, labels, threshold=0.5):  # type: ignore[no-untyped-def]
+        from fraud_ai.models.metrics import evaluate_scores
+
+        return EvaluationResult(
+            evaluate_scores(labels, self.predict_proba(matrix), threshold), len(matrix), threshold
+        )
+
+    def save(self, directory: Path) -> str:
+        directory.mkdir()
+        (directory / "p.txt").write_text(str(self.p))
+        return "digest"
 
     @classmethod
-    def load(cls, path: Path) -> "_ConstantModel":
-        return cls(float(path.read_text()))
+    def load(cls, directory: Path, expected_sha256: str) -> "_ConstantModel":
+        assert expected_sha256 == "digest"
+        return cls(float((directory / "p.txt").read_text()))
 
 
 def test_fraud_model_interface(tmp_path: Path) -> None:
+    from fraud_ai.models.matrix import ModelMatrix
+    from tests.model_helpers import make_vectors
+
+    vectors, _ = make_vectors(4)
+    matrix = ModelMatrix.from_vectors(vectors)
     model = _ConstantModel()
-    model.train([[0.0], [1.0], [1.0], [1.0]], [0, 1, 1, 1])
-    assert model.predict([[0.0]], threshold=0.7) == [1]
-    assert model.evaluate([[0.0], [1.0]], [1, 1]).metrics["accuracy"] == 1.0
-    model.save(tmp_path / "m.txt")
-    assert _ConstantModel.load(tmp_path / "m.txt").p == 0.75
+    model.train(matrix, [0, 1, 1, 1])
+    assert list(model.predict(matrix, threshold=0.7)) == [1, 1, 1, 1]
+    assert model.evaluate(matrix, [1, 0, 1, 1]).metrics["recall"] == 1.0
+    assert model.save(tmp_path / "m") == "digest"
+    assert _ConstantModel.load(tmp_path / "m", "digest").p == 0.75
     with pytest.raises(ValueError):
-        model.predict([[0.0]], threshold=2)
+        model.predict(matrix, threshold=2)
     with pytest.raises(TypeError):
         FraudModel()  # type: ignore[abstract]

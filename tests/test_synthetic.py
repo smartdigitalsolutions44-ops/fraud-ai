@@ -1,5 +1,6 @@
 import ipaddress
 import shutil
+import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -158,14 +159,57 @@ def test_seed_end_to_end_on_each_backend(any_engine: Engine) -> None:
         summary = seed_synthetic_data(
             sess,
             Pseudonymiser(TEST_KEY.encode()),
-            n_users=8,
+            n_users=10,
             seed=5,
             reference_time=REF,
             activity_days=30,
         )
     assert summary.fraud_labels > 0 and summary.transactions > 0
     with session_scope(make_session_factory(any_engine)) as sess:
-        assert sess.scalar(select(func.count()).select_from(User)) == 8
+        assert sess.scalar(select(func.count()).select_from(User)) == 10
         assert sess.scalar(select(func.count()).select_from(FraudLabel)) == (
             summary.fraud_labels + summary.legitimate_labels
         )
+
+
+@pytest.mark.parametrize("days", [30, 120, 365])
+def test_no_activity_before_account_creation(days: int) -> None:
+    """Regression: snapping logins to typical hours once moved them before the account's
+    creation (or the window start)."""
+    for seed in range(3):
+        created: dict[object, datetime] = {}
+        for e in (
+            SyntheticDataGenerator(seed=seed, reference_time=REF, activity_days=days)
+            .generate(30)
+            .events
+        ):
+            if e.event_type is EventType.ACCOUNT_CREATED:
+                created[e.user_id] = e.timestamp
+            elif e.user_id is not None:
+                assert created[e.user_id] <= e.timestamp
+
+
+def test_fraud_is_spread_over_time_and_overlaps_legitimate_behaviour() -> None:
+    ds = SyntheticDataGenerator(seed=4, reference_time=REF, activity_days=180).generate(120)
+    fraud_times = sorted(
+        e.timestamp
+        for e in ds.events
+        if e.event_type is EventType.TRANSACTION_CREATED
+        and uuid.UUID(e.metadata["transaction_id"]) in ds.fraud_transaction_ids
+    )
+    assert len(fraud_times) >= 20
+    span = (fraud_times[-1] - fraud_times[0]).days
+    assert span > 100  # not clustered at the end of the window
+    scenarios = {
+        e.metadata.get("synthetic_scenario")
+        for e in ds.events
+        if e.event_type is EventType.ACCOUNT_CREATED
+    }
+    assert {"new_customer", "new_account_fraud", "friendly_fraud"} <= scenarios
+    # Legitimate customers also use VPNs and add prepaid cards: signals are not verdicts.
+    legit_prepaid = [
+        e
+        for e in ds.events
+        if e.event_type is EventType.PAYMENT_METHOD_ADDED and e.metadata.get("funding") == "prepaid"
+    ]
+    assert legit_prepaid

@@ -43,7 +43,10 @@ Feature Engineering (fraud_ai.features)          – point-in-time, versioned, h
       │  snapshots persisted in feature_snapshots (idempotent, drift-detecting)
       │  labels resolved *separately* by fraud_ai.datasets under a label-availability policy
       ▼
-ML Fraud Model (Stage 3+; neural network Stage 5) – P(fraud), stored in model_predictions
+ML Fraud Model (fraud_ai.models)                 – P(fraud) from a verified, versioned artefact
+      │  ModelMatrix (feature values only) → fitted Preprocessor → sklearn baseline
+      │  prediction stored in model_predictions, linked to the exact feature snapshot
+      │  (neural networks are Stage 5 and must beat these baselines)
       ▼
 Rules Engine (fraud_ai.rules)                    – explicit security policy
       ▼
@@ -54,10 +57,10 @@ Decision (ALLOW / STEP_UP_AUTHENTICATION / MANUAL_REVIEW / BLOCK) → risk_asses
 Local Offline LLM (Stage 7, fraud_ai.llm)        – explains the decision from evidence only
 ```
 
-Stages 1 and 2 implement everything up to and including feature engineering, snapshots and
-training-dataset construction, plus the interfaces (and tested reference logic) for the
-risk engine, rules engine, model registry, prediction storage and LLM evidence packet. No
-model is trained yet.
+Stages 1-3 implement everything up to and including baseline ML scoring: events, the
+fraud database, point-in-time features and snapshots, training datasets, and trained,
+versioned baseline models whose probabilities are stored as predictions. The risk engine,
+rules engine and LLM layers exist as interfaces only; no decision is made anywhere yet.
 
 ### The event envelope
 
@@ -112,6 +115,8 @@ fraud_ai/
   features/    definitions, windows, vector + validation, point-in-time history queries,
                per-category extractors, extraction API, batch extraction, snapshots
   datasets/    label-availability policy, label resolution, training-dataset builder
+  models/      FraudModel contract, leakage-guarded ModelMatrix, preprocessing, time
+               splits, metrics/threshold analysis, baselines, training, scoring, registry
   models/      FraudModel interface, model-version registry, prediction storage
   rules/       Rule / RuleEngine
   risk/        RiskPolicy / RiskEngine
@@ -128,7 +133,7 @@ data/, models/ local runtime data and model artefacts (git-ignored)
 
 ## 5. Database design
 
-Tables (revisions `0001` and `0002`):
+Tables (revisions `0001`-`0003`):
 
 | Table | Purpose |
 |---|---|
@@ -258,7 +263,35 @@ Summary (details and every feature in [FEATURES.md](FEATURES.md)):
 * **Stage 2 does not include:** trained models, fraud decisions, feature weights, or any
   claim about fraud reduction.
 
-## 9. Extending the platform
+## 9. Baseline models (Stage 3)
+
+Summary (details in [MODELS.md](MODELS.md)):
+
+* **Input.** `ModelMatrix` is built from feature values only. Identifiers, timestamps,
+  hashes and labels stay on the dataset examples. Metadata-shaped column names are
+  rejected, as are mixed feature versions and altered catalogues.
+* **Preprocessing.** It is deterministic and serialised as JSON next to the model. The
+  three missing reasons survive as indicator columns or one-hot categories.
+* **Time-ordered train/validation/test split.** Oldest 70% / next 15% / latest 15% by
+  default, or an explicit date split. Ties never straddle a boundary.
+* **Class imbalance.** Class weighting is the default; random oversampling is available
+  for experiments only.
+* **Metrics.** PR-AUC, ROC-AUC, precision, recall, F1, FPR, FNR and a confusion matrix, for
+  every split, plus a threshold analysis and overfitting warnings. Accuracy is never
+  reported.
+* **Versioning.** `model_versions` (migration `0003`) records the dataset and catalogue
+  fingerprints, preprocessing version, split sizes, hyperparameters, seed, library
+  versions and an artefact SHA-256. The digest is verified *before* anything is
+  unpickled. Existing versions are never overwritten.
+* **Scoring.** `score_event` uses the point-in-time snapshot as of the event. It stores one
+  prediction per (event, model version); a rescore that disagrees is an error, never an
+  overwrite. The threshold only labels `predicted_class`; nothing is blocked.
+
+## 10. Extending the platform
+
+* **New model:** add a `ModelSpec` (or a new `FraudModel` implementation), train it on the
+  same prepared split as the baselines, and compare with `fraud-ai compare-models`.
+
 
 * **New feature / changed feature:** add a new feature version (definitions + a pipeline
   entry in `fraud_ai/features/extractor.py`); never edit a released version. Regenerate the
@@ -271,6 +304,4 @@ Summary (details and every feature in [FEATURES.md](FEATURES.md)):
   `alembic revision --autogenerate`, review the file (and make sure enum CHECK constraints
   are not duplicated), then run `fraud-ai db migrate`. The migration/model parity test will
   fail until they agree.
-* **New model:** implement `FraudModel`, register it with
-  `models.registry.register_model_version`, store outputs with
-  `models.predictions.record_prediction`.
+

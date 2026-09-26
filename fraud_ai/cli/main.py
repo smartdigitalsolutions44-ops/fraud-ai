@@ -615,6 +615,347 @@ def dataset_build(
     click.echo(f"written to {paths['manifest.json'].parent}")
 
 
+# --------------------------------------------------------------------------- models (Stage 3)
+_KIND_CHOICES = {
+    "transaction": ("transaction",),
+    "login": ("login",),
+    "all": ("login", "transaction"),
+}
+
+
+def _training_options(func: Any) -> Any:
+    options = [
+        click.option(
+            "--start",
+            type=click.DateTime(_DT_FORMATS),
+            default=None,
+            help="First event (UTC). Default: earliest event.",
+        ),
+        click.option(
+            "--end",
+            type=click.DateTime(_DT_FORMATS),
+            default=None,
+            help="Last event (UTC). Default: label cutoff minus maturity.",
+        ),
+        click.option(
+            "--label-cutoff",
+            type=click.DateTime(_DT_FORMATS),
+            default=None,
+            help="Labels known after this are ignored. Default: latest event.",
+        ),
+        click.option("--maturity-days", type=click.FloatRange(0), default=30, show_default=True),
+        click.option(
+            "--implicit-negatives/--explicit-labels-only", default=False, show_default=True
+        ),
+        click.option(
+            "--kind",
+            type=click.Choice(sorted(_KIND_CHOICES)),
+            default="transaction",
+            show_default=True,
+            help="Which scored events to train on.",
+        ),
+        click.option("--train-fraction", type=float, default=0.70, show_default=True),
+        click.option("--validation-fraction", type=float, default=0.15, show_default=True),
+        click.option(
+            "--train-end",
+            type=click.DateTime(_DT_FORMATS),
+            default=None,
+            help="Date split: training events before this (UTC).",
+        ),
+        click.option(
+            "--validation-end",
+            type=click.DateTime(_DT_FORMATS),
+            default=None,
+            help="Date split: validation events before this, test after.",
+        ),
+        click.option("--seed", type=int, default=42, show_default=True),
+        click.option(
+            "--imbalance",
+            type=click.Choice(["class_weight", "oversample", "none"]),
+            default="class_weight",
+            show_default=True,
+        ),
+        click.option(
+            "--threshold",
+            type=click.FloatRange(0, 1),
+            default=0.5,
+            show_default=True,
+            help="Evaluation threshold (not a decision).",
+        ),
+        click.option("--version", "model_version", default="1.0.0", show_default=True),
+        click.option(
+            "--persist-snapshots",
+            is_flag=True,
+            help="Store the training vectors as feature snapshots.",
+        ),
+        click.option(
+            "--report",
+            type=click.Path(dir_okay=False, path_type=Path),
+            default=None,
+            help="Also write a JSON report.",
+        ),
+    ]
+    for option in reversed(options):
+        func = option(func)
+    return func
+
+
+def _run_train(app: AppContext, kinds: list[str], **opts: Any) -> None:
+    app.require_migrated()
+    from datetime import timedelta
+
+    from fraud_ai.features.definitions import EventKind
+    from fraud_ai.models.report import SYNTHETIC_NOTE, comparison_table
+    from fraud_ai.models.splits import SplitConfig
+    from fraud_ai.models.training import TrainingConfig, run_training
+
+    try:
+        split = SplitConfig(
+            opts["train_fraction"],
+            opts["validation_fraction"],
+            _utc(opts["train_end"]),
+            _utc(opts["validation_end"]),
+        )
+        config = TrainingConfig(
+            start=_utc(opts["start"]),
+            end=_utc(opts["end"]),
+            label_cutoff=_utc(opts["label_cutoff"]),
+            maturity=timedelta(days=opts["maturity_days"]),
+            implicit_negatives=opts["implicit_negatives"],
+            kinds=tuple(EventKind(k) for k in _KIND_CHOICES[opts["kind"]]),
+            split=split,
+            seed=opts["seed"],
+            imbalance=opts["imbalance"],
+            threshold=opts["threshold"],
+            version=opts["model_version"],
+            persist_snapshots=opts["persist_snapshots"],
+        )
+        with session_scope(make_session_factory(app.engine)) as session:
+            run = run_training(session, kinds, config, app.settings.model_directory)
+            summary = run.prepared.summary()
+            registered = [r.registered for r in run.results if r.registered is not None]
+            table = comparison_table(registered)
+            report = {
+                "dataset": summary,
+                "models": [
+                    {
+                        "model": r.model_id,
+                        "metrics": r.metrics,
+                        "warnings": r.warnings,
+                        "timings": r.timings,
+                        "explanation": r.explanation,
+                        "artifact": str(r.artifact_path),
+                        "artifact_sha256": r.artifact_sha256,
+                    }
+                    for r in run.results
+                ],
+                "note": SYNTHETIC_NOTE,
+            }
+    except FraudAIError as exc:
+        raise click.ClickException(str(exc)) from None
+    click.echo(
+        f"dataset {summary['dataset_fingerprint'][:16]}: {summary['examples']} examples, "
+        f"{summary['positives']} fraud ({100 * summary['prevalence']:.2f}%)"
+    )
+    for name, part in summary["splits"].items():
+        click.echo(
+            f"  {name:<11}{part['rows']:>7} rows {part['positives']:>5} fraud  "
+            f"{part['start'][:19]} .. {part['end'][:19]}"
+        )
+    for r in run.results:
+        for warning in r.warnings:
+            click.echo(f"WARNING {r.model_id}: {warning}")
+    click.echo("")
+    click.echo(table)
+    if opts["report"]:
+        opts["report"].write_text(json.dumps(report, indent=2, sort_keys=True, default=str))
+        click.echo(f"report written to {opts['report']}")
+
+
+@cli.group()
+def train() -> None:
+    """Train baseline models on a time-ordered split (no decisions are made)."""
+
+
+def _train_command(name: str, kinds: list[str], help_text: str) -> None:
+    @train.command(name, help=help_text)
+    @_training_options
+    @pass_app
+    def _command(app: AppContext, /, **opts: Any) -> None:
+        _run_train(app, kinds, **opts)
+
+
+_train_command("logistic", ["logistic"], "Train logistic regression.")
+_train_command("random-forest", ["random-forest"], "Train a random forest.")
+_train_command("gradient-boosting", ["gradient-boosting"], "Train histogram gradient boosting.")
+_train_command(
+    "all",
+    ["logistic", "random-forest", "gradient-boosting"],
+    "Train all three baselines on the same split.",
+)
+
+
+@cli.group()
+def models() -> None:
+    """Inspect registered model versions."""
+
+
+@models.command("list")
+@pass_app
+def models_list(app: AppContext) -> None:
+    """All registered model versions."""
+    app.require_migrated()
+    from fraud_ai.models.registry import list_model_versions
+
+    with session_scope(make_session_factory(app.engine)) as session:
+        rows = list_model_versions(session)
+        if not rows:
+            click.echo("no models registered; run `fraud-ai train all`")
+            return
+        for m in rows:
+            pr = (m.metrics or {}).get("test", {}).get("pr_auc")
+            shown = "n/a" if pr is None else f"{pr:.3f}"
+            click.echo(
+                f"{m.model_name + '-' + m.model_version:<34}"
+                f"{'active' if m.active else '':<8}{m.feature_version:<24}"
+                f"{m.training_dataset_version:<26}test PR-AUC {shown}"
+            )
+
+
+@models.command("show")
+@click.argument("model_ref")
+@pass_app
+def models_show(app: AppContext, model_ref: str) -> None:
+    """Reproducibility record, metrics, warnings and inspection of one model."""
+    app.require_migrated()
+    from fraud_ai.models.registry import resolve_model
+    from fraud_ai.models.report import model_details, threshold_table
+
+    with session_scope(make_session_factory(app.engine)) as session:
+        try:
+            m = resolve_model(session, model_ref)
+        except FraudAIError as exc:
+            raise click.ClickException(str(exc)) from None
+        click.echo(model_details(m))
+        rows = (m.metrics or {}).get("threshold_analysis", {}).get("test")
+        if rows:
+            click.echo("\ntest threshold analysis (evaluation only):")
+            click.echo(threshold_table(rows))
+
+
+@models.command("activate")
+@click.argument("model_ref")
+@pass_app
+def models_activate(app: AppContext, model_ref: str) -> None:
+    """Mark a version active for its model name (deactivates the previous one)."""
+    app.require_migrated()
+    from fraud_ai.models.registry import activate_model_version, parse_model_ref
+
+    with session_scope(make_session_factory(app.engine)) as session:
+        try:
+            name, version = parse_model_ref(model_ref)
+            activate_model_version(session, name, version)
+        except FraudAIError as exc:
+            raise click.ClickException(str(exc)) from None
+    click.echo(f"{model_ref} is now active")
+
+
+@cli.command("evaluate")
+@click.argument("model_ref")
+@pass_app
+def evaluate_model(app: AppContext, model_ref: str) -> None:
+    """Re-evaluate a model on its recorded dataset and split, and check reproducibility."""
+    app.require_migrated()
+    from fraud_ai.models.registry import resolve_model
+    from fraud_ai.models.report import SYNTHETIC_NOTE, threshold_table
+    from fraud_ai.models.training import reevaluate
+
+    with session_scope(make_session_factory(app.engine)) as session:
+        try:
+            result = reevaluate(session, resolve_model(session, model_ref))
+        except FraudAIError as exc:
+            raise click.ClickException(str(exc)) from None
+    click.echo(
+        f"{model_ref}: dataset {'unchanged' if result.dataset_matches else 'CHANGED'}, "
+        f"metrics {'reproduced exactly' if result.reproduced else 'DIFFER from training'}"
+    )
+    for split in ("train", "validation", "test"):
+        m = result.metrics[split]
+        pr = "n/a" if m["pr_auc"] is None else f"{m['pr_auc']:.3f}"
+        click.echo(f"  {split:<11} n={m['n']:<6} fraud={m['positives']:<5} PR-AUC={pr}")
+    click.echo("test threshold analysis:")
+    click.echo(threshold_table(result.metrics["threshold_analysis"]["test"]))
+    click.echo(SYNTHETIC_NOTE)
+    if not result.reproduced:
+        sys.exit(1)
+
+
+@cli.command("compare-models")
+@click.option(
+    "--dataset",
+    "dataset_prefix",
+    default=None,
+    help="Only models trained on this dataset fingerprint (prefix).",
+)
+@click.option("--format", "fmt", type=click.Choice(["table", "json"]), default="table")
+@pass_app
+def compare_models(app: AppContext, dataset_prefix: str | None, fmt: str) -> None:
+    """Compare registered models (warns when they were trained on different datasets)."""
+    app.require_migrated()
+    from fraud_ai.models.registry import list_model_versions
+    from fraud_ai.models.report import comparison_rows, comparison_table
+
+    with session_scope(make_session_factory(app.engine)) as session:
+        rows = [
+            m
+            for m in list_model_versions(session)
+            if dataset_prefix is None or (m.dataset_fingerprint or "").startswith(dataset_prefix)
+        ]
+        if not rows:
+            raise click.ClickException("no matching models")
+        if fmt == "json":
+            click.echo(json.dumps(comparison_rows(rows), indent=2, default=str))
+        else:
+            click.echo(comparison_table(rows))
+
+
+@cli.command("score")
+@click.argument("event_id")
+@click.option("--model", "model_ref", required=True, help="e.g. gradient-boosting-1.0.0")
+@click.option(
+    "--threshold",
+    type=click.FloatRange(0, 1),
+    default=None,
+    help="Default: the threshold recorded with the model.",
+)
+@pass_app
+def score(app: AppContext, event_id: str, model_ref: str, threshold: float | None) -> None:
+    """Score one event and store the prediction (no decision is taken)."""
+    app.require_migrated()
+    from fraud_ai.models.registry import resolve_model
+    from fraud_ai.models.scoring import score_event
+
+    with session_scope(make_session_factory(app.engine)) as session:
+        try:
+            result = score_event(
+                session,
+                _parse_uuid(event_id),
+                resolve_model(session, model_ref),
+                threshold=threshold,
+            )
+        except FraudAIError as exc:
+            raise click.ClickException(str(exc)) from None
+        p = result.prediction
+        click.echo(f"{'existing' if result.existing else 'new'} prediction {p.prediction_id}")
+        click.echo(f"  model        {p.model_name}-{p.model_version} ({p.feature_version})")
+        click.echo(f"  snapshot     {result.snapshot_id} (as of the event time)")
+        click.echo(f"  probability  {p.fraud_probability:.6f}")
+        click.echo(
+            f"  threshold    {p.threshold}  predicted_class {p.predicted_class} "
+            "(evaluation only - no decision)"
+        )
+
+
 # --------------------------------------------------------------------------- system-status
 @cli.command("system-status")
 @pass_app

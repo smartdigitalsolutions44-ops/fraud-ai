@@ -3,14 +3,18 @@
 A locally runnable fraud-prevention software platform written in Python. It is not a web
 application.
 
-The current release covers **Stages 1 and 2**:
+The current release covers **Stages 1 to 3**:
 
 * **Stage 1:** the software core, the event architecture, the fraud database (PostgreSQL in
   production, SQLite for local use), migrations, synthetic data and the CLI.
 * **Stage 2:** point-in-time feature engineering, feature snapshots and training-dataset
-  construction. No model is trained yet.
+  construction.
+* **Stage 3:** baseline fraud models (logistic regression, random forest, gradient
+  boosting), trained on time-ordered splits, evaluated with threshold analysis, versioned,
+  reproducible, and scored into `model_predictions`.
 
-See [ARCHITECTURE.md](ARCHITECTURE.md), [FEATURES.md](FEATURES.md) and
+No fraud *decisions* are made yet, and all bundled data is synthetic. See
+[ARCHITECTURE.md](ARCHITECTURE.md), [FEATURES.md](FEATURES.md), [MODELS.md](MODELS.md) and
 [ROADMAP.md](ROADMAP.md).
 
 ## Install
@@ -43,6 +47,15 @@ fraud-ai features validate                       # re-verify snapshots (integrit
 fraud-ai dataset build --start 2026-06-01 --end 2026-08-01 \
     --label-cutoff 2026-09-01 --output out/ds    # features.jsonl + labels.jsonl + manifest
 python scripts/benchmark_features.py --users 100 # extraction throughput
+
+# Stage 3 - baseline models (synthetic data: results say nothing about real fraud rates)
+fraud-ai seed --users 300 --days 180            # enough history for a time-ordered split
+fraud-ai train all                              # LR + random forest + gradient boosting
+fraud-ai compare-models                         # same split, same dataset, side by side
+fraud-ai models show gradient-boosting-1.0.0    # reproducibility record + threshold analysis
+fraud-ai evaluate gradient-boosting-1.0.0       # re-evaluate; checks results reproduce
+fraud-ai score <event-id> --model gradient-boosting-1.0.0   # store a prediction (no decision)
+python scripts/benchmark_models.py --database-url sqlite:///data/fraud_ai.db
 python -m fraud_ai --help        # equivalent entry point
 ```
 

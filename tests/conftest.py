@@ -186,3 +186,46 @@ def create_user(
         )
     )
     return uid
+
+
+# --------------------------------------------------------------------------- Stage 3 world
+MODEL_REF_TIME = datetime(2026, 7, 1, tzinfo=UTC)
+
+
+@pytest.fixture(scope="session")
+def seeded_model_world(migrated_template: Path, tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A synthetic world with fraud spread across time, seeded once per session. Tests copy
+    the file before mutating it."""
+    from fraud_ai.data.seed import seed_synthetic_data
+    from fraud_ai.database.engine import session_scope
+
+    path = tmp_path_factory.mktemp("model_world") / "world.db"
+    shutil.copy(migrated_template, path)
+    eng = create_db_engine(f"sqlite:///{path}")
+    with session_scope(make_session_factory(eng)) as sess:
+        seed_synthetic_data(
+            sess,
+            Pseudonymiser(TEST_KEY.encode()),
+            n_users=80,
+            seed=13,
+            reference_time=MODEL_REF_TIME,
+            activity_days=120,
+        )
+    eng.dispose()
+    return path
+
+
+def fast_training_config(**overrides: Any) -> Any:
+    from datetime import timedelta
+
+    from fraud_ai.models.training import TrainingConfig
+
+    base: dict[str, Any] = {
+        "maturity": timedelta(days=14),
+        "hyperparameters": {
+            "random-forest": {"n_estimators": 60},
+            "gradient-boosting": {"max_iter": 80},
+        },
+    }
+    base.update(overrides)
+    return TrainingConfig(**base)

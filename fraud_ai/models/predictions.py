@@ -24,6 +24,7 @@ def record_prediction(
     user_id: uuid.UUID | None = None,
     transaction_id: uuid.UUID | None = None,
     feature_snapshot_reference: str | None = None,
+    feature_snapshot_id: uuid.UUID | None = None,
     prediction_timestamp: datetime | None = None,
 ) -> ModelPrediction:
     if not 0.0 <= fraud_probability <= 1.0:
@@ -49,6 +50,7 @@ def record_prediction(
         threshold=threshold,
         feature_version=feature_version,
         feature_snapshot_reference=feature_snapshot_reference,
+        feature_snapshot_id=feature_snapshot_id,
     )
     session.add(row)
     session.flush()

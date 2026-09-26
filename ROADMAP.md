@@ -35,22 +35,39 @@ ahead: models are only as good as the data and features beneath them.
 * Deferred: a concrete rule set for the rules engine. Rules are policy and should be
   written against the Stage 4 evaluation results, not guessed.
 
-## Stage 3: Baseline fraud models
+## Stage 3: Baseline fraud models ✅
 
-* Logistic regression, random forest and gradient-boosted trees implementing `FraudModel`.
-* Time-based train/validation/test splits (no random shuffling across time), built with
-  `fraud-ai dataset build` and its label-availability policy.
-* Model-owned preprocessing of missing reasons (indicator columns / native handling),
-  recorded with the model version; `model_predictions.feature_snapshot_reference` points at
-  `feature_snapshots`.
-* Artefacts in `MODEL_DIRECTORY`, registered in `model_versions` with dataset and feature
-  versions.
-* `fraud-ai train` and `fraud-ai score`.
+* Logistic regression, random forest and histogram gradient boosting (scikit-learn only)
+  behind the `FraudModel` contract.
+* A leakage-guarded `ModelMatrix` and deterministic, serialised preprocessing that keeps
+  the three missing reasons distinct.
+* Time-ordered (fraction or date) train/validation/test splits.
+* Class weighting by default.
+* Metrics, threshold analysis, a validation-selected threshold, overfitting warnings and
+  non-LLM inspection (coefficients, impurity and permutation importance).
+* Versioned, SHA-256-verified artefacts under `models/`; reproducibility metadata in
+  `model_versions` (migration `0003`); a training manifest with library versions and the
+  seed.
+* `score_event` → `model_predictions`, linked to the exact feature snapshot, idempotent,
+  with conflicts refused.
+* Synthetic data expanded so that fraud is spread over time and overlaps legitimate
+  behaviour:
+  * stealthy takeovers;
+  * new-account card fraud versus legitimate new customers;
+  * friendly fraud;
+  * large legitimate purchases and phone upgrades.
+* CLI: `train logistic|random-forest|gradient-boosting|all`, `models list|show|activate`,
+  `evaluate`, `compare-models`, `score`.
 
 ## Stage 4: Evaluation framework
 
-* Precision/recall at operating points, PR-AUC, ROC-AUC, calibration, and cost-weighted
-  metrics (fraud loss versus customer friction).
+* Stage 3 already reports PR-AUC, ROC-AUC, precision, recall, F1, FPR and FNR, a
+  threshold analysis and overfitting warnings. Stage 4 adds:
+  * bootstrap confidence intervals;
+  * calibration curves and recalibration;
+  * cost-weighted metrics (fraud loss versus customer friction);
+  * rolling-origin (walk-forward) evaluation;
+  * statistical tests between models on the same split.
 * Per-scenario breakdowns. In particular, false-positive rates on `new_home_address`,
   `legitimate_vpn` and `shared_network`.
 * Model comparison across versions from stored predictions.

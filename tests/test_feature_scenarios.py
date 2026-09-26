@@ -69,8 +69,12 @@ def _login_vectors(s: Session, scenario: str | None) -> list[FraudFeatureVector]
 def test_account_takeover_pattern(world: Session) -> None:
     attack_txns = list(
         world.scalars(
-            select(FraudLabel.transaction_id).where(
-                FraudLabel.label == LabelValue.FRAUD, FraudLabel.transaction_id.is_not(None)
+            select(FraudLabel.transaction_id)
+            .join(User, User.user_id == FraudLabel.user_id)
+            .where(
+                User.synthetic_scenario == "account_takeover",
+                FraudLabel.label == LabelValue.FRAUD,
+                FraudLabel.transaction_id.is_not(None),
             )
         )
     )
@@ -80,18 +84,23 @@ def test_account_takeover_pattern(world: Session) -> None:
             select(Transaction.event_id).where(Transaction.transaction_id.in_(attack_txns))
         )
     )
+    loud = 0
     for v in iter_vectors(world, events):
-        assert v.get("recent_password_reset") is True
+        # Every takeover - loud or stealthy - uses a new device and a new drop address.
         assert v.get("new_device") is True and v.get("new_address") is True
         assert v.get("device_changed_recently") is True
-        assert int(v.get("rapid_multi_change_count") or 0) >= 3
+        assert int(v.get("rapid_multi_change_count") or 0) >= 2
+        if v.get("recent_password_reset") is True:
+            loud += 1
+            assert int(v.get("rapid_multi_change_count") or 0) >= 3
         if v.get("previous_transactions_same_currency"):
-            assert float(v.get("transaction_vs_median_ratio") or 0) > 3
+            assert float(v.get("transaction_vs_median_ratio") or 0) > 1.5
         else:  # no purchase history: the ratio is honestly unknown, not zero
             assert v.missing["transaction_vs_median_ratio"].value == "not_observed"
-        assert v.get("account_age_days") and float(v.get("account_age_days") or 0) > 150
+        assert float(v.get("account_age_days") or 0) > 150
         # The chargeback arrives later: the attack vector does not know about it.
         assert v.get("historical_chargebacks") == 0
+    assert loud >= 1
 
 
 def test_legitimate_vpn_customer(world: Session) -> None:

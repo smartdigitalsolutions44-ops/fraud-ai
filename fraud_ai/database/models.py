@@ -472,6 +472,20 @@ class ModelVersion(Base):
     active: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
     notes: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
+    # Stage 3 (migration 0003): everything needed to reproduce and verify a model.
+    dataset_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    feature_catalogue_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    preprocessing_version: Mapped[str | None] = mapped_column(String(50))
+    train_rows: Mapped[int | None] = mapped_column(Integer)
+    validation_rows: Mapped[int | None] = mapped_column(Integer)
+    test_rows: Mapped[int | None] = mapped_column(Integer)
+    random_seed: Mapped[int | None] = mapped_column(Integer)
+    hyperparameters: Mapped[dict[str, Any] | None]
+    training_manifest: Mapped[dict[str, Any] | None]
+    # SHA-256 of the serialised estimator; verified before the artefact is ever loaded.
+    artifact_sha256: Mapped[str | None] = mapped_column(String(64))
+    # Evaluation threshold recorded with the model - an analysis setting, not a decision.
+    default_threshold: Mapped[float | None] = mapped_column(Float)
 
     predictions: Mapped[list[ModelPrediction]] = relationship(back_populates="model")
 
@@ -499,6 +513,8 @@ class ModelPrediction(Base):
         ),
         Index("ix_model_predictions_transaction_id", "transaction_id"),
         Index("ix_model_predictions_event_id", "event_id"),
+        # One prediction per event per model version: a rescore never silently replaces it.
+        UniqueConstraint("event_id", "model_name", "model_version"),
     )
 
     prediction_id: Mapped[uuid.UUID] = _uuid_pk()
@@ -515,6 +531,10 @@ class ModelPrediction(Base):
     threshold: Mapped[float] = mapped_column(Float)
     feature_version: Mapped[str] = mapped_column(String(50))
     feature_snapshot_reference: Mapped[str | None] = mapped_column(String(512))
+    # Stage 3: the exact persisted vector the model scored.
+    feature_snapshot_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("feature_snapshots.snapshot_id")
+    )
 
     model: Mapped[ModelVersion] = relationship(back_populates="predictions")
 

@@ -29,8 +29,9 @@ def test_help_lists_only_real_commands(run) -> None:  # type: ignore[no-untyped-
     out = run("--help").output
     for command in ("db", "seed", "demo-data", "ingest-event", "system-status"):
         assert command in out
-    for future in ("score", "train", "evaluate", "investigate"):  # not implemented yet
-        assert f"  {future} " not in out
+    for command in ("train", "models", "evaluate", "compare-models", "score"):  # Stage 3
+        assert f"  {command} " in out
+    assert "  investigate " not in out  # Stage 7: not implemented, so not offered
 
 
 def test_db_lifecycle(run) -> None:  # type: ignore[no-untyped-def]
@@ -38,7 +39,7 @@ def test_db_lifecycle(run) -> None:  # type: ignore[no-untyped-def]
     assert status.exit_code == 0 and "<not initialised>" in status.output
     assert run("seed").exit_code != 0  # refuses before init
     init = run("db", "init")
-    assert init.exit_code == 0 and "revision 0002" in init.output
+    assert init.exit_code == 0 and "revision 0003" in init.output
     again = run("db", "init")
     assert again.exit_code != 0 and "already initialised" in again.output
     migrate = run("db", "migrate")
@@ -49,7 +50,7 @@ def test_db_lifecycle(run) -> None:  # type: ignore[no-untyped-def]
 
 def test_db_migrate_from_empty(run) -> None:  # type: ignore[no-untyped-def]
     result = run("db", "migrate")
-    assert result.exit_code == 0 and "<empty> -> 0002" in result.output
+    assert result.exit_code == 0 and "<empty> -> 0003" in result.output
 
 
 def test_seed_and_stats(run) -> None:  # type: ignore[no-untyped-def]
