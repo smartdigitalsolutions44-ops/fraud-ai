@@ -22,6 +22,16 @@ class EventType(StrEnum):
     TRANSACTION_DECLINED = "TRANSACTION_DECLINED"
     CHARGEBACK = "CHARGEBACK"
     FRAUD_CONFIRMED = "FRAUD_CONFIRMED"
+    # Added in migration 0002: account-lifecycle and verification events. They carry no
+    # contact details - only the fact and time of the change/verification.
+    EMAIL_VERIFIED = "EMAIL_VERIFIED"
+    EMAIL_CHANGED = "EMAIL_CHANGED"
+    PHONE_VERIFIED = "PHONE_VERIFIED"
+    PHONE_CHANGED = "PHONE_CHANGED"
+    MFA_ENABLED = "MFA_ENABLED"
+    MFA_DISABLED = "MFA_DISABLED"
+    ADDRESS_VERIFIED = "ADDRESS_VERIFIED"
+    PAYMENT_METHOD_VERIFIED = "PAYMENT_METHOD_VERIFIED"
 
 
 class EventSource(StrEnum):
@@ -127,6 +137,20 @@ class SecurityEventType(StrEnum):
     NEW_DEVICE = "NEW_DEVICE"
     ADDRESS_CHANGED = "ADDRESS_CHANGED"
     PAYMENT_METHOD_ADDED = "PAYMENT_METHOD_ADDED"
+    EMAIL_VERIFIED = "EMAIL_VERIFIED"
+    EMAIL_CHANGED = "EMAIL_CHANGED"
+    PHONE_VERIFIED = "PHONE_VERIFIED"
+    PHONE_CHANGED = "PHONE_CHANGED"
+    MFA_ENABLED = "MFA_ENABLED"
+    MFA_DISABLED = "MFA_DISABLED"
+
+
+class TransactionDecision(StrEnum):
+    """Immutable outcome of the authorisation decision (unlike ``status``, which a later
+    chargeback overwrites)."""
+
+    APPROVED = "APPROVED"
+    DECLINED = "DECLINED"
 
 
 class SignalSource(StrEnum):

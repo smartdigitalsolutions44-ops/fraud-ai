@@ -3,9 +3,15 @@
 A locally runnable fraud-prevention software platform written in Python. It is not a web
 application.
 
-The current release is **Stage 1**: the software core, the event architecture, the fraud
-database (PostgreSQL in production, SQLite for local use), migrations, synthetic data and
-the CLI. See [ARCHITECTURE.md](ARCHITECTURE.md) and [ROADMAP.md](ROADMAP.md).
+The current release covers **Stages 1 and 2**:
+
+* **Stage 1:** the software core, the event architecture, the fraud database (PostgreSQL in
+  production, SQLite for local use), migrations, synthetic data and the CLI.
+* **Stage 2:** point-in-time feature engineering, feature snapshots and training-dataset
+  construction. No model is trained yet.
+
+See [ARCHITECTURE.md](ARCHITECTURE.md), [FEATURES.md](FEATURES.md) and
+[ROADMAP.md](ROADMAP.md).
 
 ## Install
 
@@ -28,6 +34,15 @@ fraud-ai demo-data stats         # per-scenario statistics
 fraud-ai ingest-event scripts/sample_events.jsonl   # ingest JSON / JSON-lines events (- = stdin)
 fraud-ai db migrate              # apply future migrations
 fraud-ai system-status           # component health
+
+# Stage 2 - features (always point-in-time: nothing after the event is used)
+fraud-ai features catalog                        # every feature: type, category, missing semantics
+fraud-ai features show <event-id>                # compute a vector (optionally --as-of)
+fraud-ai features snapshot --start 2026-08-01 --end 2026-09-01   # persist hashed snapshots
+fraud-ai features validate                       # re-verify snapshots (integrity + recompute)
+fraud-ai dataset build --start 2026-06-01 --end 2026-08-01 \
+    --label-cutoff 2026-09-01 --output out/ds    # features.jsonl + labels.jsonl + manifest
+python scripts/benchmark_features.py --users 100 # extraction throughput
 python -m fraud_ai --help        # equivalent entry point
 ```
 

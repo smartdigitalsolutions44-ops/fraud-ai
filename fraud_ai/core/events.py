@@ -211,6 +211,28 @@ class FraudConfirmedPayload(_Payload):
     notes: str | None = Field(default=None, max_length=1000)
 
 
+class AccountLifecyclePayload(_Payload):
+    """Email/phone verification or change, MFA enrol/remove.
+
+    Deliberately carries no contact details: only that the change happened, how, and from
+    where. The new email address or phone number is never sent to or stored by the platform.
+    """
+
+    method: str | None = Field(default=None, max_length=32)
+    network: NetworkContext | None = None
+    device: DeviceContext | None = None
+
+
+class AddressVerifiedPayload(_Payload):
+    address_id: uuid.UUID
+    method: str = Field(default="avs", max_length=32)
+
+
+class PaymentMethodVerifiedPayload(_Payload):
+    payment_method_id: uuid.UUID
+    method: str = Field(default="3ds", max_length=32)
+
+
 PAYLOAD_SCHEMAS: dict[EventType, type[_Payload]] = {
     EventType.ACCOUNT_CREATED: AccountCreatedPayload,
     EventType.LOGIN_ATTEMPT: LoginPayload,
@@ -226,6 +248,14 @@ PAYLOAD_SCHEMAS: dict[EventType, type[_Payload]] = {
     EventType.TRANSACTION_DECLINED: TransactionDecisionPayload,
     EventType.CHARGEBACK: ChargebackPayload,
     EventType.FRAUD_CONFIRMED: FraudConfirmedPayload,
+    EventType.EMAIL_VERIFIED: AccountLifecyclePayload,
+    EventType.EMAIL_CHANGED: AccountLifecyclePayload,
+    EventType.PHONE_VERIFIED: AccountLifecyclePayload,
+    EventType.PHONE_CHANGED: AccountLifecyclePayload,
+    EventType.MFA_ENABLED: AccountLifecyclePayload,
+    EventType.MFA_DISABLED: AccountLifecyclePayload,
+    EventType.ADDRESS_VERIFIED: AddressVerifiedPayload,
+    EventType.PAYMENT_METHOD_VERIFIED: PaymentMethodVerifiedPayload,
 }
 
 

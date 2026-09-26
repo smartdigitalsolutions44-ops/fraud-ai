@@ -29,11 +29,13 @@ from fraud_ai.core.enums import (
     LoginOutcome,
     SecurityEventType,
     SignalSource,
+    TransactionDecision,
     TransactionStatus,
 )
 from fraud_ai.core.events import (
     AccountCreatedPayload,
     AddressPayload,
+    AddressVerifiedPayload,
     ChargebackPayload,
     DeviceContext,
     Event,
@@ -41,6 +43,7 @@ from fraud_ai.core.events import (
     LoginPayload,
     NetworkContext,
     PaymentMethodAddedPayload,
+    PaymentMethodVerifiedPayload,
     TransactionCreatedPayload,
     TransactionDecisionPayload,
 )
@@ -304,6 +307,7 @@ class EventProcessor:
                 is_known_proxy=net.is_known_proxy,
                 is_tor=net.is_tor,
                 is_datacenter=net.is_datacenter,
+                is_mobile_network=net.is_mobile_network,
                 proxy_confidence=net.proxy_confidence,
             )
         )
@@ -523,10 +527,10 @@ class EventProcessor:
             raise EventProcessingError(f"transaction already {txn.status}")
         if ctx.event.timestamp < txn.occurred_at:
             raise EventProcessingError("decision precedes transaction creation")
-        txn.status = (
-            TransactionStatus.APPROVED
-            if ctx.event.event_type is EventType.TRANSACTION_APPROVED
-            else TransactionStatus.DECLINED
+        approved = ctx.event.event_type is EventType.TRANSACTION_APPROVED
+        txn.status = TransactionStatus.APPROVED if approved else TransactionStatus.DECLINED
+        txn.decision_outcome = (
+            TransactionDecision.APPROVED if approved else TransactionDecision.DECLINED
         )
         txn.decided_at = ctx.event.timestamp
         txn.decision_reason = payload.reason
@@ -573,6 +577,34 @@ class EventProcessor:
             notes=payload.notes,
         )
 
+    def _on_account_lifecycle(self, ctx: _Context) -> None:
+        kind = SecurityEventType(ctx.event.event_type.value)
+        method = ctx.payload.method
+        self._security_event(ctx, kind, **({"method": method} if method else {}))
+
+    def _on_address_verified(self, ctx: _Context) -> None:
+        user = self._require_user(ctx)
+        payload: AddressVerifiedPayload = ctx.payload
+        address = self._session.get(Address, payload.address_id)
+        if address is None or address.user_id != user.user_id:
+            raise EventProcessingError("address not found for this user")
+        if ctx.event.timestamp < address.added_at:
+            raise EventProcessingError("verification precedes address creation")
+        # Keep the first verification time: verification is monotone in time.
+        if address.verified_at is None or ctx.event.timestamp < address.verified_at:
+            address.verified_at = ctx.event.timestamp
+
+    def _on_payment_method_verified(self, ctx: _Context) -> None:
+        user = self._require_user(ctx)
+        payload: PaymentMethodVerifiedPayload = ctx.payload
+        pm = self._session.get(PaymentMethod, payload.payment_method_id)
+        if pm is None or pm.user_id != user.user_id:
+            raise EventProcessingError("payment method not found for this user")
+        if ctx.event.timestamp < pm.added_at:
+            raise EventProcessingError("verification precedes payment method creation")
+        if pm.verified_at is None or ctx.event.timestamp < pm.verified_at:
+            pm.verified_at = ctx.event.timestamp
+
 
 _HANDLERS = {
     EventType.LOGIN_ATTEMPT: EventProcessor._on_login,
@@ -588,4 +620,12 @@ _HANDLERS = {
     EventType.TRANSACTION_DECLINED: EventProcessor._on_transaction_decision,
     EventType.CHARGEBACK: EventProcessor._on_chargeback,
     EventType.FRAUD_CONFIRMED: EventProcessor._on_fraud_confirmed,
+    EventType.EMAIL_VERIFIED: EventProcessor._on_account_lifecycle,
+    EventType.EMAIL_CHANGED: EventProcessor._on_account_lifecycle,
+    EventType.PHONE_VERIFIED: EventProcessor._on_account_lifecycle,
+    EventType.PHONE_CHANGED: EventProcessor._on_account_lifecycle,
+    EventType.MFA_ENABLED: EventProcessor._on_account_lifecycle,
+    EventType.MFA_DISABLED: EventProcessor._on_account_lifecycle,
+    EventType.ADDRESS_VERIFIED: EventProcessor._on_address_verified,
+    EventType.PAYMENT_METHOD_VERIFIED: EventProcessor._on_payment_method_verified,
 }

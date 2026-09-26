@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from logging.config import fileConfig
+from typing import Any
 
 from alembic import context
 from sqlalchemy import engine_from_config, pool
@@ -10,7 +11,6 @@ from sqlalchemy import engine_from_config, pool
 import fraud_ai.database.models  # noqa: F401 - register all tables on the metadata
 from fraud_ai.config.settings import get_settings
 from fraud_ai.database.base import Base
-from fraud_ai.database.engine import _enable_sqlite_foreign_keys
 
 config = context.config
 
@@ -51,19 +51,33 @@ def run_migrations_online() -> None:
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
     )
-    if _is_sqlite(url):
+    sqlite = _is_sqlite(url)
+    if sqlite:
         from sqlalchemy import event
 
-        event.listen(connectable, "connect", _enable_sqlite_foreign_keys)
+        # Batch migrations rebuild tables (copy, drop, rename). With enforcement on,
+        # dropping a table other tables reference would fail, so it is disabled for the
+        # migration and integrity is verified explicitly afterwards.
+        event.listen(connectable, "connect", _disable_sqlite_foreign_keys)
     with connectable.connect() as connection:
         context.configure(
             connection=connection,
             target_metadata=target_metadata,
-            render_as_batch=_is_sqlite(url),
+            render_as_batch=sqlite,
             compare_type=True,
         )
         with context.begin_transaction():
             context.run_migrations()
+        if sqlite:
+            violations = connection.exec_driver_sql("PRAGMA foreign_key_check").fetchall()
+            if violations:
+                raise RuntimeError(f"foreign key violations after migration: {violations[:5]}")
+
+
+def _disable_sqlite_foreign_keys(dbapi_connection: Any, _record: Any) -> None:
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA foreign_keys=OFF")
+    cursor.close()
 
 
 if context.is_offline_mode():

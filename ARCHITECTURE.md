@@ -38,7 +38,10 @@ Event Processor (fraud_ai.ingestion)             – idempotent on event_id, SAV
       ▼
 Fraud Database (PostgreSQL in production, SQLite locally)
       ▼
-Feature Engineering (Stage 2)                    – point-in-time feature vectors
+Feature Engineering (fraud_ai.features)          – point-in-time, versioned, hashed vectors
+      │  every query bounded by timestamp <= as_of; the scored event never counts itself
+      │  snapshots persisted in feature_snapshots (idempotent, drift-detecting)
+      │  labels resolved *separately* by fraud_ai.datasets under a label-availability policy
       ▼
 ML Fraud Model (Stage 3+; neural network Stage 5) – P(fraud), stored in model_predictions
       ▼
@@ -51,9 +54,10 @@ Decision (ALLOW / STEP_UP_AUTHENTICATION / MANUAL_REVIEW / BLOCK) → risk_asses
 Local Offline LLM (Stage 7, fraud_ai.llm)        – explains the decision from evidence only
 ```
 
-Stage 1 implements everything up to and including the fraud database, plus the interfaces
-(and tested reference logic) for the risk engine, rules engine, model registry, prediction
-storage and LLM evidence packet.
+Stages 1 and 2 implement everything up to and including feature engineering, snapshots and
+training-dataset construction, plus the interfaces (and tested reference logic) for the
+risk engine, rules engine, model registry, prediction storage and LLM evidence packet. No
+model is trained yet.
 
 ### The event envelope
 
@@ -105,7 +109,9 @@ fraud_ai/
   core/        event envelope, payload schemas, enums, domain exceptions
   database/    SQLAlchemy models, portable types, engine/session, migration helpers
   ingestion/   EventProcessor - the single write path into the database
-  features/    feature catalogue (Stage 2 computes the features)
+  features/    definitions, windows, vector + validation, point-in-time history queries,
+               per-category extractors, extraction API, batch extraction, snapshots
+  datasets/    label-availability policy, label resolution, training-dataset builder
   models/      FraudModel interface, model-version registry, prediction storage
   rules/       Rule / RuleEngine
   risk/        RiskPolicy / RiskEngine
@@ -122,7 +128,7 @@ data/, models/ local runtime data and model artefacts (git-ignored)
 
 ## 5. Database design
 
-Tables (revision `0001`):
+Tables (revisions `0001` and `0002`):
 
 | Table | Purpose |
 |---|---|
@@ -142,6 +148,13 @@ Tables (revision `0001`):
 | `model_versions` | Reproducibility record: dataset/feature versions, metrics, path, active. |
 | `model_predictions` | Every model output, FK'd to the exact model version. |
 | `risk_assessments` | Final score and decision, the policy version and triggered rules. |
+| `feature_snapshots` | (0002) Exact hashed feature vector per (event, feature version, as_of). |
+
+Revision `0002` also added `transactions.decision_outcome` (the immutable authorisation
+outcome; `status` is overwritten by chargebacks), `addresses.verified_at`,
+`payment_methods.verified_at`, `network_events.is_mobile_network`, account-lifecycle event
+types (email/phone verification and change, MFA enrol/removal, address and payment-method
+verification - none carries contact details) and one query-plan-justified index.
 
 Key decisions:
 
@@ -149,8 +162,10 @@ Key decisions:
   intel per observation so "country changed" and "ASN changed" are computable later even if
   the intel for an IP changes.
 * **Point-in-time safety.** Labels carry `labelled_at`; synthetic legitimate labels are only
-  "known" at the end of the observation window. Stage 2/3 must only use data with
-  timestamps ≤ the scored event, which the schema supports via indexed timestamps.
+  "known" at the end of the observation window. Counters and "latest" attributes on entity
+  rows (device/IP counters, `last_seen_at`, `user_devices.is_trusted`, current intel,
+  `transactions.status`) are *current-state caches*: convenient operationally, never read
+  by feature engineering, which derives everything from timestamped rows (see FEATURES.md).
 * **Money is exact.** `BIGINT` minor units plus ISO 4217 code, with currency exponents
   (JPY 0, BHD 3). Floats are rejected at the event boundary.
 * **Portable enums.** Enums are `VARCHAR` + named `CHECK` constraints, identical on both
@@ -215,7 +230,39 @@ address = fraud" or "VPN = fraud". `users.synthetic_scenario` records the genera
 scenario for analysis and must never be used as a model feature (a test enforces that the
 feature catalogue does not reference it).
 
-## 8. Extending the platform
+## 8. Feature engineering (Stage 2)
+
+Summary (details and every feature in [FEATURES.md](FEATURES.md)):
+
+* **Definitions are data.** `fraud_ai/features/definitions.py` declares 107 features
+  (type, category, nullability, units, bounds, applicability, sources, leakage notes). A
+  released feature version is immutable and its fingerprint is pinned in the tests.
+* **One history layer.** `fraud_ai/features/history.py` holds every query. Each query is
+  bounded by `<= :as_of`, excludes the scored event, reads no mutable caches and aggregates
+  in the database. Statements are built once with bind parameters, so the number of queries
+  per vector is constant (about 17 on average) whatever the account's history size.
+* **Explicit missing data.** Values and missing reasons (`unknown`, `not_observed`,
+  `not_applicable`) are separate; there are no sentinel values.
+* **Deterministic and hashed.** Canonical JSON (fixed float precision) hashed with SHA-256
+  produces identical vectors on SQLite and PostgreSQL.
+* **Snapshots.**
+  * `feature_snapshots` rows are unique per (event, version, as_of).
+  * Persisting the same vector twice is idempotent.
+  * A recomputation that disagrees raises a drift error; nothing is overwritten.
+  * Loading a snapshot verifies the stored payload against its hash.
+* **Labels stay outside vectors.** `fraud_ai.datasets` resolves labels separately under
+  `label-policy-1`:
+  * only labels known at the cutoff count;
+  * negatives must have matured;
+  * events with unknown or impossible labels are refused, with the reason recorded.
+* **Stage 2 does not include:** trained models, fraud decisions, feature weights, or any
+  claim about fraud reduction.
+
+## 9. Extending the platform
+
+* **New feature / changed feature:** add a new feature version (definitions + a pipeline
+  entry in `fraud_ai/features/extractor.py`); never edit a released version. Regenerate the
+  FEATURES.md catalogue with `fraud-ai features catalog --format markdown`.
 
 * **New event type:** add to `EventType`, add a payload schema to `PAYLOAD_SCHEMAS`, add a
   handler in `EventProcessor`, then add an Alembic migration (the enum CHECK constraint

@@ -3,7 +3,7 @@
 Each stage builds only on what the previous stages have made trustworthy. We do not jump
 ahead: models are only as good as the data and features beneath them.
 
-## Stage 1: Database and event architecture ✅ (this commit)
+## Stage 1: Database and event architecture ✅
 
 * Python package with a `fraud-ai` CLI and `python -m fraud_ai`.
 * Typed configuration from environment variables; production safety guards.
@@ -15,20 +15,34 @@ ahead: models are only as good as the data and features beneath them.
 * Deterministic synthetic scenarios for future ML experimentation.
 * Security rules: no PAN/CVV/PIN/password storage, keyed hashing, log redaction.
 
-## Stage 2: Feature engineering
+## Stage 2: Feature engineering ✅
 
-* Implement every feature in `fraud_ai/features/catalog.py` as **point-in-time** SQL/Python
-  (only data with timestamps ≤ the scored event).
-* A versioned feature vector (`feature_version`) and feature snapshots referenced by
-  `model_predictions.feature_snapshot_reference`.
-* Leakage tests: the features for an event must not change when later events are added.
-* `fraud-ai features build` / `features inspect` commands.
-* The first concrete rule set for the rules engine, expressed over features.
+* 107 point-in-time features in 11 categories, `fraud-features-1.0.0`, with
+  machine-readable definitions, a pinned fingerprint and the generated FEATURES.md.
+* An explicit missing-data model (`unknown`, `not_observed`, `not_applicable`), with no
+  sentinel values.
+* Deterministic SHA-256 hashing; `feature_snapshots` (migration `0002`) that are
+  idempotent, drift-detecting and tamper-evident.
+* Leakage tests:
+  * the canonical 10:00/11:00 test;
+  * label leakage (chargebacks that arrive later);
+  * a full-history versus truncated-history property test;
+  * cache corruption;
+  * mutation checks.
+* Batch extraction and a training-dataset builder with a documented label availability
+  policy. Labels are returned separately.
+* CLI: `features catalog|show|snapshot|validate`, `dataset build`.
+* Deferred: a concrete rule set for the rules engine. Rules are policy and should be
+  written against the Stage 4 evaluation results, not guessed.
 
 ## Stage 3: Baseline fraud models
 
 * Logistic regression, random forest and gradient-boosted trees implementing `FraudModel`.
-* Time-based train/validation/test splits (no random shuffling across time).
+* Time-based train/validation/test splits (no random shuffling across time), built with
+  `fraud-ai dataset build` and its label-availability policy.
+* Model-owned preprocessing of missing reasons (indicator columns / native handling),
+  recorded with the model version; `model_predictions.feature_snapshot_reference` points at
+  `feature_snapshots`.
 * Artefacts in `MODEL_DIRECTORY`, registered in `model_versions` with dataset and feature
   versions.
 * `fraud-ai train` and `fraud-ai score`.

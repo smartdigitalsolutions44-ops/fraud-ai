@@ -197,6 +197,7 @@ class _Profile:
     avg_amount: float
     login_rate_per_day: float
     known_devices: set[str] = field(default_factory=set)
+    mfa_enabled: bool = False
 
 
 @dataclass
@@ -228,6 +229,9 @@ class SyntheticDataGenerator:
         self._vpn_ips = [f"198.51.100.{i}" for i in range(10, 40)]  # TEST-NET-2
         self._hosting_ips = [f"203.0.113.{i}" for i in range(10, 60)]  # TEST-NET-3
         self._tor_ips = [f"203.0.113.{i}" for i in range(200, 206)]
+        # One fraud ring operates several takeovers from shared infrastructure.
+        self._ring_ips = [f"203.0.113.{i}" for i in (70, 71)]
+        self._ring_device: _DeviceProfile | None = None
 
     # ------------------------------------------------------------------ helpers
     def _uuid(self) -> uuid.UUID:
@@ -366,7 +370,54 @@ class SyntheticDataGenerator:
             device=primary.identifier,
             session_id=session,
         )
+        self._onboarding_verifications(profile, created, session)
         return profile
+
+    def _onboarding_verifications(self, profile: _Profile, created: datetime, session: str) -> None:
+        """Typical post-signup verifications (they carry no contact details)."""
+        device = profile.primary_device.identifier
+        if self.rng.random() < 0.95:
+            self._emit(
+                EventType.EMAIL_VERIFIED,
+                created + timedelta(minutes=10),
+                profile.user_id,
+                {"method": "email_link"},
+                device=device,
+                session_id=session,
+            )
+        if self.rng.random() < 0.6:
+            self._emit(
+                EventType.PHONE_VERIFIED,
+                created + timedelta(hours=20),
+                profile.user_id,
+                {"method": "sms_code"},
+                device=device,
+            )
+        if self.rng.random() < 0.35:
+            profile.mfa_enabled = True
+            self._emit(
+                EventType.MFA_ENABLED,
+                created + timedelta(days=2),
+                profile.user_id,
+                {"method": "totp"},
+                device=device,
+            )
+        if self.rng.random() < 0.8:
+            self._emit(
+                EventType.PAYMENT_METHOD_VERIFIED,
+                created + timedelta(minutes=5),
+                profile.user_id,
+                {"payment_method_id": str(profile.payment_method_id), "method": "3ds"},
+                device=device,
+                session_id=session,
+            )
+        if self.rng.random() < 0.7:
+            self._emit(
+                EventType.ADDRESS_VERIFIED,
+                created + timedelta(days=1),
+                profile.user_id,
+                {"address_id": str(profile.home_address_id), "method": "avs"},
+            )
 
     def _card(self, pm_id: uuid.UUID, issuer_country: str) -> dict[str, Any]:
         return {
@@ -579,6 +630,13 @@ class SyntheticDataGenerator:
             device=profile.primary_device.identifier,
             session_id=session,
         )
+        if self.rng.random() < 0.6:
+            self._emit(
+                EventType.ADDRESS_VERIFIED,
+                move + timedelta(days=self.rng.randint(1, 3)),
+                profile.user_id,
+                {"address_id": str(new_address), "method": "postal"},
+            )
         profile.home_address_id = new_address
         profile.home_network = new_net
         profile.home_town = new_town
@@ -606,7 +664,13 @@ class SyntheticDataGenerator:
         self._routine_activity(profile, self.start, attack - timedelta(hours=2))
 
         attacker_dev = self._device(DeviceType.DESKTOP)
-        if self.rng.random() < 0.6:
+        if self.rng.random() < 0.5:
+            # Fraud ring: the same attacker device and hosting IPs across several victims.
+            if self._ring_device is None:
+                self._ring_device = self._device(DeviceType.DESKTOP)
+            attacker_dev = self._ring_device
+            attacker_net = _network(self.rng.choice(self._ring_ips), _HOSTING[1])
+        elif self.rng.random() < 0.6:
             asn = self.rng.choice(_HOSTING)
             attacker_net = _network(self.rng.choice(self._hosting_ips), asn)
         else:
@@ -637,6 +701,21 @@ class SyntheticDataGenerator:
             session_id=session,
         )
         login, session = self._login(profile, t + timedelta(minutes=9), attacker_dev, attacker_net)
+        # Lock the owner out: change the email, sometimes the phone, remove MFA.
+        for kind, probability, offset in (
+            (EventType.EMAIL_CHANGED, 0.6, 10),
+            (EventType.PHONE_CHANGED, 0.25, 11),
+            (EventType.MFA_DISABLED, 0.8 if profile.mfa_enabled else 0.0, 11),
+        ):
+            if self.rng.random() < probability:
+                self._emit(
+                    kind,
+                    t + timedelta(minutes=offset, seconds=30),
+                    profile.user_id,
+                    {"network": attacker_net, "device": attacker_dev.context},
+                    device=attacker_dev.identifier,
+                    session_id=session,
+                )
         drop_town = self.rng.choice(_FOREIGN_TOWNS)
         drop_address = self._uuid()
         self._emit(

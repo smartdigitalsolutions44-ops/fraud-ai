@@ -10,6 +10,11 @@ Design notes
   keyed HMAC hashes. Raw IPs are only stored when STORE_RAW_IP is enabled.
 * Money is stored as integer minor units plus an ISO 4217 currency code.
 * Card numbers, CVV, PINs and passwords have no column anywhere in this schema.
+* Counters and "latest" attributes on entity rows (``devices.successful_logins``,
+  ``network_identities.distinct_user_count``, ``user_devices.is_trusted``, ``last_seen_at``,
+  ``transactions.status`` ...) are *current-state caches*. They are not point-in-time safe
+  and are never read by feature engineering, which derives everything from timestamped
+  event/observation rows instead.
 """
 
 from __future__ import annotations
@@ -55,6 +60,7 @@ from fraud_ai.core.enums import (
     SecurityEventType,
     SignalSource,
     TransactionChannel,
+    TransactionDecision,
     TransactionStatus,
     UserStatus,
 )
@@ -244,6 +250,7 @@ class NetworkEvent(Base):
     is_known_proxy: Mapped[bool | None] = mapped_column(Boolean)
     is_tor: Mapped[bool | None] = mapped_column(Boolean)
     is_datacenter: Mapped[bool | None] = mapped_column(Boolean)
+    is_mobile_network: Mapped[bool | None] = mapped_column(Boolean)
     proxy_confidence: Mapped[float | None] = mapped_column(Float)
 
     network_identity: Mapped[NetworkIdentity] = relationship()
@@ -294,6 +301,9 @@ class Address(Base):
     added_at: Mapped[datetime]
     superseded_at: Mapped[datetime | None]
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true())
+    # First successful verification (e.g. AVS / postal). Point-in-time: verified at T iff
+    # verified_at <= T.
+    verified_at: Mapped[datetime | None]
     replaces_address_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("addresses.address_id")
     )
@@ -323,6 +333,8 @@ class PaymentMethod(Base):
     issuer_country: Mapped[str | None] = mapped_column(String(2))
     fingerprint_hash: Mapped[str | None] = mapped_column(String(64), index=True)
     added_at: Mapped[datetime]
+    # First successful verification (e.g. 3-D Secure). Verified at T iff verified_at <= T.
+    verified_at: Mapped[datetime | None]
     created_event_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("events.event_id"))
 
     user: Mapped[User] = relationship(back_populates="payment_methods")
@@ -337,6 +349,10 @@ class Transaction(Base):
         Index("ix_transactions_user_id_occurred_at", "user_id", "occurred_at"),
         Index("ix_transactions_payment_method_id", "payment_method_id"),
         Index("ix_transactions_status", "status"),
+        # Stage 2: "orders to this address" (point-in-time) was a sequential scan.
+        Index(
+            "ix_transactions_shipping_address_id_occurred_at", "shipping_address_id", "occurred_at"
+        ),
     )
 
     transaction_id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
@@ -359,11 +375,17 @@ class Transaction(Base):
     channel: Mapped[TransactionChannel] = mapped_column(
         enum_type(TransactionChannel, "transaction_channel")
     )
+    # Current lifecycle state - a later chargeback overwrites it, so it is NOT point-in-time
+    # safe. Feature code uses ``decision_outcome`` + ``decided_at`` and labels instead.
     status: Mapped[TransactionStatus] = mapped_column(
         enum_type(TransactionStatus, "transaction_status"), default=TransactionStatus.PENDING
     )
     occurred_at: Mapped[datetime]
     decided_at: Mapped[datetime | None]
+    # Immutable authorisation outcome, known from ``decided_at``.
+    decision_outcome: Mapped[TransactionDecision | None] = mapped_column(
+        enum_type(TransactionDecision, "transaction_decision", 16)
+    )
     decision_reason: Mapped[str | None] = mapped_column(String(64))
 
     user: Mapped[User] = relationship(back_populates="transactions")
@@ -567,6 +589,42 @@ class FraudLabel(Base):
     notes: Mapped[str | None] = mapped_column(Text)
 
     user: Mapped[User] = relationship(back_populates="fraud_labels")
+
+
+class FeatureSnapshot(Base):
+    """The exact feature vector computed for an event, as of a point in time.
+
+    ``features`` holds the canonical payload (values + missing reasons) and ``feature_hash``
+    is the SHA-256 of its canonical JSON serialisation. Snapshots are immutable: the same
+    (event, feature_version, as_of_timestamp) always maps to one row, and a recomputation
+    that disagrees with the stored hash is reported as drift, never silently overwritten.
+    """
+
+    __tablename__ = "feature_snapshots"
+    __table_args__ = (
+        UniqueConstraint("event_id", "feature_version", "as_of_timestamp"),
+        CheckConstraint("length(feature_hash) = 64", name="feature_hash_sha256"),
+        CheckConstraint("source_event_count >= 0", name="source_event_count_non_negative"),
+        Index("ix_feature_snapshots_version_as_of", "feature_version", "as_of_timestamp"),
+        Index("ix_feature_snapshots_user_id", "user_id"),
+        Index("ix_feature_snapshots_transaction_id", "transaction_id"),
+    )
+
+    snapshot_id: Mapped[uuid.UUID] = _uuid_pk()
+    event_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("events.event_id"))
+    user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.user_id"))
+    transaction_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("transactions.transaction_id")
+    )
+    login_event_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("login_events.login_event_id")
+    )
+    feature_version: Mapped[str] = mapped_column(String(50))
+    generated_at: Mapped[datetime] = mapped_column(default=utcnow)
+    as_of_timestamp: Mapped[datetime]
+    features: Mapped[dict[str, Any]]
+    feature_hash: Mapped[str] = mapped_column(String(64))
+    source_event_count: Mapped[int] = mapped_column(Integer)
 
 
 ALL_TABLES = sorted(Base.metadata.tables)

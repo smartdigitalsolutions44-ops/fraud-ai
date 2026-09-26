@@ -29,7 +29,7 @@ def test_help_lists_only_real_commands(run) -> None:  # type: ignore[no-untyped-
     out = run("--help").output
     for command in ("db", "seed", "demo-data", "ingest-event", "system-status"):
         assert command in out
-    for future in ("score", "train", "evaluate", "investigate"):
+    for future in ("score", "train", "evaluate", "investigate"):  # not implemented yet
         assert f"  {future} " not in out
 
 
@@ -38,7 +38,7 @@ def test_db_lifecycle(run) -> None:  # type: ignore[no-untyped-def]
     assert status.exit_code == 0 and "<not initialised>" in status.output
     assert run("seed").exit_code != 0  # refuses before init
     init = run("db", "init")
-    assert init.exit_code == 0 and "revision 0001" in init.output
+    assert init.exit_code == 0 and "revision 0002" in init.output
     again = run("db", "init")
     assert again.exit_code != 0 and "already initialised" in again.output
     migrate = run("db", "migrate")
@@ -49,7 +49,7 @@ def test_db_lifecycle(run) -> None:  # type: ignore[no-untyped-def]
 
 def test_db_migrate_from_empty(run) -> None:  # type: ignore[no-untyped-def]
     result = run("db", "migrate")
-    assert result.exit_code == 0 and "<empty> -> 0001" in result.output
+    assert result.exit_code == 0 and "<empty> -> 0002" in result.output
 
 
 def test_seed_and_stats(run) -> None:  # type: ignore[no-untyped-def]
@@ -127,3 +127,135 @@ def test_python_dash_m_entry_point() -> None:
         [sys.executable, "-m", "fraud_ai", "--version"], capture_output=True, text=True, check=True
     )
     assert "fraud-ai, version 0.1.0" in proc.stdout
+
+
+# --------------------------------------------------------------------------- Stage 2
+def _seed_small(run) -> None:  # type: ignore[no-untyped-def]
+    run("db", "init")
+    result = run("seed", "--users", "12", "--days", "30", "--reference-time", "2026-05-01")
+    assert result.exit_code == 0, result.output
+
+
+def test_features_catalog(run) -> None:  # type: ignore[no-untyped-def]
+    table = run("features", "catalog")
+    assert table.exit_code == 0 and "fraud-features-1.0.0" in table.output
+    assert "account_age_days" in table.output
+    as_json = json.loads(run("features", "catalog", "--format", "json").output)
+    assert len(as_json["features"]) >= 100
+    assert "BEGIN GENERATED" in run("features", "catalog", "--format", "markdown").output
+    bad = run("features", "catalog", "--version", "nope")
+    assert bad.exit_code != 0 and "unknown feature version" in bad.output
+
+
+def test_features_show_snapshot_validate(run) -> None:  # type: ignore[no-untyped-def]
+    _seed_small(run)
+    from sqlalchemy import select
+
+    from fraud_ai.config.settings import get_settings
+    from fraud_ai.database import engine_from_settings, make_session_factory
+    from fraud_ai.database.models import EventRecord
+    from fraud_ai.features.context import SCORABLE_EVENT_TYPES
+
+    engine = engine_from_settings(get_settings())
+    with make_session_factory(engine)() as s:
+        event_id = str(
+            s.scalar(
+                select(EventRecord.event_id)
+                .where(EventRecord.event_type.in_(SCORABLE_EVENT_TYPES))
+                .order_by(EventRecord.occurred_at.desc())
+            )
+        )
+    shown = run("features", "show", event_id)
+    assert shown.exit_code == 0 and "hash" in shown.output and "<not_" in shown.output
+    payload = json.loads(run("features", "show", event_id, "--format", "json").output)
+    assert (
+        payload["feature_version"] == "fraud-features-1.0.0" and len(payload["feature_hash"]) == 64
+    )
+    later = json.loads(
+        run("features", "show", event_id, "--format", "json", "--as-of", "2026-06-01").output
+    )
+    assert later["as_of_timestamp"].startswith("2026-06-01")
+    assert run("features", "show", "not-a-uuid").exit_code != 0
+    missing = run("features", "show", str(uuid.uuid4()))
+    assert missing.exit_code != 0 and "unknown event" in missing.output
+
+    assert run("features", "snapshot").exit_code != 0  # needs ids or a range
+    first = run("features", "snapshot", "--start", "2026-04-25", "--end", "2026-05-01")
+    assert first.exit_code == 0 and " created" in first.output
+    again = run("features", "snapshot", "--start", "2026-04-25", "--end", "2026-05-01")
+    assert "0 created" in again.output
+    by_id = run("features", "snapshot", event_id)
+    assert by_id.exit_code == 0 and "0 created, 1 already present" in by_id.output
+    ok = run("features", "validate")
+    assert ok.exit_code == 0 and "0 failed" in ok.output
+
+    from sqlalchemy import update
+
+    from fraud_ai.database.models import FeatureSnapshot
+
+    with make_session_factory(engine)() as s:
+        s.execute(update(FeatureSnapshot).values(feature_hash="0" * 64))
+        s.commit()
+    engine.dispose()
+    broken = run("features", "validate", "--limit", "3")
+    assert broken.exit_code == 1 and "3 failed" in broken.output
+
+
+def test_dataset_build(run, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    _seed_small(run)
+    out = tmp_path / "ds"
+    result = run(
+        "dataset",
+        "build",
+        "--start",
+        "2026-04-01",
+        "--end",
+        "2026-05-01",
+        "--label-cutoff",
+        "2026-05-01",
+        "--output",
+        str(out),
+        "--maturity-days",
+        "0",
+        "--persist-snapshots",
+    )
+    assert result.exit_code == 0, result.output
+    manifest = json.loads((out / "manifest.json").read_text())
+    assert manifest["examples"] > 0 and manifest["snapshots_created"] > 0
+    assert (out / "features.jsonl").exists() and (out / "labels.jsonl").exists()
+    reuse = run(
+        "dataset",
+        "build",
+        "--start",
+        "2026-04-01",
+        "--end",
+        "2026-05-01",
+        "--label-cutoff",
+        "2026-05-01",
+        "--output",
+        str(tmp_path / "ds2"),
+        "--use-snapshots",
+        "--kind",
+        "transaction",
+        "--implicit-negatives",
+    )
+    assert reuse.exit_code == 0, reuse.output
+    too_late = run(
+        "dataset",
+        "build",
+        "--start",
+        "2026-04-01",
+        "--end",
+        "2026-05-02",
+        "--label-cutoff",
+        "2026-05-01",
+        "--output",
+        str(tmp_path / "x"),
+    )
+    assert too_late.exit_code != 0 and "label cutoff" in too_late.output
+
+
+def test_system_status_reports_feature_engine(run) -> None:  # type: ignore[no-untyped-def]
+    run("db", "init")
+    out = run("system-status").output
+    assert "fraud-features-1.0.0" in out and "snapshots" in out

@@ -390,3 +390,105 @@ def test_rejected_events_leave_no_partial_state(
     assert after == before
     # The session remains usable after a rejected event.
     _login(processor, uid, minutes=30)
+
+
+# --------------------------------------------------------------------------- Stage 2 events
+def test_decision_outcome_is_immutable_across_chargeback(
+    session: Session, processor: EventProcessor
+) -> None:
+    from fraud_ai.core.enums import TransactionDecision
+
+    uid = create_user(processor)
+    addr, pm = _setup_purchase_prereqs(processor, uid)
+    txn_id = _create_txn(processor, uid, pm, addr)
+    processor.process(
+        make_event(
+            EventType.TRANSACTION_APPROVED,
+            uid,
+            {"transaction_id": str(txn_id)},
+            ts=T0 + timedelta(minutes=11),
+        )
+    )
+    processor.process(
+        make_event(
+            EventType.CHARGEBACK,
+            uid,
+            {"transaction_id": str(txn_id), "reason_code": "4837"},
+            ts=T0 + timedelta(days=9),
+        )
+    )
+    txn = session.get(Transaction, txn_id)
+    assert txn is not None and txn.status is TransactionStatus.CHARGEBACK
+    assert txn.decision_outcome is TransactionDecision.APPROVED
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "EMAIL_VERIFIED",
+        "EMAIL_CHANGED",
+        "PHONE_VERIFIED",
+        "PHONE_CHANGED",
+        "MFA_ENABLED",
+        "MFA_DISABLED",
+    ],
+)
+def test_lifecycle_events_become_security_events(
+    session: Session, processor: EventProcessor, kind: str
+) -> None:
+    uid = create_user(processor)
+    processor.process(
+        make_event(
+            EventType(kind), uid, {"method": "sms", "network": VPN_NET}, ts=T0 + timedelta(hours=1)
+        )
+    )
+    row = session.scalar(select(SecurityEvent).where(SecurityEvent.security_event_type == kind))
+    assert row is not None and row.details == {"method": "sms"}
+    assert row.network_identity_id is not None
+
+
+def test_lifecycle_payload_rejects_contact_details() -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        make_event(EventType.EMAIL_CHANGED, uuid.uuid4(), {"new_email": "a@example.com"})
+
+
+def test_verification_events(session: Session, processor: EventProcessor) -> None:
+    uid = create_user(processor)
+    addr, pm = _setup_purchase_prereqs(processor, uid)
+    first = T0 + timedelta(days=1)
+    processor.process(
+        make_event(EventType.ADDRESS_VERIFIED, uid, {"address_id": str(addr)}, ts=first)
+    )
+    processor.process(
+        make_event(
+            EventType.ADDRESS_VERIFIED, uid, {"address_id": str(addr)}, ts=first + timedelta(days=3)
+        )
+    )
+    processor.process(
+        make_event(EventType.PAYMENT_METHOD_VERIFIED, uid, {"payment_method_id": str(pm)}, ts=first)
+    )
+    assert session.get(Address, addr).verified_at == first  # type: ignore[union-attr]
+    assert session.get(PaymentMethod, pm).verified_at == first  # type: ignore[union-attr]
+    other = create_user(processor, device_id="device-Z")
+    for event in (
+        make_event(EventType.ADDRESS_VERIFIED, other, {"address_id": str(addr)}, ts=first),
+        make_event(
+            EventType.PAYMENT_METHOD_VERIFIED, other, {"payment_method_id": str(pm)}, ts=first
+        ),
+        make_event(EventType.ADDRESS_VERIFIED, uid, {"address_id": str(addr)}, ts=T0),
+        make_event(EventType.PAYMENT_METHOD_VERIFIED, uid, {"payment_method_id": str(pm)}, ts=T0),
+    ):
+        with pytest.raises(EventProcessingError):
+            processor.process(event)
+
+
+def test_network_observation_records_mobile_flag(
+    session: Session, processor: EventProcessor
+) -> None:
+    uid = create_user(
+        processor, net={**HOME_NET, "is_mobile_network": True, "network_type": "mobile"}
+    )
+    obs = session.scalar(select(NetworkEvent).where(NetworkEvent.user_id == uid))
+    assert obs is not None and obs.is_mobile_network is True
