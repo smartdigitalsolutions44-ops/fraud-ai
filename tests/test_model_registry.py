@@ -134,9 +134,20 @@ class _ConstantModel(FraudModel):
 
     def __init__(self, p: float = 0.6) -> None:
         self.p = p
+        self.seed, self.imbalance, self.hyperparameters, self.train_seconds = 0, "none", {}, None
 
-    def train(self, matrix, labels):  # type: ignore[no-untyped-def]
+    @property
+    def algorithm(self) -> str:
+        return "constant"
+
+    def train(self, matrix, labels, validation=None):  # type: ignore[no-untyped-def]
         self.p = sum(labels) / len(labels)
+
+    def manifest(self):  # type: ignore[no-untyped-def]
+        return {"kind": "const", "p": self.p}
+
+    def explain(self, matrix=None, labels=None, top_k=12):  # type: ignore[no-untyped-def]
+        return {"method": "none", "top_features": []}
 
     def predict_proba(self, matrix):  # type: ignore[no-untyped-def]
         import numpy as np
@@ -173,6 +184,9 @@ def test_fraud_model_interface(tmp_path: Path) -> None:
     assert model.evaluate(matrix, [1, 0, 1, 1]).metrics["recall"] == 1.0
     assert model.save(tmp_path / "m") == "digest"
     assert _ConstantModel.load(tmp_path / "m", "digest").p == 0.75
+    assert model.model_id == "const-0" and model.algorithm == "constant"
+    assert model.score_kind == "fraud_probability" and model.manifest()["kind"] == "const"
+    assert model.explain()["top_features"] == []
     with pytest.raises(ValueError):
         model.predict(matrix, threshold=2)
     with pytest.raises(TypeError):

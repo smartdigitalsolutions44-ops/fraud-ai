@@ -501,6 +501,19 @@ The moderate `device_age_days` shift is expected: accounts age during the window
 | Per-model report, 1,000 bootstrap iterations | 35–55 s |
 | Paired comparison | 106 s |
 
+### Stage 5 additions
+
+The same framework now also evaluates the neural network and the autoencoder:
+* `fraud-ai evaluate …` accepts `neural-network-<version>`;
+* walk-forward retrains a fresh network per fold, with early stopping on that fold's
+  validation period;
+* `fraud-ai evaluate complementarity A B [--anomaly V]` adds disagreement groups, A's
+  misses caught by B, and experimental combinations;
+* `fraud-ai anomaly evaluate` reports on anomaly scores. Those are *not* fraud
+  probabilities, and the fraud reports refuse them.
+
+The results on this world are in [NEURAL_MODELS.md](NEURAL_MODELS.md) §9.
+
 ## 13. What this does not show
 
 * **Real-world performance.** Nothing here measures real fraud, real customers or real

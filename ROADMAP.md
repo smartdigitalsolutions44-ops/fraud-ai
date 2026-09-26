@@ -89,18 +89,47 @@ Details are in [EVALUATION.md](EVALUATION.md). All evidence is synthetic.
   * a live drift service (Stage 8);
   * account-clustered bootstrap intervals.
 
-## Stage 5: Neural-network fraud model
+## Stage 5: Neural-network fraud models ✅
 
-* A feed-forward network (Dense, ReLU, Dropout, Dense, ReLU, sigmoid) implementing the same
-  `FraudModel` interface, evaluated with the Stage 4 framework against the baselines.
-* It is adopted only if the paired comparison shows a reliable difference on several
-  walk-forward folds and seeds. It gets no special trust.
+Details are in [NEURAL_MODELS.md](NEURAL_MODELS.md). All evidence is synthetic.
 
-## Stage 6: Anomaly detection
+* **Feed-forward network** (PyTorch, CPU-first) behind the same `FraudModel` contract.
+  * It uses the Stage 3 preprocessing and the baselines' exact split.
+  * Weighted `BCEWithLogitsLoss`; focal loss available.
+  * AdamW; early stopping on validation PR-AUC with the best checkpoint restored.
+  * Deterministic seeds.
+  * `state_dict`-only artefacts, verified by hash before loading.
+* **Model factory.** Training, scoring, walk-forward and evaluation handle every kind the
+  same way.
+* **Hyperparameter experiment runner** (36 configurations plus a loss comparison),
+  selected on validation only.
+* **Experimental autoencoder anomaly score.** It is not a fraud probability: scoring and
+  comparisons refuse it.
+* **Complementarity analysis:** disagreement groups, whether one model catches another's
+  misses, and combinations. Research only.
+* **CLI:**
+  * `train neural-network`;
+  * `neural experiments|training-history|inspect`;
+  * `anomaly train-autoencoder|evaluate`;
+  * `evaluate complementarity`.
+* **Result on the 1,000-user synthetic world:**
+  * gradient boosting remains stronger: PR-AUC +0.054 [−0.004, +0.115], McNemar p = 0.006;
+  * the network does not recover gradient boosting's misses;
+  * the anomaly score is a weak fraud signal but a useful drift indicator.
 
-* An autoencoder or isolation-based anomaly scores for behaviour without labels.
-* Sequence models over per-user event histories.
-* Anomaly scores become features/signals, not decisions.
+  No model or ensemble is adopted.
+
+## Stage 6: Sequence and behavioural models
+
+* **Sequence models** over each user's event history, such as a GRU or a small
+  transformer over recent logins, devices and transactions. They target the stealthy
+  takeovers that per-event features miss.
+* **Embeddings.** Categorical embeddings, and learned device and network embeddings, to
+  replace the one-hot block.
+* **Anomaly work.** Anomaly and drift scores (from Stage 5's autoencoder) become monitored
+  signals, not decisions.
+* **Evaluation.** Everything is judged with the Stage 4 framework: paired tests, several
+  seeds and walk-forward folds.
 
 ## Stage 7: Local offline LLM
 

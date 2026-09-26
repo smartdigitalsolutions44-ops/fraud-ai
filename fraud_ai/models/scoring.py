@@ -30,7 +30,8 @@ from fraud_ai.features.definitions import get_feature_set
 from fraud_ai.features.extractor import compute_vector
 from fraud_ai.features.snapshot import find_snapshot, load_vector, persist_snapshot
 from fraud_ai.features.vector import FraudFeatureVector
-from fraud_ai.models.estimators import BaselineModel
+from fraud_ai.models.base import FRAUD_PROBABILITY, FraudModel
+from fraud_ai.models.factory import is_anomaly_model, kind_for_name, load_model
 from fraud_ai.models.matrix import FeatureVersionMismatchError, ModelMatrix
 from fraud_ai.models.predictions import record_prediction
 from fraud_ai.models.preprocessing import SUPPORTED_PREPROCESSING_VERSIONS, PreprocessingError
@@ -63,7 +64,7 @@ class ScoreResult:
         return self.prediction.fraud_probability
 
 
-def load_registered_model(model: ModelVersion) -> BaselineModel:
+def load_registered_model(model: ModelVersion) -> FraudModel:
     """Load a registered model after verifying compatibility and artefact integrity."""
     if model.artifact_sha256 is None:
         raise ScoringError(f"{model.model_name}-{model.model_version} has no artefact digest")
@@ -82,7 +83,9 @@ def load_registered_model(model: ModelVersion) -> BaselineModel:
             f"{model.model_name}-{model.model_version} was trained on a different "
             f"{model.feature_version} catalogue"
         )
-    return BaselineModel.load(Path(model.model_path), model.artifact_sha256)
+    return load_model(
+        kind_for_name(model.model_name), Path(model.model_path), model.artifact_sha256
+    )
 
 
 def trained_kinds(model: ModelVersion) -> set[str]:
@@ -115,9 +118,14 @@ def score_event(
     model: ModelVersion,
     *,
     threshold: float | None = None,
-    loaded: BaselineModel | None = None,
+    loaded: FraudModel | None = None,
     snapshot: FeatureSnapshot | None = None,
 ) -> ScoreResult:
+    if is_anomaly_model(model.model_name):
+        raise ScoringError(
+            f"{model.model_name}-{model.model_version} produces anomaly scores, not fraud "
+            "probabilities; it cannot be stored as a fraud prediction"
+        )
     event = session.get(EventRecord, event_id)
     if event is None:
         raise ScoringError(f"unknown event {event_id}")
@@ -136,6 +144,8 @@ def score_event(
             f"{sorted(kinds)} events, not {vector.event_kind.value}"
         )
     loaded = loaded or load_registered_model(model)
+    if loaded.score_kind != FRAUD_PROBABILITY:  # pragma: no cover - guarded by name above
+        raise ScoringError("only fraud-probability models can be scored")
     probability = float(
         loaded.predict_proba(ModelMatrix.from_vectors([vector], model.feature_version))[0]
     )

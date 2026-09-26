@@ -117,9 +117,11 @@ fraud_ai/
   datasets/    label-availability policy, label resolution, training-dataset builder
   models/      FraudModel contract, leakage-guarded ModelMatrix, preprocessing, time
                splits, metrics/threshold analysis, baselines, training, scoring, registry
+               neural.py / anomaly.py (PyTorch), factory (every model kind), experiments,
+               grouped permutation importance
   evaluation/  bootstrap/paired statistics, walk-forward, calibration, costs and bands,
                scenario/cohort/error analysis, comparison and ensembles, drift baseline,
-               shortcut detection, reproducible JSON reports
+               shortcut detection, complementarity, anomaly evaluation, JSON reports
   models/      FraudModel interface, model-version registry, prediction storage
   rules/       Rule / RuleEngine
   risk/        RiskPolicy / RiskEngine
@@ -312,11 +314,32 @@ Summary (details in [EVALUATION.md](EVALUATION.md)):
 * **Artefacts.** Sorted JSON under `evaluation/<model-id>/`, reproducible apart from
   `generated_at`.
 
-## 11. Extending the platform
+## 11. Neural models (Stage 5)
 
-* **New model:** add a `ModelSpec` (or a new `FraudModel` implementation), train it on the
-  same prepared split as the baselines, and compare with `fraud-ai compare-models` and
-  `fraud-ai evaluate compare` (paired tests on identical examples).
+Summary (details in [NEURAL_MODELS.md](NEURAL_MODELS.md)):
+
+* **Same contract, same split.** The feed-forward network implements `FraudModel` and uses
+  the Stage 3 preprocessing and the baselines' exact time-ordered split. Only the
+  *validation* split is offered to `train()`, for early stopping.
+* **One factory.** `fraud_ai/models/factory.py` builds and loads every kind. Training,
+  scoring, walk-forward retraining and evaluation contain no neural special cases.
+* **Safe artefacts.**
+  * `state_dict` tensors only, loaded with `weights_only=True`.
+  * A SHA-256 digest is verified before anything is read, and every file is listed in
+    `artifact_hashes.json`.
+* **Determinism.** Seeded, deterministic algorithms and one CPU thread give bit-identical
+  CPU results. The PyTorch version and device are recorded.
+* **Anomaly scores are a different kind of output.** Models declare a `score_kind`, and
+  `anomaly_score` models are refused by scoring, the default comparisons and fraud
+  evaluation contexts. The autoencoder is research: it is never combined into a
+  production score.
+
+## 12. Extending the platform
+
+* **New model:** add a `ModelSpec`, or a new `FraudModel` implementation registered in
+  `fraud_ai/models/factory.py`. Train it on the same prepared split as the baselines, then
+  compare with `fraud-ai compare-models`, `fraud-ai evaluate compare` (paired tests on
+  identical examples) and `fraud-ai evaluate complementarity`.
 
 
 * **New feature / changed feature:** add a new feature version (definitions + a pipeline

@@ -31,10 +31,11 @@ from typing import Any
 import numpy as np
 
 from fraud_ai.core.enums import LabelValue
+from fraud_ai.core.exceptions import FraudAIError
 from fraud_ai.datasets.labels import LabelDecision
 from fraud_ai.evaluation.context import EvaluationContext, ScoredModel
 from fraud_ai.evaluation.stats import bootstrap_metrics
-from fraud_ai.models.estimators import KIND_BY_NAME, SPECS, BaselineModel, ModelError
+from fraud_ai.models.factory import build_model, kind_for_name
 from fraud_ai.models.metrics import evaluate_scores, select_threshold
 from fraud_ai.utils.time import ensure_utc
 
@@ -77,7 +78,7 @@ def walk_forward(
     period = timedelta(days=config.period_days)
     origin = min(times).replace(hour=0, minute=0, second=0, microsecond=0)
     last = max(times)
-    kind = KIND_BY_NAME[model.record.model_name]
+    kind = kind_for_name(model.record.model_name)
     # Folds need a full validation period; the most recent ``max_folds`` are evaluated, so
     # sparse early history cannot use up the fold budget.
     last_fold = int((last - origin) / period) - config.initial_train_periods - 1
@@ -128,8 +129,8 @@ def walk_forward(
             fold["skipped"] = "training rows lack both classes or the test period is empty"
             folds.append(fold)
             continue
-        fold_model = BaselineModel(
-            SPECS[kind],
+        fold_model = build_model(
+            kind,
             f"{model.record.model_version}+fold{k + 1}",
             seed=model.model.seed,
             imbalance=model.model.imbalance,
@@ -137,17 +138,28 @@ def walk_forward(
             feature_version=model.model.feature_version,
         )
         try:
-            fold_model.train(prepared.matrix.take(train_idx), train_y)
-        except ModelError as exc:  # pragma: no cover - guarded above
+            # The fold's own validation period (as-of labels) is offered for early stopping.
+            validation = (prepared.matrix.take(val_idx), val_y) if val_idx else None
+            fold_model.train(prepared.matrix.take(train_idx), train_y, validation=validation)
+        except FraudAIError as exc:  # pragma: no cover - guarded above
             fold["skipped"] = str(exc)
             folds.append(fold)
             continue
         y_test = prepared.y[test_idx]
         p_test = fold_model.predict_proba(prepared.matrix.take(test_idx))
         selected = None
+        fold["validation_pr_auc"] = None
         if val_idx and len(set(val_y)) == 2:
             p_val = fold_model.predict_proba(prepared.matrix.take(val_idx))
             selected = select_threshold(np.asarray(val_y), p_val)
+            fold["validation_pr_auc"] = evaluate_scores(np.asarray(val_y), p_val, model.threshold)[
+                "pr_auc"
+            ]
+        if summary := getattr(fold_model, "training_summary", None):
+            fold["training"] = {
+                k: summary.get(k)
+                for k in ("epochs_completed", "best_epoch", "selection_metric", "pos_weight")
+            }
         metrics = evaluate_scores(y_test, p_test, model.threshold)
         metrics.pop("confusion_matrix", None)
         fold["model"] = {

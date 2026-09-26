@@ -1,8 +1,8 @@
 # Models
 
 Stage 3 establishes **baselines**: logistic regression, random forest and gradient
-boosting, trained and evaluated so that later models (neural networks in Stage 5, anomaly
-detection in Stage 6) have something honest to beat. Nothing in this stage makes a fraud
+boosting, trained and evaluated so that later models have something honest to beat. The
+Stage 5 neural network and autoencoder are documented in [NEURAL_MODELS.md](NEURAL_MODELS.md). Nothing in this stage makes a fraud
 decision. Model outputs are probabilities, stored as predictions; thresholds are evaluated,
 never enforced.
 
@@ -324,3 +324,18 @@ Confidence intervals, walk-forward evaluation, calibration, cost curves, scenari
 and error analysis, and paired model comparison are described in
 [EVALUATION.md](EVALUATION.md). The command is `fraud-ai evaluate ...`. The Stage 3
 reproducibility check is now `fraud-ai evaluate reproduce <model>`.
+
+## 14. Neural models (Stage 5)
+
+The feed-forward network (`fraud-ai train neural-network`) uses the same `FraudModel`
+contract, preprocessing, split, registry, scoring and evaluation as the baselines. It is
+built and loaded through `fraud_ai/models/factory.py`.
+
+On the 1,000-user synthetic world, **gradient boosting remains stronger**:
+* gradient boosting minus the network is +0.054 PR-AUC [−0.004, +0.115];
+* McNemar at 0.5: gradient boosting is right on 11 events where the network is wrong,
+  against 1 the other way (p = 0.006);
+* the network does not recover any of gradient boosting's misses.
+
+The details, the experimental autoencoder and all caveats are in
+[NEURAL_MODELS.md](NEURAL_MODELS.md).

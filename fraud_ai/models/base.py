@@ -19,6 +19,12 @@ import numpy.typing as npt
 from fraud_ai.models.matrix import ModelMatrix
 
 Labels = Sequence[int] | npt.NDArray[np.int_]
+Validation = tuple[ModelMatrix, Labels]
+
+# What ``predict_proba`` returns. Anomaly models return an anomaly score in [0, 1], which is
+# NOT a fraud probability; scoring and fraud comparisons refuse them.
+FRAUD_PROBABILITY = "fraud_probability"
+ANOMALY_SCORE = "anomaly_score"
 
 
 @dataclass(frozen=True)
@@ -41,9 +47,28 @@ class FraudModel(ABC):
     model_name: str
     version: str
     feature_version: str
+    seed: int
+    imbalance: str
+    hyperparameters: dict[str, Any]
+    train_seconds: float | None
+    score_kind: str = FRAUD_PROBABILITY
+
+    @property
+    def model_id(self) -> str:
+        return f"{self.model_name}-{self.version}"
+
+    @property
+    @abstractmethod
+    def algorithm(self) -> str:
+        """Recorded in ``model_versions.algorithm``."""
 
     @abstractmethod
-    def train(self, matrix: ModelMatrix, labels: Labels) -> None: ...
+    def train(
+        self, matrix: ModelMatrix, labels: Labels, validation: Validation | None = None
+    ) -> None:
+        """Fit on the training split. ``validation`` is the time-ordered validation split
+        (used for early stopping by models that need it; ignored by the others). The test
+        split is never passed to training."""
 
     @abstractmethod
     def predict_proba(self, matrix: ModelMatrix) -> npt.NDArray[np.float64]:
@@ -58,6 +83,16 @@ class FraudModel(ABC):
     def evaluate(
         self, matrix: ModelMatrix, labels: Labels, threshold: float = 0.5
     ) -> EvaluationResult: ...
+
+    @abstractmethod
+    def manifest(self) -> dict[str, Any]:
+        """Reproducibility record stored with the artefact and the model version."""
+
+    @abstractmethod
+    def explain(
+        self, matrix: ModelMatrix | None = None, labels: Labels | None = None, top_k: int = 12
+    ) -> dict[str, Any]:
+        """Inspection only - never used by any decision."""
 
     @abstractmethod
     def save(self, directory: Path) -> str:

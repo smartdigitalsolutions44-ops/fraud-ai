@@ -1,0 +1,105 @@
+"""One place that knows every model kind.
+
+Training, scoring, walk-forward evaluation and the CLI build and load models through
+this factory, so a new kind needs no special-casing anywhere else.
+
+* **Supervised kinds** output P(fraud): ``logistic``, ``random-forest``,
+  ``gradient-boosting`` and ``neural-network``.
+* **Anomaly kinds** output an anomaly score, which is *not* a fraud probability:
+  ``autoencoder``. Scoring and fraud-model comparisons refuse them.
+
+PyTorch is imported lazily, so commands that never touch a neural model stay fast.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+from fraud_ai.features.definitions import DEFAULT_FEATURE_VERSION
+from fraud_ai.models.base import FraudModel
+from fraud_ai.models.estimators import SPECS, BaselineModel, ModelError
+
+NEURAL_KIND = "neural-network"
+AUTOENCODER_KIND = "autoencoder"
+SUPERVISED_KINDS: tuple[str, ...] = (*SPECS, NEURAL_KIND)
+ANOMALY_KINDS: tuple[str, ...] = (AUTOENCODER_KIND,)
+MODEL_NAMES: dict[str, str] = {
+    **{kind: spec.model_name for kind, spec in SPECS.items()},
+    NEURAL_KIND: "neural-network",
+    AUTOENCODER_KIND: "autoencoder",
+}
+KIND_BY_NAME: dict[str, str] = {name: kind for kind, name in MODEL_NAMES.items()}
+
+
+def model_name(kind: str) -> str:
+    try:
+        return MODEL_NAMES[kind]
+    except KeyError:
+        raise ModelError(f"unknown model kind {kind!r}") from None
+
+
+def kind_for_name(name: str) -> str:
+    try:
+        return KIND_BY_NAME[name]
+    except KeyError:
+        raise ModelError(f"unknown model name {name!r}") from None
+
+
+def is_anomaly_model(name: str) -> bool:
+    return KIND_BY_NAME.get(name) in ANOMALY_KINDS
+
+
+def build_model(
+    kind: str,
+    version: str = "1.0.0",
+    *,
+    seed: int = 42,
+    imbalance: str = "class_weight",
+    hyperparameters: dict[str, Any] | None = None,
+    feature_version: str = DEFAULT_FEATURE_VERSION,
+) -> FraudModel:
+    if kind in SPECS:
+        return BaselineModel(
+            SPECS[kind],
+            version,
+            seed=seed,
+            imbalance=imbalance,
+            hyperparameters=hyperparameters,
+            feature_version=feature_version,
+        )
+    if kind == NEURAL_KIND:
+        from fraud_ai.models.neural import NeuralNetworkModel
+
+        return NeuralNetworkModel(
+            version,
+            seed=seed,
+            imbalance=imbalance,
+            hyperparameters=hyperparameters,
+            feature_version=feature_version,
+        )
+    if kind == AUTOENCODER_KIND:
+        from fraud_ai.models.anomaly import AutoencoderModel
+
+        return AutoencoderModel(
+            version,
+            seed=seed,
+            hyperparameters=hyperparameters,
+            feature_version=feature_version,
+        )
+    raise ModelError(f"unknown model kind {kind!r}")
+
+
+def load_model(kind: str, directory: Path, expected_sha256: str) -> FraudModel:
+    """Verify the artefact digest, then load (the loaders check before deserialising)."""
+    if kind in SPECS:
+        return BaselineModel.load(directory, expected_sha256)
+    if kind == NEURAL_KIND:
+        from fraud_ai.models.neural import NeuralNetworkModel
+
+        return NeuralNetworkModel.load(directory, expected_sha256)
+    if kind == AUTOENCODER_KIND:
+        from fraud_ai.models.anomaly import AutoencoderModel
+
+        return AutoencoderModel.load(directory, expected_sha256)
+    raise ModelError(f"unknown model kind {kind!r}")

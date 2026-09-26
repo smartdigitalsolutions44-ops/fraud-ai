@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import sys
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TextIO
@@ -637,6 +637,19 @@ _KIND_CHOICES = {
 
 
 def _training_options(func: Any) -> Any:
+    return _training_options_with()(func)
+
+
+def _training_options_with(
+    threshold: float = 0.5, threshold_help: str = "Evaluation threshold (not a decision)."
+) -> Callable[[Any], Any]:
+    def decorate(func: Any) -> Any:
+        return _apply_training_options(func, threshold, threshold_help)
+
+    return decorate
+
+
+def _apply_training_options(func: Any, threshold: float, threshold_help: str) -> Any:
     options = [
         click.option(
             "--start",
@@ -691,9 +704,9 @@ def _training_options(func: Any) -> Any:
         click.option(
             "--threshold",
             type=click.FloatRange(0, 1),
-            default=0.5,
+            default=threshold,
             show_default=True,
-            help="Evaluation threshold (not a decision).",
+            help=threshold_help,
         ),
         click.option("--version", "model_version", default="1.0.0", show_default=True),
         click.option(
@@ -713,36 +726,48 @@ def _training_options(func: Any) -> Any:
     return func
 
 
-def _run_train(app: AppContext, kinds: list[str], **opts: Any) -> None:
-    app.require_migrated()
+def _training_config(opts: dict[str, Any], hyperparameters: dict[str, Any] | None = None) -> Any:
     from datetime import timedelta
 
     from fraud_ai.features.definitions import EventKind
-    from fraud_ai.models.report import SYNTHETIC_NOTE, comparison_table
     from fraud_ai.models.splits import SplitConfig
-    from fraud_ai.models.training import TrainingConfig, run_training
+    from fraud_ai.models.training import TrainingConfig
+
+    split = SplitConfig(
+        opts["train_fraction"],
+        opts["validation_fraction"],
+        _utc(opts["train_end"]),
+        _utc(opts["validation_end"]),
+    )
+    return TrainingConfig(
+        start=_utc(opts["start"]),
+        end=_utc(opts["end"]),
+        label_cutoff=_utc(opts["label_cutoff"]),
+        maturity=timedelta(days=opts["maturity_days"]),
+        implicit_negatives=opts["implicit_negatives"],
+        kinds=tuple(EventKind(k) for k in _KIND_CHOICES[opts["kind"]]),
+        split=split,
+        seed=opts["seed"],
+        imbalance=opts["imbalance"],
+        threshold=opts["threshold"],
+        version=opts["model_version"],
+        persist_snapshots=opts["persist_snapshots"],
+        hyperparameters=hyperparameters or {},
+    )
+
+
+def _run_train(
+    app: AppContext,
+    kinds: list[str],
+    hyperparameters: dict[str, Any] | None = None,
+    **opts: Any,
+) -> None:
+    app.require_migrated()
+    from fraud_ai.models.report import SYNTHETIC_NOTE, comparison_table
+    from fraud_ai.models.training import run_training
 
     try:
-        split = SplitConfig(
-            opts["train_fraction"],
-            opts["validation_fraction"],
-            _utc(opts["train_end"]),
-            _utc(opts["validation_end"]),
-        )
-        config = TrainingConfig(
-            start=_utc(opts["start"]),
-            end=_utc(opts["end"]),
-            label_cutoff=_utc(opts["label_cutoff"]),
-            maturity=timedelta(days=opts["maturity_days"]),
-            implicit_negatives=opts["implicit_negatives"],
-            kinds=tuple(EventKind(k) for k in _KIND_CHOICES[opts["kind"]]),
-            split=split,
-            seed=opts["seed"],
-            imbalance=opts["imbalance"],
-            threshold=opts["threshold"],
-            version=opts["model_version"],
-            persist_snapshots=opts["persist_snapshots"],
-        )
+        config = _training_config(opts, hyperparameters)
         with session_scope(make_session_factory(app.engine)) as session:
             run = run_training(session, kinds, config, app.settings.model_directory)
             summary = run.prepared.summary()
@@ -787,7 +812,7 @@ def _run_train(app: AppContext, kinds: list[str], **opts: Any) -> None:
 
 @cli.group()
 def train() -> None:
-    """Train baseline models on a time-ordered split (no decisions are made)."""
+    """Train fraud models on a time-ordered split (no decisions are made)."""
 
 
 def _train_command(name: str, kinds: list[str], help_text: str) -> None:
@@ -806,6 +831,95 @@ _train_command(
     ["logistic", "random-forest", "gradient-boosting"],
     "Train all three baselines on the same split.",
 )
+
+
+def _int_list(value: str) -> list[int]:
+    try:
+        sizes = [int(v) for v in value.split(",") if v.strip()]
+    except ValueError:
+        raise click.BadParameter("expected comma-separated integers, e.g. 128,64,32") from None
+    if not sizes or min(sizes) < 1:
+        raise click.BadParameter("layer sizes must be positive integers")
+    return sizes
+
+
+def _neural_options(func: Any) -> Any:
+    options = [
+        click.option(
+            "--hidden", default="128,64,32", show_default=True, help="Hidden layer sizes."
+        ),
+        click.option(
+            "--activation", type=click.Choice(["relu", "gelu"]), default="relu", show_default=True
+        ),
+        click.option(
+            "--normalization",
+            type=click.Choice(["layernorm", "batchnorm", "none"]),
+            default="layernorm",
+            show_default=True,
+        ),
+        click.option("--dropout", type=click.FloatRange(0, 0.95), default=0.3, show_default=True),
+        click.option("--batch-size", type=click.IntRange(1), default=256, show_default=True),
+        click.option(
+            "--learning-rate",
+            type=click.FloatRange(min=0, min_open=True),
+            default=1e-3,
+            show_default=True,
+        ),
+        click.option("--weight-decay", type=click.FloatRange(0), default=1e-4, show_default=True),
+        click.option("--max-epochs", type=click.IntRange(1), default=60, show_default=True),
+        click.option("--patience", type=click.IntRange(1), default=8, show_default=True),
+        click.option(
+            "--loss",
+            type=click.Choice(["weighted_bce", "focal"]),
+            default="weighted_bce",
+            show_default=True,
+        ),
+        click.option("--focal-gamma", type=click.FloatRange(0), default=2.0, show_default=True),
+        click.option(
+            "--device",
+            type=click.Choice(["auto", "cpu", "cuda"]),
+            default="cpu",
+            show_default=True,
+            help="auto = CUDA when available.",
+        ),
+    ]
+    for option in reversed(options):
+        func = option(func)
+    return func
+
+
+def _neural_hyperparameters(opts: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "hidden_sizes": _int_list(opts.pop("hidden")),
+        **{
+            k: opts.pop(k)
+            for k in (
+                "activation",
+                "normalization",
+                "dropout",
+                "batch_size",
+                "learning_rate",
+                "weight_decay",
+                "max_epochs",
+                "patience",
+                "loss",
+                "focal_gamma",
+                "device",
+            )
+        },
+    }
+
+
+@train.command("neural-network")
+@_training_options
+@_neural_options
+@pass_app
+def train_neural(app: AppContext, /, **opts: Any) -> None:
+    """Train the feed-forward neural network (PyTorch) on the same split as the baselines.
+
+    Early stopping uses validation PR-AUC; the test split is only evaluated."""
+    hyperparameters = _neural_hyperparameters(opts)
+    _run_train(app, ["neural-network"], {"neural-network": hyperparameters}, **opts)
 
 
 @cli.group()
@@ -964,13 +1078,15 @@ def _out_dir(app: AppContext, opts: dict[str, Any], name: str) -> Path:
     return Path(base) / name
 
 
-def _with_context(app: AppContext, refs: list[str], body: Any) -> None:
+def _with_context(
+    app: AppContext, refs: list[str], body: Any, *, allow_anomaly: bool = False
+) -> None:
     app.require_migrated()
     from fraud_ai.evaluation.context import build_context
 
     with session_scope(make_session_factory(app.engine)) as session:
         try:
-            ctx = build_context(session, refs)
+            ctx = build_context(session, refs, allow_anomaly=allow_anomaly)
             body(session, ctx)
         except FraudAIError as exc:
             raise click.ClickException(str(exc)) from None
@@ -1265,6 +1381,11 @@ def _default_comparison_refs(app: AppContext) -> list[str]:
         rows = list_model_versions(session)
         if not rows:
             raise click.ClickException("no models registered")
+        from fraud_ai.models.factory import is_anomaly_model
+
+        rows = [r for r in rows if not is_anomaly_model(r.model_name)]
+        if not rows:
+            raise click.ClickException("no fraud models registered")
         counts = Counter(r.dataset_fingerprint for r in rows)
         latest = max(rows, key=lambda r: r.training_timestamp).dataset_fingerprint
         best = max(counts, key=lambda fp: (counts[fp], fp == latest))
@@ -1472,6 +1593,368 @@ def system_status(app: AppContext) -> None:
         click.echo(f"  snapshots     {snapshots}")
     llm_state = f"configured: {s.local_llm_endpoint}" if s.local_llm_endpoint else "not configured"
     click.echo(f"local LLM       {llm_state} (Stage 7)")
+
+
+# --------------------------------------------------------------------------- neural (Stage 5)
+@cli.group()
+def neural() -> None:
+    """Neural-network experiments and inspection (PyTorch)."""
+
+
+def _load_neural(session: Any, model_ref: str) -> tuple[Any, Any]:
+    from fraud_ai.models.neural import NeuralNetworkModel
+    from fraud_ai.models.registry import resolve_model
+    from fraud_ai.models.scoring import load_registered_model
+
+    record = resolve_model(session, model_ref)
+    loaded = load_registered_model(record)
+    if not isinstance(loaded, NeuralNetworkModel):
+        raise click.ClickException(f"{model_ref} is not a neural-network model")
+    return record, loaded
+
+
+@neural.command("experiments")
+@_training_options
+@click.option("--quick", is_flag=True, help="Tiny 2-configuration grid (smoke test).")
+@click.option("--max-epochs", type=click.IntRange(1), default=60, show_default=True)
+@click.option("--patience", type=click.IntRange(1), default=8, show_default=True)
+@click.option("--no-focal", is_flag=True, help="Skip the focal-loss comparison.")
+@click.option(
+    "--output-dir",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=None,
+    help="Default: EVALUATION_DIRECTORY/neural_experiments/<dataset>.",
+)
+@pass_app
+def neural_experiments(
+    app: AppContext,
+    /,
+    quick: bool,
+    max_epochs: int,
+    patience: int,
+    no_focal: bool,
+    output_dir: Path | None,
+    **opts: Any,
+) -> None:
+    """Small hyperparameter grid, selected on validation PR-AUC (test split untouched)."""
+    app.require_migrated()
+    from fraud_ai.evaluation.reports import write_report
+    from fraud_ai.models.experiments import ExperimentGrid, run_experiments
+    from fraud_ai.models.training import prepare_data
+
+    base = {"max_epochs": max_epochs, "patience": patience}
+    grid = (
+        ExperimentGrid(
+            hidden_sizes=((16,), (32, 16)),
+            dropout=(0.1,),
+            learning_rate=(1e-3,),
+            weight_decay=(0.0,),
+            base=base,
+            compare_focal_loss=not no_focal,
+        )
+        if quick
+        else ExperimentGrid(base=base, compare_focal_loss=not no_focal)
+    )
+
+    def progress(i: int, n: int, r: dict[str, Any]) -> None:
+        pr = r["validation_pr_auc"]
+        click.echo(
+            f"[{i:>2}/{n}] hidden={r['hyperparameters']['hidden_sizes']} "
+            f"dropout={r['hyperparameters']['dropout']} "
+            f"lr={r['hyperparameters']['learning_rate']} "
+            f"wd={r['hyperparameters']['weight_decay']}  val PR-AUC "
+            f"{'n/a' if pr is None else f'{pr:.4f}'}  epoch {r['best_epoch']}/"
+            f"{r['epochs_completed']}  {r['train_seconds']:.1f}s"
+        )
+
+    try:
+        config = _training_config(opts)
+        with session_scope(make_session_factory(app.engine)) as session:
+            prepared = prepare_data(session, config)
+            result = run_experiments(
+                prepared, grid, seed=config.seed, imbalance=config.imbalance, progress=progress
+            )
+    except FraudAIError as exc:
+        raise click.ClickException(str(exc)) from None
+    directory = output_dir or (
+        Path(app.settings.evaluation_directory)
+        / "neural_experiments"
+        / result["dataset_fingerprint"][:16]
+    )
+    path = write_report(directory, "experiments", result)
+    sel = result["selected"]
+    click.echo(
+        f"selected (validation PR-AUC {sel['validation_pr_auc']}): "
+        f"{json.dumps(sel['hyperparameters'], sort_keys=True)}"
+    )
+    if loss := result["loss_experiment"]:
+        click.echo(
+            f"focal vs weighted BCE (validation PR-AUC difference): "
+            f"{loss['difference_validation_pr_auc']}"
+        )
+    click.echo("test split not used; nothing registered. SYNTHETIC data.")
+    click.echo(f"written {path}")
+
+
+@neural.command("training-history")
+@click.argument("model_ref")
+@click.option("--format", "fmt", type=click.Choice(["table", "json"]), default="table")
+@pass_app
+def neural_training_history(app: AppContext, model_ref: str, fmt: str) -> None:
+    """Per-epoch losses, PR-AUC and learning rate; marks the restored (best) epoch."""
+    app.require_migrated()
+    with session_scope(make_session_factory(app.engine)) as session:
+        try:
+            _, model = _load_neural(session, model_ref)
+        except FraudAIError as exc:
+            raise click.ClickException(str(exc)) from None
+    if fmt == "json":
+        click.echo(
+            json.dumps(
+                {"history": model.history, "summary": model.training_summary}, indent=2, default=str
+            )
+        )
+        return
+
+    def f(v: Any, d: int = 4) -> str:
+        return "n/a" if v is None else f"{v:.{d}f}"
+
+    best = model.training_summary.get("best_epoch")
+    click.echo(
+        f"{'epoch':>5}{'train loss':>12}{'val loss':>10}{'train PR':>10}"
+        f"{'val PR':>9}{'val ROC':>9}{'lr':>10}"
+    )
+    for h in model.history:
+        mark = "  <- restored" if h["epoch"] == best else ""
+        click.echo(
+            f"{h['epoch']:>5}{f(h['train_loss']):>12}{f(h['validation_loss']):>10}"
+            f"{f(h['train_pr_auc']):>10}{f(h['validation_pr_auc']):>9}"
+            f"{f(h['validation_roc_auc']):>9}{h['learning_rate']:>10.1e}{mark}"
+        )
+    summary = model.training_summary
+    click.echo(
+        f"selection: {summary.get('selection_metric')} on "
+        f"{summary.get('validation_source')}; best epoch {best} of "
+        f"{summary.get('epochs_completed')}"
+    )
+    for flag in summary.get("overfitting_flags", []):
+        click.echo(f"WARNING: {flag}")
+
+
+@neural.command("inspect")
+@click.argument("model_ref")
+@pass_app
+def neural_inspect(app: AppContext, model_ref: str) -> None:
+    """Architecture, parameter count, configuration, training summary and importance."""
+    app.require_migrated()
+    with session_scope(make_session_factory(app.engine)) as session:
+        try:
+            record, model = _load_neural(session, model_ref)
+        except FraudAIError as exc:
+            raise click.ClickException(str(exc)) from None
+        explanation = (record.metrics or {}).get("explanation", {})
+        manifest = model.manifest()
+    click.echo(
+        f"{model.model_id}  parameters {manifest['parameter_count']}  "
+        f"inputs {manifest['output_columns']}  optimiser {manifest['optimizer']}"
+    )
+    for layer in manifest["architecture"]:
+        click.echo(f"  {layer}")
+    click.echo(f"hyperparameters {json.dumps(manifest['hyperparameters'], sort_keys=True)}")
+    t = manifest["training"]
+    click.echo(
+        f"loss {t.get('loss')} (pos_weight {t.get('pos_weight', 0):.1f})  best epoch "
+        f"{t.get('best_epoch')}/{t.get('epochs_completed')}  selection "
+        f"{t.get('selection_metric')}"
+    )
+    click.echo(f"environment {json.dumps(manifest['environment'], sort_keys=True)}")
+    for flag in t.get("overfitting_flags", []):
+        click.echo(f"WARNING: {flag}")
+    if explanation:
+        click.echo(f"inspection ({explanation.get('method')}) - not used by any decision:")
+        for item in explanation.get("top_features", [])[:12]:
+            click.echo(f"  {item['feature']:<42} {item['importance']:+.4f}")
+    click.echo(
+        "A neural network is not inherently interpretable; permutation importance "
+        "describes reliance on this (SYNTHETIC) data, not causes."
+    )
+
+
+# --------------------------------------------------------------------------- anomaly (Stage 5)
+@cli.group()
+def anomaly() -> None:
+    """EXPERIMENTAL autoencoder anomaly scores (unusual behaviour - not fraud probability)."""
+
+
+@anomaly.command("train-autoencoder")
+@_training_options_with(0.95, "Anomaly-score threshold used for evaluation (not a decision).")
+@click.option("--hidden", default="64,32", show_default=True, help="Encoder layer sizes.")
+@click.option("--bottleneck", type=click.IntRange(1), default=8, show_default=True)
+@click.option("--dropout", type=click.FloatRange(0, 0.95), default=0.0, show_default=True)
+@click.option("--batch-size", type=click.IntRange(1), default=256, show_default=True)
+@click.option(
+    "--learning-rate", type=click.FloatRange(min=0, min_open=True), default=1e-3, show_default=True
+)
+@click.option("--weight-decay", type=click.FloatRange(0), default=1e-5, show_default=True)
+@click.option("--max-epochs", type=click.IntRange(1), default=80, show_default=True)
+@click.option("--patience", type=click.IntRange(1), default=8, show_default=True)
+@click.option(
+    "--device", type=click.Choice(["auto", "cpu", "cuda"]), default="cpu", show_default=True
+)
+@pass_app
+def anomaly_train(app: AppContext, /, **opts: Any) -> None:
+    """Train on legitimate training rows only; outputs an anomaly score, never a decision."""
+    hyperparameters = {
+        "hidden_sizes": _int_list(opts.pop("hidden")),
+        **{
+            k: opts.pop(k)
+            for k in (
+                "bottleneck",
+                "dropout",
+                "batch_size",
+                "learning_rate",
+                "weight_decay",
+                "max_epochs",
+                "patience",
+                "device",
+            )
+        },
+    }
+    _run_train(app, ["autoencoder"], {"autoencoder": hyperparameters}, **opts)
+    click.echo(
+        "The anomaly score is NOT a fraud probability; it cannot be used with `fraud-ai score`."
+    )
+
+
+def _anomaly_ref(ref: str) -> str:
+    return ref if ref.startswith("autoencoder") else f"autoencoder-{ref}"
+
+
+@anomaly.command("evaluate")
+@click.argument("version")
+@click.option(
+    "--compare-with",
+    "compare_ref",
+    default=None,
+    help="A fraud model on the same dataset: where does the anomaly score help it?",
+)
+@_eval_options
+@pass_app
+def anomaly_evaluate(
+    app: AppContext, /, version: str, compare_ref: str | None, **opts: Any
+) -> None:
+    """Anomaly-score distributions, PR-AUC, FPR at anomaly thresholds, scenarios, shift."""
+    from fraud_ai.evaluation import reports
+    from fraud_ai.evaluation.anomaly_report import anomaly_evaluation
+    from fraud_ai.evaluation.complementarity import complementarity
+    from fraud_ai.models.factory import is_anomaly_model
+
+    ref = _anomaly_ref(version)
+    refs = [ref] + ([compare_ref] if compare_ref else [])
+
+    def body(session: Any, ctx: Any) -> None:
+        model = ctx.model(ref)
+        if not is_anomaly_model(model.record.model_name):
+            raise EvaluationFailed(f"{ref} is not an anomaly model")
+        report = anomaly_evaluation(ctx, model, iterations=opts["iterations"], seed=opts["seed"])
+        if compare_ref:
+            base = ctx.model(compare_ref)
+            if is_anomaly_model(base.record.model_name):
+                raise EvaluationFailed("--compare-with must be a fraud model")
+            report["versus_fraud_model"] = complementarity(
+                ctx, base, model, iterations=opts["iterations"], seed=opts["seed"]
+            )
+        body_report = ctx.header("anomaly", model=model.model_id, **report)
+        path = reports.write_report(_out_dir(app, opts, ref), "anomaly", body_report)
+        d = report["distributions"]
+        click.echo("anomaly score (NOT a fraud probability) - test split:")
+        for cls in ("fraud", "legitimate"):
+            x = d[cls]
+            if x["n"]:
+                click.echo(
+                    f"  {cls:<11} n={x['n']:<6} median {x['p50']:.3f}  p90 "
+                    f"{x['p90']:.3f}  mean {x['mean']:.3f}"
+                )
+        click.echo(
+            f"  PR-AUC {_ci(report['ranking']['pr_auc'])}  ROC-AUC "
+            f"{_ci(report['ranking']['roc_auc'])}  prevalence "
+            f"{report['ranking']['prevalence']:.4f}"
+        )
+        for f in report["flagging"]:
+            rec = "n/a" if f["recall"] is None else f"{f['recall']:.3f}"
+            fpr = "n/a" if f["fpr"] is None else f"{f['fpr']:.4f}"
+            click.echo(
+                f"  >= {f['threshold']:.2f}: flags {100 * f['flagged_share']:.1f}%  "
+                f"recall {rec}  FPR {fpr}"
+            )
+        if compare_ref:
+            m = report["versus_fraud_model"]["base_misses_and_false_alarms"]
+            click.echo(
+                f"  {compare_ref} missed {m['base_false_negatives']} fraud; anomaly >= "
+                f"threshold on {m['caught_by_other']} of them"
+            )
+        click.echo(f"written {path}")
+
+    _with_context(app, refs, body, allow_anomaly=True)
+
+
+class EvaluationFailed(FraudAIError):
+    pass
+
+
+@evaluate.command("complementarity")
+@click.argument("base_ref")
+@click.argument("other_ref")
+@click.option(
+    "--anomaly",
+    "anomaly_ref",
+    default=None,
+    help="Optional autoencoder version/ref to include as a separate signal.",
+)
+@_eval_options
+@pass_app
+def evaluate_complementarity(
+    app: AppContext, /, base_ref: str, other_ref: str, anomaly_ref: str | None, **opts: Any
+) -> None:
+    """Does OTHER add signal where BASE fails? Disagreement groups, misses, combinations."""
+    from fraud_ai.evaluation import reports
+    from fraud_ai.evaluation.complementarity import complementarity
+    from fraud_ai.models.factory import is_anomaly_model
+
+    refs = [base_ref, other_ref] + ([_anomaly_ref(anomaly_ref)] if anomaly_ref else [])
+
+    def body(session: Any, ctx: Any) -> None:
+        base, other = ctx.model(base_ref), ctx.model(other_ref)
+        for m in (base, other):
+            if is_anomaly_model(m.record.model_name):
+                raise EvaluationFailed(f"{m.model_id} is an anomaly model; pass it as --anomaly")
+        extra = ctx.model(_anomaly_ref(anomaly_ref)) if anomaly_ref else None
+        report = complementarity(
+            ctx, base, other, anomaly=extra, iterations=opts["iterations"], seed=opts["seed"]
+        )
+        path = reports.write_report(
+            _out_dir(app, opts, f"comparisons/{ctx.fingerprint[:16]}"),
+            f"complementarity_{base.model_id}_vs_{other.model_id}",
+            ctx.header("complementarity", settings=_settings_from(opts).to_dict(), **report),
+        )
+        for name, g in report["disagreement"]["groups"].items():
+            rate = "n/a" if g["fraud_rate"] is None else f"{g['fraud_rate']:.3f}"
+            click.echo(f"  {name:<64} {g['events']:>6} events  fraud {g['fraud']:>4}  rate {rate}")
+        m = report["base_misses_and_false_alarms"]
+        click.echo(
+            f"{base.model_id} false negatives {m['base_false_negatives']}: caught by "
+            f"{other.model_id} {m['caught_by_other']}; false positives "
+            f"{m['base_false_positives']}: cleared {m['cleared_by_other']}"
+        )
+        for name, c in report["combinations"].items():
+            click.echo(
+                f"  {name:<28} PR-AUC {_ci(c['pr_auc'])}  vs base "
+                f"{_ci(c['vs_base_pr_auc_difference'])}  adds signal: "
+                f"{c['adds_signal']}"
+            )
+        click.echo(f"written {path}")
+
+    _with_context(app, refs, body, allow_anomaly=anomaly_ref is not None)
 
 
 def main() -> None:  # pragma: no cover

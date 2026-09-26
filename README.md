@@ -3,7 +3,7 @@
 A locally runnable fraud-prevention software platform written in Python. It is not a web
 application.
 
-The current release covers **Stages 1 to 4**:
+The current release covers **Stages 1 to 5**:
 
 * **Stage 1:** the software core, the event architecture, the fraud database (PostgreSQL in
   production, SQLite for local use), migrations, synthetic data and the CLI.
@@ -18,10 +18,17 @@ The current release covers **Stages 1 to 4**:
   * scenario, cohort and error analysis;
   * paired model comparison, a drift baseline and reproducible JSON reports.
 
+* **Stage 5:** neural models on PyTorch:
+  * a feed-forward fraud classifier trained on the same split as the baselines, with
+    early stopping, hyperparameter experiments and safe, hash-verified checkpoints;
+  * an experimental autoencoder anomaly score (not a fraud probability);
+  * complementarity analysis against gradient boosting.
+
 No fraud *decisions* are made yet, and all bundled data is synthetic. Evaluation results
 describe synthetic data only; they are not real-world detection rates or savings. See
 [ARCHITECTURE.md](ARCHITECTURE.md), [FEATURES.md](FEATURES.md), [MODELS.md](MODELS.md),
-[EVALUATION.md](EVALUATION.md) and [ROADMAP.md](ROADMAP.md).
+[EVALUATION.md](EVALUATION.md), [NEURAL_MODELS.md](NEURAL_MODELS.md) and
+[ROADMAP.md](ROADMAP.md).
 
 ## Install
 
@@ -76,6 +83,17 @@ fraud-ai evaluate drift-baseline --model $M                 # PSI / Jensen-Shann
 fraud-ai evaluate report $M                                 # every per-model artefact at once
 fraud-ai seed --users 300 --fraud-multiplier 2              # prevalence experiments
 python scripts/evaluation_benchmark.py --users 1000         # larger synthetic benchmark
+
+# Stage 5 - neural models (PyTorch, CPU by default; compared with the baselines, not trusted)
+fraud-ai neural experiments --quick                         # small grid, validation PR-AUC only
+fraud-ai train neural-network --hidden 128,64,32 --dropout 0.3
+fraud-ai neural training-history neural-network-1.0.0       # per-epoch losses and PR-AUC
+fraud-ai neural inspect neural-network-1.0.0                # architecture, params, importance
+fraud-ai evaluate report neural-network-1.0.0               # every Stage 4 report
+fraud-ai anomaly train-autoencoder                          # EXPERIMENTAL anomaly score
+fraud-ai anomaly evaluate 1.0.0 --compare-with gradient-boosting-1.0.0
+fraud-ai evaluate complementarity gradient-boosting-1.0.0 neural-network-1.0.0 --anomaly 1.0.0
+python scripts/neural_benchmark.py --seed-users 1000        # full Stage 5 benchmark
 python -m fraud_ai --help        # equivalent entry point
 ```
 

@@ -227,6 +227,8 @@ def fast_training_config(**overrides: Any) -> Any:
         "hyperparameters": {
             "random-forest": {"n_estimators": 60},
             "gradient-boosting": {"max_iter": 80},
+            "neural-network": {"hidden_sizes": [32, 16], "max_epochs": 15, "patience": 4},
+            "autoencoder": {"hidden_sizes": [32], "bottleneck": 6, "max_epochs": 15},
         },
     }
     base.update(overrides)

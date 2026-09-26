@@ -19,7 +19,8 @@ from sqlalchemy.orm import Session
 from fraud_ai.core.exceptions import FraudAIError
 from fraud_ai.database.models import ModelVersion, User
 from fraud_ai.evaluation.stats import Array, IntArray
-from fraud_ai.models.estimators import BaselineModel
+from fraud_ai.models.base import FraudModel
+from fraud_ai.models.factory import is_anomaly_model
 from fraud_ai.models.registry import resolve_model
 from fraud_ai.models.scoring import load_registered_model
 from fraud_ai.models.training import PreparedData, config_from_manifest, prepare_data
@@ -40,7 +41,7 @@ def pseudonym(event_id: uuid.UUID) -> str:
 @dataclass
 class ScoredModel:
     record: ModelVersion
-    model: BaselineModel
+    model: FraudModel
     scores: dict[str, Array] = field(default_factory=dict)
 
     @property
@@ -101,10 +102,19 @@ class EvaluationContext:
         }
 
 
-def build_context(session: Session, refs: list[str]) -> EvaluationContext:
+def build_context(
+    session: Session, refs: list[str], *, allow_anomaly: bool = False
+) -> EvaluationContext:
+    """``allow_anomaly`` admits anomaly-score models; fraud reports and comparisons leave
+    it off so an anomaly score is never read as a fraud probability."""
     if not refs:
         raise EvaluationError("no models given")
     records = [resolve_model(session, r) for r in refs]
+    if not allow_anomaly and (bad := [r for r in records if is_anomaly_model(r.model_name)]):
+        raise EvaluationError(
+            f"{bad[0].model_name}-{bad[0].model_version} outputs anomaly scores, not fraud "
+            "probabilities; use `fraud-ai anomaly evaluate`"
+        )
     fingerprints = {r.dataset_fingerprint for r in records}
     if len(fingerprints) != 1:
         raise EvaluationError(

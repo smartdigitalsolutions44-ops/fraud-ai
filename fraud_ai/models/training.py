@@ -31,7 +31,13 @@ from fraud_ai.database.models import EventRecord, FraudLabel, ModelVersion
 from fraud_ai.datasets.builder import TrainingDataset, TrainingDatasetBuilder
 from fraud_ai.datasets.labels import LabelAvailabilityPolicy
 from fraud_ai.features.definitions import DEFAULT_FEATURE_VERSION, EventKind, get_feature_set
-from fraud_ai.models.estimators import SPECS, BaselineModel
+from fraud_ai.models.base import FRAUD_PROBABILITY, FraudModel
+from fraud_ai.models.factory import (
+    ANOMALY_KINDS,
+    SUPERVISED_KINDS,
+    build_model,
+    model_name,
+)
 from fraud_ai.models.matrix import ModelMatrix
 from fraud_ai.models.metrics import (
     DEFAULT_THRESHOLDS,
@@ -120,7 +126,7 @@ def dataset_fingerprint(ds: TrainingDataset, kinds: Sequence[EventKind]) -> str:
 
 def environment() -> dict[str, str]:
     versions = {}
-    for dist in ("scikit-learn", "numpy", "scipy", "joblib", "sqlalchemy", "pydantic"):
+    for dist in ("scikit-learn", "numpy", "scipy", "joblib", "sqlalchemy", "pydantic", "torch"):
         try:
             versions[dist] = metadata.version(dist)
         except metadata.PackageNotFoundError:  # pragma: no cover
@@ -233,7 +239,7 @@ def overfitting_warnings(metrics: dict[str, dict[str, Any]]) -> list[str]:
 
 
 def measure_inference(
-    model: BaselineModel, matrix: ModelMatrix, repeats: int = 100
+    model: FraudModel, matrix: ModelMatrix, repeats: int = 100
 ) -> dict[str, float]:
     """Model-only latency (preprocessing + estimator); database time is excluded."""
     n = len(matrix)
@@ -258,7 +264,7 @@ def measure_inference(
 
 @dataclass
 class ModelResult:
-    model: BaselineModel
+    model: FraudModel
     metrics: dict[str, Any]
     warnings: list[str]
     explanation: dict[str, Any]
@@ -273,8 +279,8 @@ class ModelResult:
 
 
 def train_and_evaluate(prepared: PreparedData, kind: str, config: TrainingConfig) -> ModelResult:
-    model = BaselineModel(
-        SPECS[kind],
+    model = build_model(
+        kind,
         config.version,
         seed=config.seed,
         imbalance=config.imbalance,
@@ -283,7 +289,9 @@ def train_and_evaluate(prepared: PreparedData, kind: str, config: TrainingConfig
     )
     train_m, train_y = prepared.part("train")
     started = time.perf_counter()
-    model.train(train_m, train_y)
+    # The validation split is offered for early stopping (neural models); the test split
+    # is never passed to training.
+    model.train(train_m, train_y, validation=prepared.part("validation"))
     wall = time.perf_counter() - started
     scores = {
         name: model.predict_proba(prepared.part(name)[0])
@@ -307,6 +315,10 @@ def train_and_evaluate(prepared: PreparedData, kind: str, config: TrainingConfig
         ),
     }
     warnings = overfitting_warnings(by_split)
+    summary = getattr(model, "training_summary", {}) or {}
+    warnings += [f"training history: {flag}" for flag in summary.get("overfitting_flags", [])]
+    if model.score_kind != FRAUD_PROBABILITY:
+        metrics["score_kind"] = model.score_kind
     val_m, val_y = prepared.part("validation")
     explanation = model.explain(val_m, val_y)
     timings = {
@@ -325,6 +337,7 @@ def training_manifest(
         "created_at": utcnow().isoformat(),
         "environment": environment(),
         "seed": config.seed,
+        "kind": result.model.manifest()["kind"],
         "model": result.model.manifest(),
         "dataset": prepared.summary(),
         "split": config.split.describe(),
@@ -339,11 +352,37 @@ def training_manifest(
 
 
 def check_version_free(session: Session, kind: str, version: str, model_directory: Path) -> None:
-    name = SPECS[kind].model_name
+    name = model_name(kind)
     if get_model_version(session, name, version) is not None:
         raise TrainingError(f"{name}-{version} is already registered; choose a new --version")
     if (model_directory / f"{name}-{version}").exists():
         raise TrainingError(f"{model_directory / f'{name}-{version}'} already exists")
+
+
+def write_run_files(
+    directory: Path, prepared: PreparedData, result: ModelResult, config: TrainingConfig
+) -> None:
+    """``training_manifest.json`` and ``metrics.json`` next to the artefact (documentation;
+    not part of the prediction digest). The per-file hash list is refreshed if present."""
+    (directory / "training_manifest.json").write_text(
+        json.dumps(
+            training_manifest(prepared, result, config), indent=2, sort_keys=True, default=str
+        )
+    )
+    (directory / "metrics.json").write_text(
+        json.dumps(
+            {"metrics": result.metrics, "warnings": result.warnings, "timings": result.timings},
+            indent=2,
+            sort_keys=True,
+            default=str,
+        )
+    )
+    hashes = directory / "artifact_hashes.json"
+    if hashes.exists():
+        from fraud_ai.models.torch_support import write_hashes
+
+        stored = json.loads(hashes.read_text())
+        write_hashes(directory, stored["artifact_sha256"], tuple(stored["digest_covers"]))
 
 
 @dataclass
@@ -361,7 +400,7 @@ def run_training(
     *,
     register: bool = True,
 ) -> TrainingRun:
-    unknown = set(kinds) - set(SPECS)
+    unknown = set(kinds) - set(SUPERVISED_KINDS) - set(ANOMALY_KINDS)
     if unknown:
         raise TrainingError(f"unknown model kinds {sorted(unknown)}")
     for kind in kinds:  # fail before any expensive work
@@ -380,6 +419,7 @@ def run_training(
         path = model_directory / result.model_id
         result.artifact_sha256 = result.model.save(path)
         result.artifact_path = path
+        write_run_files(path, prepared, result, config)
         if register:
             sizes = prepared.split.sizes()
             result.registered = register_model_version(
@@ -396,8 +436,13 @@ def run_training(
                     "warnings": result.warnings,
                     "explanation": result.explanation,
                 },
-                algorithm=result.model.spec.algorithm,
-                notes="baseline; metrics describe the configured (possibly synthetic) dataset",
+                algorithm=result.model.algorithm,
+                notes=(
+                    "anomaly score (not a fraud probability); metrics describe the configured "
+                    "(possibly synthetic) dataset"
+                    if result.model.score_kind != FRAUD_PROBABILITY
+                    else "metrics describe the configured (possibly synthetic) dataset"
+                ),
                 dataset_fingerprint=prepared.fingerprint,
                 feature_catalogue_fingerprint=fs.fingerprint(),
                 preprocessing_version=PREPROCESSING_VERSION,

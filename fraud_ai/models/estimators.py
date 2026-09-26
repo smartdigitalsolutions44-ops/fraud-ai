@@ -29,7 +29,7 @@ from threadpoolctl import ThreadpoolController
 
 from fraud_ai.core.exceptions import FraudAIError
 from fraud_ai.features.definitions import DEFAULT_FEATURE_VERSION
-from fraud_ai.models.base import EvaluationResult, FraudModel, Labels
+from fraud_ai.models.base import EvaluationResult, FraudModel, Labels, Validation
 from fraud_ai.models.matrix import ModelMatrix
 from fraud_ai.models.metrics import evaluate_scores
 from fraud_ai.models.preprocessing import PreprocessingConfig, Preprocessor
@@ -146,8 +146,8 @@ class BaselineModel(FraudModel):
         self.train_seconds: float | None = None
 
     @property
-    def model_id(self) -> str:
-        return f"{self.model_name}-{self.version}"
+    def algorithm(self) -> str:
+        return self.spec.algorithm
 
     # ------------------------------------------------------------------ estimator
     def _build(self) -> Any:
@@ -178,7 +178,10 @@ class BaselineModel(FraudModel):
         return X[idx], y[idx]
 
     # ------------------------------------------------------------------ FraudModel
-    def train(self, matrix: ModelMatrix, labels: Labels) -> None:
+    def train(
+        self, matrix: ModelMatrix, labels: Labels, validation: Validation | None = None
+    ) -> None:
+        # The scikit-learn baselines do not early-stop, so ``validation`` is not used.
         y = np.asarray(labels, dtype=int)
         if len(y) != len(matrix):
             raise ModelError("labels and matrix differ in length")
