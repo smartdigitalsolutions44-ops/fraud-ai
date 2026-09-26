@@ -119,17 +119,32 @@ Details are in [NEURAL_MODELS.md](NEURAL_MODELS.md). All evidence is synthetic.
 
   No model or ensemble is adopted.
 
-## Stage 6: Sequence and behavioural models
+## Stage 6: Sequence models ✅
 
-* **Sequence models** over each user's event history, such as a GRU or a small
-  transformer over recent logins, devices and transactions. They target the stealthy
-  takeovers that per-event features miss.
-* **Embeddings.** Categorical embeddings, and learned device and network embeddings, to
-  replace the one-hot block.
-* **Anomaly work.** Anomaly and drift scores (from Stage 5's autoencoder) become monitored
-  signals, not decisions.
-* **Evaluation.** Everything is judged with the Stage 4 framework: paired tests, several
-  seeds and walk-forward folds.
+Details are in [SEQUENCE_MODELS.md](SEQUENCE_MODELS.md). All evidence is synthetic.
+
+* **Point-in-time user event sequences** (`fraud-sequence-1.0.0`, default window of 16
+  events plus the scored event, chosen on validation performance and cost).
+  * They are read only from the append-only `events` table.
+  * The definition is fingerprinted, the dataset records a digest of its sequences, and
+    extraction is mutation-tested for leakage.
+* **Models:** a GRU, a causal Transformer (2 layers, 4 heads) and a hybrid (GRU plus the
+  static features).
+  * They share one PyTorch training loop with the Stage 5 network, and go through the same
+    registry, scoring and Stage 4 evaluation.
+* **Generator:** temporal takeover attacks (A–E) and legitimate lookalikes.
+* **Analysis:** complementarity overlap (caught only by each model) and a
+  stealthy-takeover report.
+* **CLI:** `sequence build|inspect|compare|stealth-report`, `train gru|transformer|hybrid`.
+* **Result on the 1,000-user synthetic world:**
+  * gradient boosting remains stronger: GB − GRU +0.053 [+0.019, +0.098];
+  * the hybrid overlaps gradient boosting on PR-AUC, at a 1.4% FPR;
+  * the GRU catches one stealthy takeover that gradient boosting misses.
+
+  No sequence model is adopted.
+* **Deferred:**
+  * more worlds and seeds for the small-data walk-forward hint;
+  * categorical embeddings for the static model.
 
 ## Stage 7: Local offline LLM
 

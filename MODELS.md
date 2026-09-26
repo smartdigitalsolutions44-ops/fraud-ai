@@ -339,3 +339,16 @@ On the 1,000-user synthetic world, **gradient boosting remains stronger**:
 
 The details, the experimental autoencoder and all caveats are in
 [NEURAL_MODELS.md](NEURAL_MODELS.md).
+
+## 15. Sequence models (Stage 6)
+
+`gru`, `transformer` and `hybrid-gru` use the same contract, split, registry, scoring and
+evaluation. Their input is a `SequenceMatrix`: the static matrix plus each event's
+point-in-time history. They are documented in [SEQUENCE_MODELS.md](SEQUENCE_MODELS.md).
+
+On the Stage 6 synthetic 1,000-user world, **gradient boosting remains stronger**:
+* GB − GRU is +0.053 PR-AUC [+0.019, +0.098];
+* GB − hybrid is +0.025 [−0.007, +0.064], and the hybrid's FPR is 1.4% against 0.1%;
+* the GRU catches one stealthy takeover that gradient boosting misses.
+
+No sequence model is adopted.

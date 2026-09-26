@@ -3,7 +3,7 @@
 A locally runnable fraud-prevention software platform written in Python. It is not a web
 application.
 
-The current release covers **Stages 1 to 5**:
+The current release covers **Stages 1 to 6**:
 
 * **Stage 1:** the software core, the event architecture, the fraud database (PostgreSQL in
   production, SQLite for local use), migrations, synthetic data and the CLI.
@@ -24,11 +24,16 @@ The current release covers **Stages 1 to 5**:
   * an experimental autoencoder anomaly score (not a fraud probability);
   * complementarity analysis against gradient boosting.
 
+* **Stage 6:** sequence models over each user's ordered, point-in-time event history:
+  * a GRU, a small causal Transformer and a hybrid (GRU plus static features);
+  * versioned and fingerprinted sequence definitions, with leakage-tested extraction;
+  * complementarity and stealthy-takeover analysis against gradient boosting.
+
 No fraud *decisions* are made yet, and all bundled data is synthetic. Evaluation results
 describe synthetic data only; they are not real-world detection rates or savings. See
 [ARCHITECTURE.md](ARCHITECTURE.md), [FEATURES.md](FEATURES.md), [MODELS.md](MODELS.md),
-[EVALUATION.md](EVALUATION.md), [NEURAL_MODELS.md](NEURAL_MODELS.md) and
-[ROADMAP.md](ROADMAP.md).
+[EVALUATION.md](EVALUATION.md), [NEURAL_MODELS.md](NEURAL_MODELS.md),
+[SEQUENCE_MODELS.md](SEQUENCE_MODELS.md) and [ROADMAP.md](ROADMAP.md).
 
 ## Install
 
@@ -94,6 +99,14 @@ fraud-ai anomaly train-autoencoder                          # EXPERIMENTAL anoma
 fraud-ai anomaly evaluate 1.0.0 --compare-with gradient-boosting-1.0.0
 fraud-ai evaluate complementarity gradient-boosting-1.0.0 neural-network-1.0.0 --anomaly 1.0.0
 python scripts/neural_benchmark.py --seed-users 1000        # full Stage 5 benchmark
+
+# Stage 6 - sequence models (the user's events strictly before the scored event)
+fraud-ai sequence inspect <event-id>                        # the point-in-time sequence
+fraud-ai sequence build <event-id> --output seq.json        # deterministic JSON + digest
+fraud-ai train gru ; fraud-ai train transformer ; fraud-ai train hybrid
+fraud-ai sequence compare                                   # fraud caught only by each model
+fraud-ai sequence stealth-report                            # stealthy/temporal takeovers
+python scripts/sequence_benchmark.py --seed-users 1000      # full Stage 6 benchmark
 python -m fraud_ai --help        # equivalent entry point
 ```
 

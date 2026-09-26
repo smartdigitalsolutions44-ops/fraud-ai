@@ -10,6 +10,7 @@
 | Component | Module | Purpose |
 |---|---|---|
 | Feed-forward classifier | `fraud_ai/models/neural.py` | P(fraud), the same contract as the baselines |
+| Shared training loop (Stage 6 refactor) | `fraud_ai/models/torch_training.py` | One loop for the feed-forward, GRU, Transformer and hybrid models |
 | Autoencoder (experimental) | `fraud_ai/models/anomaly.py` | An anomaly score for unusual behaviour. **Not** a fraud probability |
 | PyTorch support | `fraud_ai/models/torch_support.py` | Device selection, determinism, safe weight files, hashes |
 | Model factory | `fraud_ai/models/factory.py` | Builds and loads every model kind; no special cases elsewhere |
@@ -187,6 +188,11 @@ fraud-ai score <event-id> --model neural-network-1.0.0
 ```
 
 ## 9. Results on the 1,000-user synthetic world
+
+> **Historical (Stage 5 generator).** Stage 6 added temporal takeover and legitimate
+> lookalike scenarios, so this world no longer matches the current generator. These
+> figures document Stage 5. Current comparisons, including the feed-forward network, are
+> in [SEQUENCE_MODELS.md](SEQUENCE_MODELS.md) §8.
 
 Produced by `scripts/neural_benchmark.py` on the same world as the Stage 4 benchmark:
 1,000 users, 180 days, seed 2026, 14-day maturity, SQLite, 1,000 bootstrap iterations,

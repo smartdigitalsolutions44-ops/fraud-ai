@@ -16,6 +16,13 @@ suspicious_velocity     accounts hit by a credential-stuffing burst from few IPs
 new_customer            legitimate new account whose first purchase is larger than typical
 new_account_fraud       new account + fresh (often prepaid/foreign) card + high-value buy
 friendly_fraud          an entirely normal-looking purchase later charged back
+slow_account_takeover   temporal takeovers spread over days (Stage 6): failed logins days
+                        before a quiet purchase, gradual address/payment changes on a
+                        hijacked device, a small test purchase then a larger one, normal
+                        amounts at an abnormal cadence, a hijacked trusted session
+legitimate_lookalike    legitimate mirrors of those patterns: travelling, a new phone,
+                        a forgotten password over several days, gradual legitimate
+                        changes, bursts of small purchases, a large buy after inactivity
 
 Fraud is spread across the whole activity window (so that time-ordered train/validation/
 test splits all contain positives) and deliberately overlaps legitimate behaviour: some
@@ -50,7 +57,9 @@ from fraud_ai.core.enums import (
 from fraud_ai.core.events import Event
 
 SCENARIO_WEIGHTS: dict[str, float] = {
-    "normal": 0.36,
+    "normal": 0.27,
+    "slow_account_takeover": 0.05,
+    "legitimate_lookalike": 0.04,
     "shared_network": 0.11,
     "account_takeover": 0.11,
     "suspicious_velocity": 0.08,
@@ -61,7 +70,12 @@ SCENARIO_WEIGHTS: dict[str, float] = {
     "friendly_fraud": 0.04,
 }
 SCENARIOS = tuple(SCENARIO_WEIGHTS)
-FRAUD_SCENARIOS = ("account_takeover", "new_account_fraud", "friendly_fraud")
+FRAUD_SCENARIOS = (
+    "account_takeover",
+    "slow_account_takeover",
+    "new_account_fraud",
+    "friendly_fraud",
+)
 
 _STREETS = [
     "High Street",
@@ -240,8 +254,8 @@ class SyntheticDataGenerator:
         self.end = reference_time
         self.start = reference_time - timedelta(days=activity_days)
         self.activity_days = activity_days
-        if not 0 < fraud_multiplier <= 4:
-            raise ValueError("fraud_multiplier must be in (0, 4]")
+        if not 0 < fraud_multiplier <= 3:
+            raise ValueError("fraud_multiplier must be in (0, 3]")
         self.fraud_multiplier = fraud_multiplier
         self._events: list[tuple[datetime, int, Event]] = []
         self._seq = 0
@@ -1079,6 +1093,337 @@ class SyntheticDataGenerator:
             )
 
     # ------------------------------------------------------------------ orchestration
+    # ------------------------------------------------------------------ Stage 6: temporal
+    def _failed_login(
+        self, profile: _Profile, ts: datetime, device: _DeviceProfile, net: dict[str, Any]
+    ) -> None:
+        self._emit(
+            EventType.LOGIN_FAILURE,
+            ts,
+            profile.user_id,
+            {
+                "auth_method": "password",
+                "failure_reason": "bad_password",
+                "network": net,
+                "device": device.context,
+            },
+            device=device.identifier,
+        )
+
+    def _add_address(
+        self, profile: _Profile, ts: datetime, device: _DeviceProfile, session: str | None
+    ) -> uuid.UUID:
+        address = self._uuid()
+        town = self.rng.choice(_TOWNS)
+        self._emit(
+            EventType.ADDRESS_ADDED,
+            ts,
+            profile.user_id,
+            {
+                "address_id": str(address),
+                "address_type": "shipping",
+                "full_address": self._address_text(town),
+                "country": town[0],
+                "region": town[1],
+                "postal_prefix": town[3],
+            },
+            device=device.identifier,
+            session_id=session,
+        )
+        return address
+
+    def _add_card(
+        self, profile: _Profile, ts: datetime, device: _DeviceProfile, session: str | None
+    ) -> uuid.UUID:
+        pm_id = self._uuid()
+        self._emit(
+            EventType.PAYMENT_METHOD_ADDED,
+            ts,
+            profile.user_id,
+            self._card(pm_id, "GB"),
+            device=device.identifier,
+            session_id=session,
+        )
+        return pm_id
+
+    def _fraud_buy(
+        self,
+        profile: _Profile,
+        at: datetime,
+        device: _DeviceProfile,
+        net: dict[str, Any],
+        session: str,
+        amount: float,
+        **kw: Any,
+    ) -> None:
+        txn_id, approved = self._purchase(
+            profile, at, device, net, session, self._amount(amount, 0.1), approve_prob=0.9, **kw
+        )
+        self._fraud_outcome(profile, txn_id, approved, at, FraudType.ACCOUNT_TAKEOVER)
+
+    def _scenario_slow_account_takeover(self) -> None:
+        """Takeovers whose tell-tale signs are spread over days, not visible in one event.
+
+        A  failed logins on several days, a successful login, a quiet period, then an
+           ordinary-looking purchase from a device that is by then "known";
+        B  a hijacked trusted device on the home network adds an address, then a card over
+           a few days, then buys;
+        C  a tiny test purchase, then a larger purchase a day or more later;
+        D  normal amounts, but several purchases in a burst at night;
+        E  a hijacked trusted session: victim's device and network, normal amount - only
+           the timing differs.
+        """
+        profile = self._create_account(
+            "slow_account_takeover", min_age_days=max(180, self.activity_days + 10)
+        )
+        attack = self._attack_time()
+        opening = max(self.start + timedelta(days=1), attack - timedelta(days=6))
+        self._routine_activity(profile, self.start, opening)
+        variant = self.rng.choice("ABCDE")
+        domestic = _network(self._residential_ip(), self.rng.choice(_RESIDENTIAL), "England")
+        attacker = self._device(self.rng.choice([DeviceType.DESKTOP, DeviceType.MOBILE]))
+        base = profile.avg_amount
+        latest = self.end - timedelta(days=3)
+        if variant == "A":
+            t = opening
+            for _ in range(self.rng.randint(2, 4)):  # probing on several days
+                for _ in range(self.rng.randint(1, 3)):
+                    self._failed_login(
+                        profile, t + timedelta(minutes=self.rng.randint(0, 90)), attacker, domestic
+                    )
+                t += timedelta(days=1, hours=self.rng.randint(-3, 3))
+            login, session = self._login(profile, t, attacker, domestic)
+            buy_at = min(t + timedelta(days=self.rng.uniform(1.0, 3.0)), latest)
+            _, session = self._login(profile, buy_at, attacker, domestic)
+            self._fraud_buy(
+                profile,
+                buy_at + timedelta(minutes=6),
+                attacker,
+                domestic,
+                session,
+                base * self.rng.uniform(0.8, 2.0),
+                ship=self.rng.random() < 0.5,
+            )
+            end_of_attack = buy_at
+        elif variant == "B":
+            device, net = profile.primary_device, profile.home_network
+            login, session = self._login(profile, opening, device, net)
+            address = self._add_address(profile, opening + timedelta(minutes=5), device, session)
+            t = opening + timedelta(days=self.rng.uniform(1.0, 2.5))
+            _, session = self._login(profile, t, device, net)
+            pm_id = self._add_card(profile, t + timedelta(minutes=4), device, session)
+            buy_at = min(t + timedelta(days=self.rng.uniform(1.0, 2.5)), latest)
+            _, session = self._login(profile, buy_at, device, net)
+            self._fraud_buy(
+                profile,
+                buy_at + timedelta(minutes=8),
+                device,
+                net,
+                session,
+                base * self.rng.uniform(1.0, 2.5),
+                address_id=address,
+                pm_id=pm_id,
+            )
+            end_of_attack = buy_at
+        elif variant == "C":
+            login, session = self._login(profile, opening, attacker, domestic)
+            self._fraud_buy(
+                profile,
+                opening + timedelta(minutes=3),
+                attacker,
+                domestic,
+                session,
+                self.rng.uniform(1.0, 5.0),
+                ship=False,
+            )
+            buy_at = min(opening + timedelta(days=self.rng.uniform(1.0, 4.0)), latest)
+            _, session = self._login(profile, buy_at, attacker, domestic)
+            self._fraud_buy(
+                profile,
+                buy_at + timedelta(minutes=5),
+                attacker,
+                domestic,
+                session,
+                base * self.rng.uniform(1.5, 3.0),
+                ship=self.rng.random() < 0.6,
+            )
+            end_of_attack = buy_at
+        elif variant == "D":
+            device = profile.mobile_device or profile.primary_device
+            night = opening.replace(hour=self.rng.randint(1, 4), minute=self.rng.randint(0, 59))
+            login, session = self._login(profile, night, device, domestic)
+            t = night
+            for _ in range(self.rng.randint(3, 5)):
+                t += timedelta(minutes=self.rng.randint(2, 12))
+                self._fraud_buy(
+                    profile,
+                    t,
+                    device,
+                    domestic,
+                    session,
+                    base * self.rng.uniform(0.7, 1.3),
+                    ship=False,
+                )
+            end_of_attack = t
+        else:  # E: hijacked trusted session
+            device, net = profile.primary_device, profile.home_network
+            t = opening.replace(hour=self.rng.randint(0, 5), minute=self.rng.randint(0, 59))
+            login, session = self._login(profile, t, device, net)
+            for _ in range(self.rng.randint(1, 2)):
+                t += timedelta(minutes=self.rng.randint(1, 5))
+                self._fraud_buy(
+                    profile,
+                    t,
+                    device,
+                    net,
+                    session,
+                    base * self.rng.uniform(0.8, 1.6),
+                    ship=self.rng.random() < 0.3,
+                )
+            end_of_attack = t
+        report = min(
+            end_of_attack + timedelta(days=self.rng.randint(1, 3)), self.end - timedelta(hours=1)
+        )
+        self._emit(
+            EventType.FRAUD_CONFIRMED,
+            report,
+            profile.user_id,
+            {
+                "target_event_id": str(login.event_id),
+                "fraud_type": "account_takeover",
+                "label_source": LabelSource.CUSTOMER_REPORT.value,
+                "confidence": 1.0,
+            },
+        )
+        self._routine_activity(profile, report + timedelta(hours=4), self.end)
+
+    def _scenario_legitimate_lookalike(self) -> None:
+        """Legitimate behaviour that mirrors the temporal takeovers above."""
+        profile = self._create_account("legitimate_lookalike", min_age_days=120)
+        moment = self._attack_time()
+        self._routine_activity(profile, self.start, moment)
+        variant = self.rng.choice(
+            [
+                "travel",
+                "new_phone",
+                "forgot_password",
+                "gradual_changes",
+                "small_burst",
+                "long_inactivity",
+            ]
+        )
+        base = profile.avg_amount
+        resume = moment
+        if variant == "travel":  # a week abroad: new networks, a new country, purchases
+            town = self.rng.choice(_FOREIGN_TOWNS)
+            t = moment
+            for _ in range(self.rng.randint(3, 7)):
+                net = _network(self._residential_ip(), _FOREIGN_RESIDENTIAL, town[1])
+                _, session = self._login(
+                    profile, t, profile.mobile_device or profile.primary_device, net
+                )
+                if self.rng.random() < 0.6:
+                    self._purchase(
+                        profile,
+                        t + timedelta(minutes=9),
+                        profile.mobile_device or profile.primary_device,
+                        net,
+                        session,
+                        self._amount(base * self.rng.uniform(0.7, 2.0)),
+                        ship=False,
+                    )
+                t += timedelta(days=1, hours=self.rng.randint(-4, 4))
+            resume = t
+        elif variant == "new_phone":  # new device, buys straight away, then keeps using it
+            phone = self._device(DeviceType.MOBILE)
+            profile.mobile_device = phone
+            _, session = self._login(profile, moment, phone, profile.home_network)
+            self._purchase(
+                profile,
+                moment + timedelta(minutes=4),
+                phone,
+                profile.home_network,
+                session,
+                self._amount(base * self.rng.uniform(1.0, 2.5)),
+            )
+            resume = moment + timedelta(hours=2)
+        elif variant == "forgot_password":  # failed logins on several days, then success
+            device, net = profile.primary_device, profile.home_network
+            t = moment
+            for _ in range(self.rng.randint(2, 4)):
+                for _ in range(self.rng.randint(1, 3)):
+                    self._failed_login(
+                        profile, t + timedelta(minutes=self.rng.randint(0, 20)), device, net
+                    )
+                t += timedelta(days=1, hours=self.rng.randint(-3, 3))
+            self._emit(
+                EventType.PASSWORD_RESET,
+                t,
+                profile.user_id,
+                {"method": "email_link", "network": net, "device": device.context},
+                device=device.identifier,
+            )
+            _, session = self._login(profile, t + timedelta(minutes=3), device, net)
+            self._purchase(
+                profile,
+                t + timedelta(minutes=10),
+                device,
+                net,
+                session,
+                self._amount(base * self.rng.uniform(0.8, 2.0)),
+            )
+            resume = t + timedelta(hours=1)
+        elif variant == "gradual_changes":  # new address, then a new card, then a purchase
+            device, net = profile.primary_device, profile.home_network
+            _, session = self._login(profile, moment, device, net)
+            address = self._add_address(profile, moment + timedelta(minutes=5), device, session)
+            t = moment + timedelta(days=self.rng.uniform(1.0, 2.5))
+            _, session = self._login(profile, t, device, net)
+            pm_id = self._add_card(profile, t + timedelta(minutes=4), device, session)
+            buy_at = t + timedelta(days=self.rng.uniform(1.0, 2.5))
+            _, session = self._login(profile, buy_at, device, net)
+            self._purchase(
+                profile,
+                buy_at + timedelta(minutes=8),
+                device,
+                net,
+                session,
+                self._amount(base * self.rng.uniform(1.0, 2.5)),
+                address_id=address,
+                pm_id=pm_id,
+            )
+            resume = buy_at + timedelta(hours=1)
+        elif variant == "small_burst":  # several small purchases within an hour
+            device = profile.mobile_device or profile.primary_device
+            _, session = self._login(profile, moment, device, profile.home_network)
+            t = moment
+            for _ in range(self.rng.randint(3, 6)):
+                t += timedelta(minutes=self.rng.randint(3, 15))
+                self._purchase(
+                    profile,
+                    t,
+                    device,
+                    profile.home_network,
+                    session,
+                    self._amount(base * self.rng.uniform(0.2, 0.8)),
+                    ship=False,
+                )
+            resume = t + timedelta(hours=1)
+        else:  # long_inactivity: silent for 1-2 months, then a large purchase
+            back = moment + timedelta(days=self.rng.randint(30, 60))
+            back = min(back, self.end - timedelta(days=2))
+            _, session = self._login(profile, back, profile.primary_device, profile.home_network)
+            self._purchase(
+                profile,
+                back + timedelta(minutes=7),
+                profile.primary_device,
+                profile.home_network,
+                session,
+                self._amount(base * self.rng.uniform(3.0, 6.0)),
+            )
+            resume = back + timedelta(hours=1)
+        self._routine_activity(profile, resume, self.end)
+
     @staticmethod
     def allocate(n_users: int, fraud_multiplier: float = 1.0) -> dict[str, int]:
         """Users per scenario. ``fraud_multiplier`` scales the fraud scenarios (prevalence
@@ -1089,6 +1434,15 @@ class SyntheticDataGenerator:
             s: w * (fraud_multiplier if s in FRAUD_SCENARIOS else 1.0)
             for s, w in SCENARIO_WEIGHTS.items()
         }
+        fraud = sum(w for s, w in weights.items() if s in FRAUD_SCENARIOS)
+        if fraud > 0.85:
+            raise ValueError("fraud_multiplier too high: fraud scenarios would exceed 85%")
+        others = [s for s in weights if s not in FRAUD_SCENARIOS and s != "normal"]
+        room = 0.95 - fraud  # keep at least 5% "normal" customers
+        total = sum(weights[s] for s in others)
+        if total > room:  # shrink the other legitimate scenarios proportionally
+            for s in others:
+                weights[s] *= room / total
         counts = {s: max(1, int(w * n_users)) for s, w in weights.items()}
         counts["normal"] += n_users - sum(counts.values())
         if counts["normal"] < 1:
@@ -1113,6 +1467,10 @@ class SyntheticDataGenerator:
             self._scenario_new_account_fraud()
         for _ in range(counts["friendly_fraud"]):
             self._scenario_friendly_fraud()
+        for _ in range(counts["slow_account_takeover"]):
+            self._scenario_slow_account_takeover()
+        for _ in range(counts["legitimate_lookalike"]):
+            self._scenario_legitimate_lookalike()
         victims = []
         for _ in range(counts["suspicious_velocity"]):
             victim = self._create_account(

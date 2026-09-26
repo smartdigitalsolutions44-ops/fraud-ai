@@ -159,14 +159,14 @@ def test_seed_end_to_end_on_each_backend(any_engine: Engine) -> None:
         summary = seed_synthetic_data(
             sess,
             Pseudonymiser(TEST_KEY.encode()),
-            n_users=10,
+            n_users=12,
             seed=5,
             reference_time=REF,
             activity_days=30,
         )
     assert summary.fraud_labels > 0 and summary.transactions > 0
     with session_scope(make_session_factory(any_engine)) as sess:
-        assert sess.scalar(select(func.count()).select_from(User)) == 10
+        assert sess.scalar(select(func.count()).select_from(User)) == 12
         assert sess.scalar(select(func.count()).select_from(FraudLabel)) == (
             summary.fraud_labels + summary.legitimate_labels
         )

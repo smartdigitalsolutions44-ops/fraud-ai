@@ -14,7 +14,7 @@ import statistics
 import sys
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from importlib import metadata
 from pathlib import Path
@@ -36,6 +36,7 @@ from fraud_ai.models.factory import (
     ANOMALY_KINDS,
     SUPERVISED_KINDS,
     build_model,
+    is_sequence_kind,
     model_name,
 )
 from fraud_ai.models.matrix import ModelMatrix
@@ -48,6 +49,7 @@ from fraud_ai.models.metrics import (
 from fraud_ai.models.preprocessing import PREPROCESSING_VERSION
 from fraud_ai.models.registry import get_model_version, register_model_version
 from fraud_ai.models.splits import DatasetSplit, SplitConfig, time_ordered_split
+from fraud_ai.sequences.definition import SequenceDefinition
 from fraud_ai.utils.logging import get_logger
 from fraud_ai.utils.time import ensure_utc, utcnow
 
@@ -78,6 +80,8 @@ class TrainingConfig:
     persist_snapshots: bool = False
     # Per model kind, e.g. {"random-forest": {"n_estimators": 100}}; recorded with the model.
     hyperparameters: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Stage 6: when set, every example also gets its point-in-time event sequence.
+    sequence: SequenceDefinition | None = None
 
 
 @dataclass(frozen=True)
@@ -153,6 +157,19 @@ class PreparedData:
         idx = list(getattr(self.split, name))
         return self.matrix.take(idx), self.y[idx]
 
+    @property
+    def sequence_definition(self) -> SequenceDefinition | None:
+        from fraud_ai.sequences.inputs import SequenceMatrix
+
+        m = self.matrix
+        return m.sequences.definition if isinstance(m, SequenceMatrix) else None
+
+    def sequence_digest(self) -> str | None:
+        from fraud_ai.sequences.inputs import SequenceMatrix
+
+        m = self.matrix
+        return m.sequences.digest() if isinstance(m, SequenceMatrix) else None
+
     def summary(self) -> dict[str, Any]:
         parts = {}
         for name in ("train", "validation", "test"):
@@ -179,6 +196,11 @@ class PreparedData:
             "label_policy": self.dataset.policy.describe(),
             "excluded": len(self.dataset.excluded),
             "splits": parts,
+            **(
+                {"sequence": d.to_dict(), "sequence_digest": self.sequence_digest()}
+                if (d := self.sequence_definition) is not None
+                else {}
+            ),
         }
 
 
@@ -200,6 +222,12 @@ def prepare_data(session: Session, config: TrainingConfig) -> PreparedData:
         raise TrainingError("the dataset builder returned no labelled examples")
     # X comes from feature values only; ids, timestamps and labels stay on the examples.
     matrix = ModelMatrix.from_vectors([e.vector for e in ds.examples], config.feature_version)
+    if config.sequence is not None:
+        from fraud_ai.sequences.extraction import build_sequences
+        from fraud_ai.sequences.inputs import SequenceMatrix
+
+        sequences = build_sequences(session, [e.event_id for e in ds.examples], config.sequence)
+        matrix = SequenceMatrix.attach(matrix, sequences)
     y = np.asarray(ds.y(), dtype=int)
     split = time_ordered_split(
         [e.event_time for e in ds.examples], [e.event_id for e in ds.examples], config.split
@@ -405,6 +433,8 @@ def run_training(
         raise TrainingError(f"unknown model kinds {sorted(unknown)}")
     for kind in kinds:  # fail before any expensive work
         check_version_free(session, kind, config.version, model_directory)
+    if config.sequence is None and any(is_sequence_kind(k) for k in kinds):
+        config = replace(config, sequence=SequenceDefinition())
     prepared = prepare_data(session, config)
     log.info(
         "training %s on %d examples (%d fraud)",
@@ -472,7 +502,9 @@ def config_from_manifest(manifest: dict[str, Any]) -> TrainingConfig:
         else SplitConfig(split["train_fraction"], split["validation_fraction"])
     )
     policy = ds["label_policy"]
+    sequence = SequenceDefinition.from_dict(ds["sequence"]) if ds.get("sequence") else None
     return TrainingConfig(
+        sequence=sequence,
         start=datetime.fromisoformat(ds["window"]["start"]),
         end=datetime.fromisoformat(ds["window"]["end"]),
         label_cutoff=datetime.fromisoformat(ds["window"]["label_cutoff"]),

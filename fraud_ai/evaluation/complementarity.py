@@ -177,6 +177,7 @@ def complementarity(
         "split": split,
         "disagreement": disagreement(ctx, base, other, split),
         "base_misses_and_false_alarms": misses,
+        "fraud_detection_overlap": detection_overlap(ctx, base, other, split),
         "within_base_blind_spot": blind,
         "combinations": {
             name: _combination(y, p, pa, iterations, seed) for name, p in combos.items()
@@ -185,3 +186,30 @@ def complementarity(
         "requires the paired PR-AUC difference interval to lie above zero. Rank "
         "transforms use validation score distributions. Data is SYNTHETIC.",
     }
+
+
+def detection_overlap(
+    ctx: EvaluationContext, base: ScoredModel, other: ScoredModel, split: str = "test"
+) -> dict[str, Any]:
+    """Which fraud each model catches at its own threshold: both, only one, or neither."""
+    y = ctx.labels(split)
+    idx = ctx.indices(split)
+    a = base.scores[split] >= base.threshold
+    b = other.scores[split] >= other.threshold
+    fraud = y == 1
+    groups = {
+        "caught_by_both": fraud & a & b,
+        f"caught_only_by_{base.model_id}": fraud & a & ~b,
+        f"caught_only_by_{other.model_id}": fraud & ~a & b,
+        "missed_by_both": fraud & ~a & ~b,
+    }
+    out: dict[str, Any] = {"fraud_events": int(fraud.sum())}
+    for name, mask in groups.items():
+        rows = np.flatnonzero(mask)
+        out[name] = {
+            "count": len(rows),
+            "fraud_types": dict(Counter(str(ctx.fraud_types[idx[i]]) for i in rows)),
+            "scenarios": dict(Counter(ctx.scenarios[idx[i]] for i in rows)),
+        }
+    out["legitimate_flagged_only_by_other"] = int((~fraud & ~a & b).sum())
+    return out

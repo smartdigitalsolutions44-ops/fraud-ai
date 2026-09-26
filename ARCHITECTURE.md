@@ -119,6 +119,10 @@ fraud_ai/
                splits, metrics/threshold analysis, baselines, training, scoring, registry
                neural.py / anomaly.py (PyTorch), factory (every model kind), experiments,
                grouped permutation importance
+               sequence_models.py (GRU / causal Transformer / hybrid), torch_training
+               (the one shared PyTorch training loop)
+  sequences/   Stage 6 point-in-time event sequences: versioned definition + fingerprint,
+               extraction from the append-only events table, SequenceMatrix inputs
   evaluation/  bootstrap/paired statistics, walk-forward, calibration, costs and bands,
                scenario/cohort/error analysis, comparison and ensembles, drift baseline,
                shortcut detection, complementarity, anomaly evaluation, JSON reports
@@ -334,7 +338,24 @@ Summary (details in [NEURAL_MODELS.md](NEURAL_MODELS.md)):
   evaluation contexts. The autoencoder is research: it is never combined into a
   production score.
 
-## 12. Extending the platform
+## 12. Sequence models (Stage 6)
+
+Summary (details in [SEQUENCE_MODELS.md](SEQUENCE_MODELS.md)):
+
+* **Point-in-time sequences.** A scored event's input is the user's last N events strictly
+  before it, plus the event itself.
+  * They are read only from the append-only `events` table, never from mutable state.
+  * Each historical event is encoded with what was known at that event.
+* **Versioned and verifiable.** `fraud-sequence-1.0.0` has a fingerprint over the window,
+  vocabularies and feature transforms. Each dataset records a digest of its sequences, and
+  evaluation refuses to run if they no longer reproduce.
+* **One input object.** `SequenceMatrix` *is* a `ModelMatrix` plus aligned sequences.
+  Tabular models ignore the sequences, so every model still goes through the same
+  training, scoring, walk-forward and evaluation code.
+* **No identity embeddings.** Vocabularies cover event, network, device, authentication
+  and channel *types* only.
+
+## 13. Extending the platform
 
 * **New model:** add a `ModelSpec`, or a new `FraudModel` implementation registered in
   `fraud_ai/models/factory.py`. Train it on the same prepared split as the baselines, then

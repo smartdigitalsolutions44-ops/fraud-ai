@@ -211,7 +211,7 @@ def seeded_model_world(migrated_template: Path, tmp_path_factory: pytest.TempPat
             reference_time=MODEL_REF_TIME,
             activity_days=120,
             # Enough fraud in every time-ordered split for calibration and segment tests.
-            fraud_multiplier=2.5,
+            fraud_multiplier=2.0,
         )
     eng.dispose()
     return path
@@ -229,6 +229,18 @@ def fast_training_config(**overrides: Any) -> Any:
             "gradient-boosting": {"max_iter": 80},
             "neural-network": {"hidden_sizes": [32, 16], "max_epochs": 15, "patience": 4},
             "autoencoder": {"hidden_sizes": [32], "bottleneck": 6, "max_epochs": 15},
+            **{
+                kind: {
+                    "hidden_size": 16,
+                    "heads": 2,
+                    "ff_size": 32,
+                    "max_epochs": 6,
+                    "patience": 3,
+                    "fusion_hidden": 8,
+                    "static_hidden": 16,
+                }
+                for kind in ("gru", "transformer", "hybrid-gru")
+            },
         },
     }
     base.update(overrides)

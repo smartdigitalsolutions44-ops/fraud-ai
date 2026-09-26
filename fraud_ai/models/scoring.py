@@ -146,9 +146,18 @@ def score_event(
     loaded = loaded or load_registered_model(model)
     if loaded.score_kind != FRAUD_PROBABILITY:  # pragma: no cover - guarded by name above
         raise ScoringError("only fraud-probability models can be scored")
-    probability = float(
-        loaded.predict_proba(ModelMatrix.from_vectors([vector], model.feature_version))[0]
-    )
+    matrix = ModelMatrix.from_vectors([vector], model.feature_version)
+    if loaded.input_kind == "sequence":
+        # The same point-in-time extraction as training: the user's events strictly before
+        # this event, under the definition the model was trained with.
+        from fraud_ai.sequences.extraction import build_sequence
+        from fraud_ai.sequences.inputs import SequenceMatrix
+
+        definition = getattr(loaded, "definition", None)
+        if definition is None:  # pragma: no cover - a trained sequence model has one
+            raise ScoringError("sequence model has no sequence definition")
+        matrix = SequenceMatrix.attach(matrix, build_sequence(session, event_id, definition))
+    probability = float(loaded.predict_proba(matrix)[0])
     threshold = model.default_threshold if threshold is None else threshold
     if threshold is None:
         raise ScoringError("no threshold given and none recorded with the model")

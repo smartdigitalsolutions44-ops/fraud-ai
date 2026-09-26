@@ -151,7 +151,7 @@ def db_status(app: AppContext) -> None:
     "--fraud-multiplier",
     default=1.0,
     show_default=True,
-    type=click.FloatRange(0.1, 4.0),
+    type=click.FloatRange(0.1, 3.0),
     help="Scale the share of fraud scenarios (prevalence experiments).",
 )
 @click.option(
@@ -910,6 +910,138 @@ def _neural_hyperparameters(opts: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _sequence_options(func: Any) -> Any:
+    options = [
+        click.option(
+            "--max-events",
+            type=click.IntRange(1, 512),
+            default=16,
+            show_default=True,
+            help="History window: the last N events before the scored event.",
+        ),
+        click.option(
+            "--max-age-days",
+            type=click.FloatRange(min=0, min_open=True),
+            default=None,
+            help="Optionally drop window events older than this.",
+        ),
+        click.option(
+            "--lookback-days",
+            type=click.FloatRange(min=0, min_open=True),
+            default=365.0,
+            show_default=True,
+            help="History read to decide whether devices/networks were known.",
+        ),
+        click.option("--hidden-size", type=click.IntRange(1), default=64, show_default=True),
+        click.option(
+            "--layers",
+            type=click.IntRange(1, 8),
+            default=None,
+            help="Default: 1 (GRU/hybrid), 2 (Transformer).",
+        ),
+        click.option("--heads", type=click.IntRange(1), default=4, show_default=True),
+        click.option("--dropout", type=click.FloatRange(0, 0.95), default=0.2, show_default=True),
+        click.option("--batch-size", type=click.IntRange(1), default=256, show_default=True),
+        click.option(
+            "--learning-rate",
+            type=click.FloatRange(min=0, min_open=True),
+            default=1e-3,
+            show_default=True,
+        ),
+        click.option("--weight-decay", type=click.FloatRange(0), default=1e-4, show_default=True),
+        click.option("--max-epochs", type=click.IntRange(1), default=40, show_default=True),
+        click.option("--patience", type=click.IntRange(1), default=6, show_default=True),
+        click.option(
+            "--loss",
+            type=click.Choice(["weighted_bce", "focal"]),
+            default="weighted_bce",
+            show_default=True,
+        ),
+        click.option(
+            "--device", type=click.Choice(["auto", "cpu", "cuda"]), default="cpu", show_default=True
+        ),
+    ]
+    for option in reversed(options):
+        func = option(func)
+    return func
+
+
+def _train_sequence(app: AppContext, kind: str, opts: dict[str, Any]) -> None:
+    from dataclasses import replace as dc_replace
+
+    from fraud_ai.sequences.definition import SequenceDefinition
+
+    try:
+        definition = SequenceDefinition(
+            max_events=opts.pop("max_events"),
+            max_age_days=opts.pop("max_age_days"),
+            lookback_days=opts.pop("lookback_days"),
+        )
+    except ValueError as exc:
+        raise click.BadParameter(str(exc)) from None
+    layers = opts.pop("layers") or (2 if kind == "transformer" else 1)
+    hyperparameters = {
+        "layers": layers,
+        **{
+            k: opts.pop(k)
+            for k in (
+                "hidden_size",
+                "heads",
+                "dropout",
+                "batch_size",
+                "learning_rate",
+                "weight_decay",
+                "max_epochs",
+                "patience",
+                "loss",
+                "device",
+            )
+        },
+    }
+    app.require_migrated()
+    from fraud_ai.models.report import comparison_table
+    from fraud_ai.models.training import run_training
+
+    try:
+        config = dc_replace(_training_config(opts, {kind: hyperparameters}), sequence=definition)
+        with session_scope(make_session_factory(app.engine)) as session:
+            run = run_training(session, [kind], config, app.settings.model_directory)
+            table = comparison_table([r.registered for r in run.results if r.registered])
+            result = run.results[0]
+            summary = result.model.manifest()
+    except FraudAIError as exc:
+        raise click.ClickException(str(exc)) from None
+    click.echo(
+        f"sequence {definition.version} fingerprint {definition.fingerprint()[:16]}  "
+        f"window {definition.max_events} events + the scored event"
+    )
+    click.echo(
+        f"{result.model_id}: {summary['parameter_count']} parameters, best epoch "
+        f"{summary['training']['best_epoch']}/{summary['training']['epochs_completed']}"
+    )
+    for warning in result.warnings:
+        click.echo(f"WARNING {result.model_id}: {warning}")
+    click.echo(table)
+
+
+def _sequence_train_command(name: str, kind: str, help_text: str) -> None:
+    @train.command(name, help=help_text)
+    @_training_options
+    @_sequence_options
+    @pass_app
+    def _command(app: AppContext, /, **opts: Any) -> None:
+        _train_sequence(app, kind, opts)
+
+
+_sequence_train_command("gru", "gru", "Train the GRU sequence model (user event history).")
+_sequence_train_command(
+    "transformer", "transformer", "Train the small causal Transformer sequence model."
+)
+_sequence_train_command(
+    "hybrid", "hybrid-gru", "Train the hybrid model: GRU sequence encoder + static features."
+)
+
+
 @train.command("neural-network")
 @_training_options
 @_neural_options
@@ -1593,6 +1725,262 @@ def system_status(app: AppContext) -> None:
         click.echo(f"  snapshots     {snapshots}")
     llm_state = f"configured: {s.local_llm_endpoint}" if s.local_llm_endpoint else "not configured"
     click.echo(f"local LLM       {llm_state} (Stage 7)")
+
+
+# --------------------------------------------------------------------------- sequence (Stage 6)
+@cli.group()
+def sequence() -> None:
+    """Point-in-time user event sequences and sequence-model analysis."""
+
+
+def _definition_from(max_events: int, max_age_days: float | None, lookback_days: float) -> Any:
+    from fraud_ai.sequences.definition import SequenceDefinition
+
+    try:
+        return SequenceDefinition(
+            max_events=max_events, max_age_days=max_age_days, lookback_days=lookback_days
+        )
+    except ValueError as exc:
+        raise click.BadParameter(str(exc)) from None
+
+
+def _window_options(func: Any) -> Any:
+    for option in reversed(
+        [
+            click.option(
+                "--max-events", type=click.IntRange(1, 512), default=16, show_default=True
+            ),
+            click.option(
+                "--max-age-days", type=click.FloatRange(min=0, min_open=True), default=None
+            ),
+            click.option(
+                "--lookback-days",
+                type=click.FloatRange(min=0, min_open=True),
+                default=365.0,
+                show_default=True,
+            ),
+        ]
+    ):
+        func = option(func)
+    return func
+
+
+def _build_one(app: AppContext, event_id: str, definition: Any) -> Any:
+    app.require_migrated()
+    from fraud_ai.sequences.extraction import build_sequence
+
+    try:
+        target = uuid.UUID(event_id)
+    except ValueError:
+        raise click.BadParameter(f"{event_id!r} is not an event id") from None
+    with session_scope(make_session_factory(app.engine)) as session:
+        try:
+            return build_sequence(session, target, definition)
+        except FraudAIError as exc:
+            raise click.ClickException(str(exc)) from None
+
+
+@sequence.command("build")
+@click.argument("event_id")
+@_window_options
+@click.option("--output", type=click.Path(dir_okay=False, path_type=Path), default=None)
+@pass_app
+def sequence_build(
+    app: AppContext,
+    event_id: str,
+    max_events: int,
+    max_age_days: float | None,
+    lookback_days: float,
+    output: Path | None,
+) -> None:
+    """Build the point-in-time sequence of one event (JSON; deterministic)."""
+    definition = _definition_from(max_events, max_age_days, lookback_days)
+    batch = _build_one(app, event_id, definition)
+    payload = {
+        "definition": definition.to_dict(),
+        "sequence_digest": batch.digest(),
+        "length": int(batch.lengths[0]),
+        "positions": batch.decode(0),
+        "note": "Only events strictly before the scored event; the last position is the "
+        "scored event itself. No identifiers are included.",
+    }
+    text = json.dumps(payload, indent=2, sort_keys=True)
+    if output:
+        output.write_text(text + "\n")
+        click.echo(f"written {output}")
+    else:
+        click.echo(text)
+
+
+@sequence.command("inspect")
+@click.argument("event_id")
+@_window_options
+@pass_app
+def sequence_inspect(
+    app: AppContext,
+    event_id: str,
+    max_events: int,
+    max_age_days: float | None,
+    lookback_days: float,
+) -> None:
+    """Readable view of one event's sequence (types, gaps, known flags, changes)."""
+    definition = _definition_from(max_events, max_age_days, lookback_days)
+    batch = _build_one(app, event_id, definition)
+    click.echo(
+        f"{definition.version}  fingerprint {definition.fingerprint()[:16]}  "
+        f"length {int(batch.lengths[0])}/{definition.length}"
+    )
+    click.echo(
+        f"{'#':>3} {'event':<24}{'h before':>9}{'gap min':>9} {'network':<12}"
+        f"{'dev?':>5}{'net?':>5}{'addr?':>6}{'amount':>9}  flags"
+    )
+    import math
+
+    for i, p in enumerate(batch.decode(0)):
+        flags = [
+            name
+            for name in (
+                "device_changed",
+                "asn_changed",
+                "country_changed",
+                "vpn",
+                "proxy_or_tor",
+                "is_security_event",
+                "is_label_event",
+                "is_target",
+            )
+            if p[name]
+        ]
+        amount = f"{math.expm1(p['log_amount']):.2f}" if p["has_amount"] else ""
+        addr = ("yes" if p["address_known"] else "no") if p["has_address"] else "-"
+        click.echo(
+            f"{i:>3} {p['event_type']:<24}{math.expm1(p['log_hours_before_target']):>9.1f}"
+            f"{math.expm1(p['log_minutes_since_previous']):>9.0f} {p['network_type']:<12}"
+            f"{'yes' if p['device_known'] else 'no':>5}"
+            f"{'yes' if p['network_known'] else 'no':>5}{addr:>6}{amount:>9}  "
+            f"{','.join(flags)}"
+        )
+
+
+def _fraud_refs_with(app: AppContext, base: str) -> list[str]:
+    from fraud_ai.models.factory import is_anomaly_model
+    from fraud_ai.models.registry import list_model_versions, resolve_model
+
+    with session_scope(make_session_factory(app.engine)) as session:
+        try:
+            record = resolve_model(session, base)
+        except FraudAIError as exc:
+            raise click.ClickException(str(exc)) from None
+        return [
+            f"{m.model_name}-{m.model_version}"
+            for m in list_model_versions(session)
+            if m.dataset_fingerprint == record.dataset_fingerprint
+            and not is_anomaly_model(m.model_name)
+        ]
+
+
+@sequence.command("compare")
+@click.argument("model_refs", nargs=-1)
+@click.option("--base", "base_ref", default="gradient-boosting-1.0.0", show_default=True)
+@_eval_options
+@pass_app
+def sequence_compare(
+    app: AppContext, /, model_refs: tuple[str, ...], base_ref: str, **opts: Any
+) -> None:
+    """Which fraud each sequence model catches that BASE misses (and vice versa)."""
+    import numpy as np
+
+    from fraud_ai.evaluation import reports
+    from fraud_ai.evaluation.complementarity import complementarity
+
+    refs = list(model_refs) or _fraud_refs_with(app, base_ref)
+    refs = [base_ref, *[r for r in refs if r != base_ref]]
+
+    def body(session: Any, ctx: Any) -> None:
+        base = ctx.model(base_ref)
+        others = [m for m in ctx.models if m.model_id != base_ref]
+        if not others:
+            raise EvaluationFailed("no other model to compare with")
+        y = ctx.labels("test")
+        caught = {m.model_id: (m.scores["test"] >= m.threshold) & (y == 1) for m in ctx.models}
+        missed_by_all = int(((y == 1) & ~np.logical_or.reduce(list(caught.values()))).sum())
+        result = {
+            "base": base.model_id,
+            "fraud_events": int(y.sum()),
+            "missed_by_all_models": missed_by_all,
+            "comparisons": {},
+        }
+        click.echo(f"test fraud {int(y.sum())}; missed by every model: {missed_by_all}")
+        click.echo(
+            f"{'model':<30}{'both':>6}{'only base':>11}{'only it':>9}{'neither':>9}"
+            f"{'new FP':>8}  combined PR-AUC vs base"
+        )
+        for other in others:
+            comp = complementarity(
+                ctx, base, other, iterations=opts["iterations"], seed=opts["seed"]
+            )
+            result["comparisons"][other.model_id] = comp
+            o = comp["fraud_detection_overlap"]
+            avg = (
+                comp["combinations"].get("average_probability")
+                or comp["combinations"]["rank_average"]
+            )
+            click.echo(
+                f"{other.model_id:<30}{o['caught_by_both']['count']:>6}"
+                f"{o[f'caught_only_by_{base.model_id}']['count']:>11}"
+                f"{o[f'caught_only_by_{other.model_id}']['count']:>9}"
+                f"{o['missed_by_both']['count']:>9}{o['legitimate_flagged_only_by_other']:>8}"
+                f"  {_ci(avg['vs_base_pr_auc_difference'])}"
+            )
+        path = reports.write_report(
+            _out_dir(app, opts, f"comparisons/{ctx.fingerprint[:16]}"),
+            "sequence_compare",
+            ctx.header("sequence_compare", settings=_settings_from(opts).to_dict(), **result),
+        )
+        click.echo(f"written {path}")
+
+    _with_context(app, refs, body)
+
+
+@sequence.command("stealth-report")
+@click.argument("model_refs", nargs=-1)
+@click.option(
+    "--base",
+    "base_ref",
+    default="gradient-boosting-1.0.0",
+    show_default=True,
+    help="Used to find the models trained on the same dataset.",
+)
+@click.option("--output-dir", type=click.Path(file_okay=False, path_type=Path), default=None)
+@pass_app
+def sequence_stealth_report(
+    app: AppContext, model_refs: tuple[str, ...], base_ref: str, output_dir: Path | None
+) -> None:
+    """Stealthy / temporal takeover cases: every model's probability and prior behaviour."""
+    from fraud_ai.evaluation import reports
+    from fraud_ai.evaluation.stealth import stealth_report
+
+    refs = list(model_refs) or _fraud_refs_with(app, base_ref)
+
+    def body(session: Any, ctx: Any) -> None:
+        report = stealth_report(ctx)
+        path = reports.write_report(
+            _out_dir(app, {"output_dir": output_dir}, f"comparisons/{ctx.fingerprint[:16]}"),
+            "stealth_report",
+            ctx.header("stealth_report", **report),
+        )
+        click.echo(
+            f"stealthy / temporal takeover cases in test: {report['cases']} {report['by_scenario']}"
+        )
+        for name, r in report["recall_by_model"].items():
+            click.echo(f"  {name:<32} recall {'n/a' if r is None else f'{r:.2f}'}")
+        click.echo(
+            f"caught only by sequence models: {report['caught_only_by_sequence_models']}"
+            f"; missed by all: {report['missed_by_all']}"
+        )
+        click.echo(f"written {path}")
+
+    _with_context(app, refs, body)
 
 
 # --------------------------------------------------------------------------- neural (Stage 5)

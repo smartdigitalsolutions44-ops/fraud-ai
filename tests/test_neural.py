@@ -38,8 +38,6 @@ from fraud_ai.models.neural import (
     NeuralModelError,
     NeuralNetworkModel,
     build_network,
-    fraud_loss,
-    overfitting_flags,
 )
 from fraud_ai.models.torch_support import (
     HASHES_FILE,
@@ -49,6 +47,7 @@ from fraud_ai.models.torch_support import (
     parameter_count,
     resolve_device,
 )
+from fraud_ai.models.torch_training import fraud_loss, overfitting_flags
 from tests.model_helpers import make_vector, make_vectors
 
 FAST: dict[str, Any] = {

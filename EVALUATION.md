@@ -286,7 +286,7 @@ makes fraud less uniform:
   * stealthy amounts are 1–3× normal spend, loud ones 2–6×.
 * **New-account card fraud amounts** now overlap legitimate first purchases.
 * **Offices always have at least two staff** on the same network.
-* **Configurable prevalence.** `--fraud-multiplier` (0.1–4) scales the fraud scenarios for
+* **Configurable prevalence.** `--fraud-multiplier` (0.1–3) scales the fraud scenarios for
   prevalence experiments.
 * **Guard test.** `test_no_single_feature_separates_synthetic_fraud` fails if any single
   feature reaches a univariate ROC-AUC of 0.92 or more on the test world's training split.
@@ -513,6 +513,16 @@ The same framework now also evaluates the neural network and the autoencoder:
   probabilities, and the fraud reports refuse them.
 
 The results on this world are in [NEURAL_MODELS.md](NEURAL_MODELS.md) §9.
+
+### Stage 6 additions
+
+* **Sequence models run through the same framework.** The evaluation context rebuilds
+  their point-in-time sequences and verifies the recorded sequence digest.
+* **`complementarity` reports `fraud_detection_overlap`:** fraud caught by both models,
+  caught by only one of them, and missed by both, with fraud types and scenarios.
+* **`fraud-ai sequence stealth-report`** covers the stealthy and temporal takeover cases:
+  every model's probability and the prior behaviour from the sequence, as pseudonymised
+  summaries.
 
 ## 13. What this does not show
 

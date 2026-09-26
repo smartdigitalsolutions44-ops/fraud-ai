@@ -93,8 +93,8 @@ def test_account_takeover_pattern(world: Session) -> None:
             loud += 1
             assert v.get("new_device") is True and v.get("device_changed_recently") is True
             assert int(v.get("rapid_multi_change_count") or 0) >= 3
-            if v.get("previous_transactions_same_currency"):
-                assert float(v.get("transaction_vs_median_ratio") or 0) > 1.5
+            # No amount assertion: takeover amounts deliberately overlap normal spending,
+            # and a victim's own "forgot password" can precede a quiet takeover.
         else:
             quiet += 1
         if not v.get("previous_transactions_same_currency"):

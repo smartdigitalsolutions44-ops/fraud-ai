@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import numpy as np
@@ -24,6 +24,7 @@ from fraud_ai.models.factory import is_anomaly_model
 from fraud_ai.models.registry import resolve_model
 from fraud_ai.models.scoring import load_registered_model
 from fraud_ai.models.training import PreparedData, config_from_manifest, prepare_data
+from fraud_ai.sequences.definition import SequenceDefinition
 
 SPLITS = ("train", "validation", "test")
 EVALUATION_VERSION = "evaluation-1.0.0"
@@ -124,11 +125,31 @@ def build_context(
     manifest = records[0].training_manifest
     if not manifest:
         raise EvaluationError(f"{refs[0]} has no training manifest")
-    prepared = prepare_data(session, config_from_manifest(manifest))
+    # Sequence models need the point-in-time sequences their definition describes; tabular
+    # models ignore them. All sequence models in one context must share one definition.
+    datasets = [(r.training_manifest or {}).get("dataset", {}) for r in records]
+    definitions = {d["sequence"]["fingerprint"]: d for d in datasets if d.get("sequence")}
+    if len(definitions) > 1:
+        raise EvaluationError(
+            "sequence models use different sequence definitions; compare "
+            "models built on the same definition"
+        )
+    config = config_from_manifest(manifest)
+    recorded_digest = None
+    if definitions:
+        dataset = next(iter(definitions.values()))
+        config = replace(config, sequence=SequenceDefinition.from_dict(dataset["sequence"]))
+        recorded_digest = dataset.get("sequence_digest")
+    prepared = prepare_data(session, config)
     if prepared.fingerprint != records[0].dataset_fingerprint:
         raise EvaluationError(
             "the recorded dataset can no longer be reproduced (the data "
             "changed since training); evaluation would not be comparable"
+        )
+    if recorded_digest is not None and prepared.sequence_digest() != recorded_digest:
+        raise EvaluationError(
+            "the recorded event sequences can no longer be reproduced; evaluation would not "
+            "be comparable"
         )
     models = []
     for record in records:

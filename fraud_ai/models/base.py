@@ -52,6 +52,9 @@ class FraudModel(ABC):
     hyperparameters: dict[str, Any]
     train_seconds: float | None
     score_kind: str = FRAUD_PROBABILITY
+    # "tabular" models read the static feature matrix; "sequence" models also need the
+    # user's point-in-time event sequence (a SequenceMatrix).
+    input_kind: str = "tabular"
 
     @property
     def model_id(self) -> str:

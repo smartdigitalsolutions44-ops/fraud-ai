@@ -38,7 +38,6 @@ Architecture (configurable; default ``input -> 128 -> 64 -> 32 -> 1``)::
 
 from __future__ import annotations
 
-import copy
 import json
 import time
 from dataclasses import asdict, dataclass, field, fields
@@ -48,8 +47,6 @@ from typing import Any
 import numpy as np
 import numpy.typing as npt
 import torch
-import torch.nn.functional as F
-from sklearn.metrics import average_precision_score, roc_auc_score
 from torch import nn
 
 from fraud_ai.features.definitions import DEFAULT_FEATURE_VERSION
@@ -70,13 +67,18 @@ from fraud_ai.models.torch_support import (
     verify_digest,
     write_hashes,
 )
+from fraud_ai.models.torch_training import (
+    LOSSES,
+    fit_binary,
+    overfitting_flags,
+    oversample_rows,
+)
 
 MODEL_NAME = "neural-network"
 ALGORITHM = "torch.FeedForward"
 PREPROCESSING = PreprocessingConfig(log_transform=True, standardize=True)
 ACTIVATIONS = ("relu", "gelu")
 NORMALIZATIONS = ("layernorm", "batchnorm", "none")
-LOSSES = ("weighted_bce", "focal")
 IMBALANCE = ("class_weight", "oversample", "none")
 WEIGHTS_FILE, CONFIG_FILE, PREPROCESSOR_FILE = "model.pt", "config.json", "preprocessing.json"
 HISTORY_FILE, MANIFEST_FILE = "history.json", "manifest.json"
@@ -168,29 +170,6 @@ def build_network(input_dim: int, config: NeuralConfig) -> nn.Sequential:
     return nn.Sequential(*layers)
 
 
-def fraud_loss(
-    logits: torch.Tensor,
-    targets: torch.Tensor,
-    pos_weight: torch.Tensor,
-    config: NeuralConfig,
-) -> torch.Tensor:
-    """Weighted BCE on logits; focal loss multiplies it by ``(1 - p_t) ** gamma``."""
-    per_row = F.binary_cross_entropy_with_logits(
-        logits, targets, pos_weight=pos_weight, reduction="none"
-    )
-    if config.loss == "focal":
-        p = torch.sigmoid(logits)
-        p_t = torch.where(targets > 0.5, p, 1 - p)
-        per_row = per_row * (1 - p_t) ** config.focal_gamma
-    return per_row.mean()
-
-
-def _pr_roc(y: npt.NDArray[np.int_], p: Array) -> tuple[float | None, float | None]:
-    if 0 < int(y.sum()) < len(y):
-        return float(average_precision_score(y, p)), float(roc_auc_score(y, p))
-    return None, None
-
-
 class NeuralNetworkModel(FraudModel):
     model_name = MODEL_NAME
 
@@ -232,15 +211,9 @@ class NeuralNetworkModel(FraudModel):
 
     # ------------------------------------------------------------------ training
     def _training_rows(self, y: npt.NDArray[np.int_]) -> npt.NDArray[np.int_]:
-        idx = np.arange(len(y))
         if self.imbalance != "oversample":
-            return idx
-        pos, neg = np.flatnonzero(y == 1), np.flatnonzero(y == 0)
-        target = int(len(neg) * self.oversample_ratio)
-        if len(pos) == 0 or target <= len(pos):
-            return idx
-        rng = np.random.default_rng(self.seed)
-        return np.concatenate([idx, rng.choice(pos, size=target - len(pos), replace=True)])
+            return np.arange(len(y))
+        return oversample_rows(y, self.oversample_ratio, self.seed)
 
     def _split_validation(
         self, matrix: ModelMatrix, y: npt.NDArray[np.int_], validation: Validation | None
@@ -279,67 +252,26 @@ class NeuralNetworkModel(FraudModel):
             self.preprocessor.fit(fit_m)
             X = torch.as_tensor(self.transform(fit_m), dtype=torch.float32)
             Xv = torch.as_tensor(self.transform(val_m), dtype=torch.float32)
-            t = torch.as_tensor(fit_y, dtype=torch.float32)
-            tv = torch.as_tensor(val_y, dtype=torch.float32)
             positives = float(fit_y.sum())
             weight = (
                 (len(fit_y) - positives) / positives if self.imbalance == "class_weight" else 1.0
             )
-            pos_weight = torch.tensor(weight, dtype=torch.float32, device=self.device)
             network = build_network(X.shape[1], cfg).to(self.device)
-            optimizer = torch.optim.AdamW(
-                network.parameters(), lr=cfg.learning_rate, weight_decay=cfg.weight_decay
+            inputs = {"fit": X, "validation": Xv}
+            fit = fit_binary(
+                network,
+                train_logits=lambda idx: network(X[idx].to(self.device)).squeeze(1),
+                split_logits=lambda split: self._logits(network, inputs[split]),
+                rows=self._training_rows(fit_y),
+                y_fit=fit_y,
+                y_val=val_y,
+                pos_weight=weight,
+                config=cfg,
+                seed=self.seed,
+                device=self.device,
+                min_batch=2 if cfg.normalization == "batchnorm" else 1,
             )
-            rows = torch.as_tensor(self._training_rows(fit_y))
-            generator = torch.Generator().manual_seed(self.seed)
-            use_pr = 0 < int(val_y.sum()) < len(val_y)
-            best_score, best_epoch, stale = -np.inf, 0, 0
-            best_state = copy.deepcopy(network.state_dict())
-            history: list[dict[str, Any]] = []
-            for epoch in range(1, cfg.max_epochs + 1):
-                network.train()
-                order = rows[torch.randperm(len(rows), generator=generator)]
-                total = 0.0
-                for start in range(0, len(order), cfg.batch_size):
-                    batch = order[start : start + cfg.batch_size]
-                    if cfg.normalization == "batchnorm" and len(batch) < 2:
-                        continue  # BatchNorm cannot train on a single row
-                    xb, yb = X[batch].to(self.device), t[batch].to(self.device)
-                    optimizer.zero_grad()
-                    loss = fraud_loss(network(xb).squeeze(1), yb, pos_weight, cfg)
-                    loss.backward()  # type: ignore[no-untyped-call]
-                    nn.utils.clip_grad_norm_(network.parameters(), cfg.grad_clip)
-                    optimizer.step()
-                    total += float(loss.item()) * len(batch)
-                train_p = self._forward(network, X)
-                val_logits = self._logits(network, Xv)
-                val_loss = float(fraud_loss(val_logits, tv.to(self.device), pos_weight, cfg).item())
-                val_p = torch.sigmoid(val_logits).cpu().double().numpy()
-                val_pr, val_roc = _pr_roc(val_y, val_p)
-                train_pr, _ = _pr_roc(fit_y, train_p)
-                score = val_pr if use_pr and val_pr is not None else -val_loss
-                improved = score > best_score + cfg.min_delta
-                history.append(
-                    {
-                        "epoch": epoch,
-                        "train_loss": total / len(rows),
-                        "validation_loss": val_loss,
-                        "train_pr_auc": train_pr,
-                        "validation_pr_auc": val_pr,
-                        "validation_roc_auc": val_roc,
-                        "learning_rate": optimizer.param_groups[0]["lr"],
-                        "best_so_far": improved,
-                    }
-                )
-                if improved:
-                    best_score, best_epoch, stale = score, epoch, 0
-                    best_state = copy.deepcopy(network.state_dict())
-                else:
-                    stale += 1
-                    if stale >= cfg.patience:
-                        break
-            network.load_state_dict(best_state)
-            network.eval()
+        history, best_epoch, use_pr = fit.history, fit.best_epoch, fit.selection_metric
         self.network = network
         self.train_seconds = time.perf_counter() - started
         self.history = history
@@ -347,7 +279,7 @@ class NeuralNetworkModel(FraudModel):
             "epochs_completed": len(history),
             "best_epoch": best_epoch,
             "stopped_early": len(history) < cfg.max_epochs,
-            "selection_metric": "validation PR-AUC" if use_pr else "validation loss",
+            "selection_metric": use_pr,
             "validation_source": source,
             "validation_rows": len(val_y),
             "validation_positives": int(val_y.sum()),
@@ -504,30 +436,3 @@ class NeuralNetworkModel(FraudModel):
             stored = json.loads((directory / HISTORY_FILE).read_text())
             model.history, model.training_summary = stored["history"], stored["summary"]
         return model
-
-
-def overfitting_flags(history: list[dict[str, Any]], best_epoch: int) -> list[str]:
-    """Warnings derived from the per-epoch history (never hidden by early stopping)."""
-    flags: list[str] = []
-    if not history or best_epoch < 1:
-        return flags
-    best = history[best_epoch - 1]
-    train_pr, val_pr = best.get("train_pr_auc"), best.get("validation_pr_auc")
-    if train_pr is not None and val_pr is not None:
-        if train_pr - val_pr > 0.10:
-            flags.append(
-                f"train/validation PR-AUC gap {train_pr - val_pr:.3f} at the selected epoch "
-                f"{best_epoch} (train {train_pr:.3f}, validation {val_pr:.3f})"
-            )
-        if train_pr >= 0.99:
-            flags.append(f"train PR-AUC {train_pr:.3f} at epoch {best_epoch}: possible memorising")
-    val_scores = [h["validation_pr_auc"] for h in history if h["validation_pr_auc"] is not None]
-    if val_scores and val_pr is not None and val_scores[-1] < val_pr - 0.05:
-        flags.append(
-            f"validation PR-AUC fell from {val_pr:.3f} (epoch {best_epoch}) to "
-            f"{val_scores[-1]:.3f} by the last epoch: later epochs overfit (best restored)"
-        )
-    losses = [h["validation_loss"] for h in history]
-    if len(losses) > best_epoch and min(losses[best_epoch:]) > losses[best_epoch - 1] * 1.25:
-        flags.append("validation loss rose by >25% after the selected epoch")
-    return flags

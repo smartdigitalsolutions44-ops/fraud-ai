@@ -4,7 +4,8 @@ Training, scoring, walk-forward evaluation and the CLI build and load models thr
 this factory, so a new kind needs no special-casing anywhere else.
 
 * **Supervised kinds** output P(fraud): ``logistic``, ``random-forest``,
-  ``gradient-boosting`` and ``neural-network``.
+  ``gradient-boosting``, ``neural-network`` and the Stage 6 sequence kinds ``gru``,
+  ``transformer`` and ``hybrid-gru`` (which also need point-in-time event sequences).
 * **Anomaly kinds** output an anomaly score, which is *not* a fraud probability:
   ``autoencoder``. Scoring and fraud-model comparisons refuse them.
 
@@ -22,12 +23,14 @@ from fraud_ai.models.estimators import SPECS, BaselineModel, ModelError
 
 NEURAL_KIND = "neural-network"
 AUTOENCODER_KIND = "autoencoder"
-SUPERVISED_KINDS: tuple[str, ...] = (*SPECS, NEURAL_KIND)
+SEQUENCE_KINDS: tuple[str, ...] = ("gru", "transformer", "hybrid-gru")
+SUPERVISED_KINDS: tuple[str, ...] = (*SPECS, NEURAL_KIND, *SEQUENCE_KINDS)
 ANOMALY_KINDS: tuple[str, ...] = (AUTOENCODER_KIND,)
 MODEL_NAMES: dict[str, str] = {
     **{kind: spec.model_name for kind, spec in SPECS.items()},
     NEURAL_KIND: "neural-network",
     AUTOENCODER_KIND: "autoencoder",
+    **{kind: kind for kind in SEQUENCE_KINDS},
 }
 KIND_BY_NAME: dict[str, str] = {name: kind for kind, name in MODEL_NAMES.items()}
 
@@ -48,6 +51,10 @@ def kind_for_name(name: str) -> str:
 
 def is_anomaly_model(name: str) -> bool:
     return KIND_BY_NAME.get(name) in ANOMALY_KINDS
+
+
+def is_sequence_kind(kind: str) -> bool:
+    return kind in SEQUENCE_KINDS
 
 
 def build_model(
@@ -78,6 +85,17 @@ def build_model(
             hyperparameters=hyperparameters,
             feature_version=feature_version,
         )
+    if kind in SEQUENCE_KINDS:
+        from fraud_ai.models.sequence_models import SequenceModel
+
+        return SequenceModel(
+            kind,
+            version,
+            seed=seed,
+            imbalance=imbalance,
+            hyperparameters=hyperparameters,
+            feature_version=feature_version,
+        )
     if kind == AUTOENCODER_KIND:
         from fraud_ai.models.anomaly import AutoencoderModel
 
@@ -98,6 +116,10 @@ def load_model(kind: str, directory: Path, expected_sha256: str) -> FraudModel:
         from fraud_ai.models.neural import NeuralNetworkModel
 
         return NeuralNetworkModel.load(directory, expected_sha256)
+    if kind in SEQUENCE_KINDS:
+        from fraud_ai.models.sequence_models import SequenceModel
+
+        return SequenceModel.load(directory, expected_sha256)
     if kind == AUTOENCODER_KIND:
         from fraud_ai.models.anomaly import AutoencoderModel
 
