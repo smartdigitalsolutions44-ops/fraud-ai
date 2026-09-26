@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     database_url: str | None = None
     data_directory: Path = Path("data")
     model_directory: Path = Path("models")
+    evaluation_directory: Path = Path("evaluation")
 
     # HMAC key used to pseudonymise IPs, device identifiers and addresses.
     pseudonymisation_key: SecretStr | None = None

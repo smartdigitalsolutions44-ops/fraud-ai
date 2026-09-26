@@ -173,7 +173,7 @@ These warnings are stored with the model and printed by `train`, `models show` a
   bit reproducible on the same stack. A test retrains all three models and asserts
   identical predictions. The benchmark runs above reproduced identical metrics across
   three separate training runs.
-* **`fraud-ai evaluate <model>`** rebuilds the recorded dataset and split, reloads the
+* **`fraud-ai evaluate reproduce <model>`** rebuilds the recorded dataset and split, reloads the
   verified artefact and reports whether the data is unchanged and the metrics reproduce
   exactly. It exits non-zero if they do not.
 * **Artefact safety.** `estimator.joblib` is a pickle, and loading a pickle executes code.
@@ -199,6 +199,12 @@ These warnings are stored with the model and printed by `train`, `models show` a
   measured separately from the database-bound snapshot and prediction work (section 11).
 
 ## 10. Example comparison (synthetic)
+
+> **Historical (Stage 3 generator).** The figures in this section were produced before
+> Stage 4 removed several giveaway signals from the synthetic generator (see
+> [EVALUATION.md](EVALUATION.md) §11). They are kept to document Stage 3, and are **not**
+> comparable with current results. Current synthetic results, with confidence intervals,
+> are in [EVALUATION.md](EVALUATION.md) §12.
 
 The output of `fraud-ai train all --version 1.0.1` on 300 synthetic users over 180 days
 (`fraud-ai seed --users 300 --days 180`, seed 7). The default 30-day maturity gives 9,206
@@ -300,13 +306,21 @@ From `scripts/benchmark_models.py`. Model-only timings exclude the database.
 ## 12. Limitations
 
 * **Synthetic data only.** No claim is made about real fraud, real detection rates or real
-  losses. Test sets hold tens of fraud examples, so confidence intervals (Stage 4) are
-  needed before any comparison is meaningful.
+  losses. Test sets hold tens of fraud examples. Stage 4 therefore reports bootstrap
+  confidence intervals and paired tests, and those intervals usually overlap.
 * **Transaction models only by default.** Login events carry very sparse labels. `--kind
   login|all` works, but needs `--implicit-negatives` and a careful maturity choice.
-* **No probability calibration yet.** Class weighting shifts probabilities upward, so they
-  are not calibrated likelihoods (Stage 4).
-* **One split, no walk-forward evaluation** and no confidence intervals yet (Stage 4).
-* **No per-segment metrics** by scenario or amount band yet (Stage 4).
+* **Probabilities are not calibrated in scoring.** Class weighting shifts probabilities
+  upward. Stage 4 fits and stores sigmoid and isotonic calibrators (on validation only),
+  but scoring does not apply them until one is explicitly adopted.
+* **The single split is only the baseline.** Stage 4 adds walk-forward folds; on synthetic
+  worlds these show large fold-to-fold variation.
 * **Pickled artefacts** are safe only when produced by this pipeline and verified by
   digest.
+
+## 13. Evaluation
+
+Confidence intervals, walk-forward evaluation, calibration, cost curves, scenario, cohort
+and error analysis, and paired model comparison are described in
+[EVALUATION.md](EVALUATION.md). The command is `fraud-ai evaluate ...`. The Stage 3
+reproducibility check is now `fraud-ai evaluate reproduce <model>`.

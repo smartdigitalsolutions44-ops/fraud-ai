@@ -16,6 +16,7 @@ from fraud_ai.database.migrations import (
 EXPECTED_TABLES = {
     "users",
     "feature_snapshots",
+    "model_calibrations",
     "devices",
     "user_devices",
     "login_events",
@@ -36,12 +37,12 @@ EXPECTED_TABLES = {
 
 def test_single_linear_head() -> None:
     assert migrations_directory().joinpath("env.py").exists()
-    assert head_revision("sqlite://") == "0003"
+    assert head_revision("sqlite://") == "0004"
 
 
 def test_upgrade_creates_all_tables(any_engine: Engine, backend_url: str) -> None:
     status = schema_status(any_engine, backend_url)
-    assert status.up_to_date and status.current == "0003"
+    assert status.up_to_date and status.current == "0004"
     assert set(status.tables) == EXPECTED_TABLES
     assert set(Base.metadata.tables) == EXPECTED_TABLES
 

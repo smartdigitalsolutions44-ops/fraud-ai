@@ -45,6 +45,7 @@ def seed_synthetic_data(
     reference_time: datetime,
     activity_days: int = 90,
     store_raw_ip: bool = False,
+    fraud_multiplier: float = 1.0,
 ) -> SeedSummary:
     """Generate and ingest synthetic data. The caller owns the transaction."""
     existing = session.scalar(
@@ -57,7 +58,10 @@ def seed_synthetic_data(
     started = time.monotonic()
     log.info("generating synthetic data: users=%d seed=%d days=%d", n_users, seed, activity_days)
     dataset = SyntheticDataGenerator(
-        seed=seed, reference_time=reference_time, activity_days=activity_days
+        seed=seed,
+        reference_time=reference_time,
+        activity_days=activity_days,
+        fraud_multiplier=fraud_multiplier,
     ).generate(n_users)
 
     processor = EventProcessor(session, pseudonymiser, store_raw_ip=store_raw_ip)

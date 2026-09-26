@@ -19,3 +19,7 @@ data/*
 !data/.gitkeep
 models/*
 !models/.gitkeep
+
+# Stage 4 evaluation artefacts (reproducible from the database and models)
+/evaluation/
+/evaluation-benchmark/

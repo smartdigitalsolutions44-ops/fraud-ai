@@ -210,6 +210,8 @@ def seeded_model_world(migrated_template: Path, tmp_path_factory: pytest.TempPat
             seed=13,
             reference_time=MODEL_REF_TIME,
             activity_days=120,
+            # Enough fraud in every time-ordered split for calibration and segment tests.
+            fraud_multiplier=2.5,
         )
     eng.dispose()
     return path

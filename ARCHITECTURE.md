@@ -117,6 +117,9 @@ fraud_ai/
   datasets/    label-availability policy, label resolution, training-dataset builder
   models/      FraudModel contract, leakage-guarded ModelMatrix, preprocessing, time
                splits, metrics/threshold analysis, baselines, training, scoring, registry
+  evaluation/  bootstrap/paired statistics, walk-forward, calibration, costs and bands,
+               scenario/cohort/error analysis, comparison and ensembles, drift baseline,
+               shortcut detection, reproducible JSON reports
   models/      FraudModel interface, model-version registry, prediction storage
   rules/       Rule / RuleEngine
   risk/        RiskPolicy / RiskEngine
@@ -128,7 +131,8 @@ fraud_ai/
 migrations/    Alembic environment and versions
 tests/         pytest suite (SQLite always; PostgreSQL when TEST_POSTGRES_URL is set)
 scripts/       developer scripts and a sample event file
-data/, models/ local runtime data and model artefacts (git-ignored)
+data/, models/, evaluation/
+               local runtime data, model artefacts and evaluation reports (git-ignored)
 ```
 
 ## 5. Database design
@@ -227,7 +231,7 @@ through the real `EventProcessor`. Scenarios:
 | `legitimate_vpn` | VPN for most logins over a long history, known device/address, normal spend | legitimate |
 | `shared_network` | Several accounts behind one office NAT plus shared carrier IPs | legitimate |
 | `new_home_address` | Moves house: address change, new ISP, maybe new laptop, one larger purchase to the new address | legitimate |
-| `account_takeover` | Failed logins, password reset, new device and network, new shipping address, large purchase, then chargeback/report | fraud |
+| `account_takeover` | Varied since Stage 4: loud (failed logins, password reset, new device and network, account changes), quiet credential reuse from a domestic IP, or a hijacked session on the victim's own device; ships to a new drop address, the victim's address, or buys digital goods; then chargeback/report | fraud |
 | `suspicious_velocity` | A credential-stuffing burst: many accounts, few IPs, one automation client, unknown usernames, a few successes | fraud (compromised logins) |
 
 The `new_home_address` and `legitimate_vpn` scenarios exist so a model cannot learn "new
@@ -287,10 +291,32 @@ Summary (details in [MODELS.md](MODELS.md)):
   prediction per (event, model version); a rescore that disagrees is an error, never an
   overwrite. The threshold only labels `predicted_class`; nothing is blocked.
 
-## 10. Extending the platform
+## 10. Evaluation (Stage 4)
+
+Summary (details in [EVALUATION.md](EVALUATION.md)):
+
+* **One recorded dataset.** Evaluation rebuilds the model's recorded dataset from the
+  training manifest and verifies its fingerprint. Every model in a comparison must share
+  it, so all comparisons use identical examples.
+* **Uncertainty is reported, not hidden.** Seeded bootstrap intervals are given for every
+  headline metric. Paired tests are used for comparisons, and their conclusions never name
+  a winner.
+* **Time.** Walk-forward folds retrain fresh models using labels as known at each cutoff.
+* **Calibration** is fitted on validation only. It is stored in `model_calibrations`
+  (migration `0004`, which forbids `fitted_on = 'test'`) and is not applied to scoring.
+* **Decision support, not decisions.** Cost curves and risk bands report the cheapest
+  threshold under stated assumptions but never apply it. The rules and risk engines stay
+  unchanged.
+* **Privacy.** Error reports use one-way pseudonyms. Cohorts are operational, never
+  demographic.
+* **Artefacts.** Sorted JSON under `evaluation/<model-id>/`, reproducible apart from
+  `generated_at`.
+
+## 11. Extending the platform
 
 * **New model:** add a `ModelSpec` (or a new `FraudModel` implementation), train it on the
-  same prepared split as the baselines, and compare with `fraud-ai compare-models`.
+  same prepared split as the baselines, and compare with `fraud-ai compare-models` and
+  `fraud-ai evaluate compare` (paired tests on identical examples).
 
 
 * **New feature / changed feature:** add a new feature version (definitions + a pipeline

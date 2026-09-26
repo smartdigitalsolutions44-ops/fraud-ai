@@ -611,6 +611,31 @@ class FraudLabel(Base):
     user: Mapped[User] = relationship(back_populates="fraud_labels")
 
 
+class ModelCalibration(Base):
+    """A post-hoc calibrator fitted for a model version (Stage 4, migration 0004).
+
+    Always fitted on a non-test split (``fitted_on``) of the model's recorded dataset. The
+    uncalibrated model is unchanged; calibration is an additional, explicit transformation.
+    """
+
+    __tablename__ = "model_calibrations"
+    __table_args__ = (
+        UniqueConstraint("model_version_id", "method", "dataset_fingerprint"),
+        CheckConstraint("fitted_on <> 'test'", name="never_fitted_on_test"),
+    )
+
+    calibration_id: Mapped[uuid.UUID] = _uuid_pk()
+    model_version_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("model_versions.model_version_id")
+    )
+    method: Mapped[str] = mapped_column(String(32))
+    fitted_on: Mapped[str] = mapped_column(String(32))
+    dataset_fingerprint: Mapped[str] = mapped_column(String(64))
+    parameters: Mapped[dict[str, Any]]
+    metrics: Mapped[dict[str, Any]] = mapped_column(default=dict)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
 class FeatureSnapshot(Base):
     """The exact feature vector computed for an event, as of a point in time.
 

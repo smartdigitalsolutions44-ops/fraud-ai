@@ -84,31 +84,39 @@ def test_account_takeover_pattern(world: Session) -> None:
             select(Transaction.event_id).where(Transaction.transaction_id.in_(attack_txns))
         )
     )
-    loud = 0
+    loud = quiet = 0
     for v in iter_vectors(world, events):
-        # Every takeover - loud or stealthy - uses a new device and a new drop address.
-        assert v.get("new_device") is True and v.get("new_address") is True
-        assert v.get("device_changed_recently") is True
-        assert int(v.get("rapid_multi_change_count") or 0) >= 2
+        # Loud takeovers (failed logins, then a reset) come from a new device; stealthy ones
+        # may reuse the victim's own device, address or buy digital goods - there is no
+        # single giveaway signal.
         if v.get("recent_password_reset") is True:
             loud += 1
+            assert v.get("new_device") is True and v.get("device_changed_recently") is True
             assert int(v.get("rapid_multi_change_count") or 0) >= 3
-        if v.get("previous_transactions_same_currency"):
-            assert float(v.get("transaction_vs_median_ratio") or 0) > 1.5
-        else:  # no purchase history: the ratio is honestly unknown, not zero
+            if v.get("previous_transactions_same_currency"):
+                assert float(v.get("transaction_vs_median_ratio") or 0) > 1.5
+        else:
+            quiet += 1
+        if not v.get("previous_transactions_same_currency"):
+            # no purchase history: the ratio is honestly unknown, not zero
             assert v.missing["transaction_vs_median_ratio"].value == "not_observed"
         assert float(v.get("account_age_days") or 0) > 150
         # The chargeback arrives later: the attack vector does not know about it.
         assert v.get("historical_chargebacks") == 0
-    assert loud >= 1
+    # Variety across takeovers is asserted on a larger world in test_synthetic.py; this
+    # 40-user world has only a handful of victims.
+    assert loud + quiet >= 1
 
 
 def test_legitimate_vpn_customer(world: Session) -> None:
     vectors = [v for v in _txn_vectors(world, "legitimate_vpn") if v.get("vpn_detected")]
     assert vectors
-    for v in vectors[5:]:  # once history exists
-        assert v.get("device_seen_before") is True and v.get("address_seen_before") is True
-        assert v.get("rapid_multi_change_count") == 0 and v.get("new_address") is False
+    later = vectors[5:]  # once history exists
+    assert later
+    # Digital goods have no address (None); a gift to a new address is occasional.
+    assert sum(v.get("device_seen_before") is True for v in later) >= 0.8 * len(later)
+    assert sum(v.get("address_seen_before") is not False for v in later) >= 0.8 * len(later)
+    assert all(int(v.get("rapid_multi_change_count") or 0) <= 2 for v in later)
     assert not world.scalars(
         select(FraudLabel)
         .join(User)
@@ -145,10 +153,11 @@ def test_new_address_customer(world: Session) -> None:
 
 def test_normal_customer_is_stable(world: Session) -> None:
     vectors = _txn_vectors(world, "normal")[-60:]
-    assert all(v.get("recent_password_reset") is False for v in vectors)
-    assert sum(v.get("device_seen_before") is True for v in vectors) >= 0.9 * len(vectors)
-    # A first login from the customer's own phone is one legitimate change; never a burst.
-    assert all(int(v.get("rapid_multi_change_count") or 0) <= 1 for v in vectors)
+    # Legitimate customers occasionally forget their password (~2%) or use a one-off device.
+    assert sum(v.get("recent_password_reset") is True for v in vectors) <= 0.1 * len(vectors)
+    assert sum(v.get("device_seen_before") is True for v in vectors) >= 0.85 * len(vectors)
+    # Changes are isolated (a new phone, a reset, a gift address); never a takeover burst.
+    assert all(int(v.get("rapid_multi_change_count") or 0) <= 2 for v in vectors)
 
 
 def test_shared_office_network_and_carrier_nat(world: Session) -> None:

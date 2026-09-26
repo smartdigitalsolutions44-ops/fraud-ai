@@ -3,7 +3,7 @@
 A locally runnable fraud-prevention software platform written in Python. It is not a web
 application.
 
-The current release covers **Stages 1 to 3**:
+The current release covers **Stages 1 to 4**:
 
 * **Stage 1:** the software core, the event architecture, the fraud database (PostgreSQL in
   production, SQLite for local use), migrations, synthetic data and the CLI.
@@ -12,10 +12,16 @@ The current release covers **Stages 1 to 3**:
 * **Stage 3:** baseline fraud models (logistic regression, random forest, gradient
   boosting), trained on time-ordered splits, evaluated with threshold analysis, versioned,
   reproducible, and scored into `model_predictions`.
+* **Stage 4:** the evaluation framework, which covers:
+  * bootstrap confidence intervals and walk-forward evaluation;
+  * calibration and cost-sensitive threshold analysis;
+  * scenario, cohort and error analysis;
+  * paired model comparison, a drift baseline and reproducible JSON reports.
 
-No fraud *decisions* are made yet, and all bundled data is synthetic. See
-[ARCHITECTURE.md](ARCHITECTURE.md), [FEATURES.md](FEATURES.md), [MODELS.md](MODELS.md) and
-[ROADMAP.md](ROADMAP.md).
+No fraud *decisions* are made yet, and all bundled data is synthetic. Evaluation results
+describe synthetic data only; they are not real-world detection rates or savings. See
+[ARCHITECTURE.md](ARCHITECTURE.md), [FEATURES.md](FEATURES.md), [MODELS.md](MODELS.md),
+[EVALUATION.md](EVALUATION.md) and [ROADMAP.md](ROADMAP.md).
 
 ## Install
 
@@ -53,9 +59,23 @@ fraud-ai seed --users 300 --days 180            # enough history for a time-orde
 fraud-ai train all                              # LR + random forest + gradient boosting
 fraud-ai compare-models                         # same split, same dataset, side by side
 fraud-ai models show gradient-boosting-1.0.0    # reproducibility record + threshold analysis
-fraud-ai evaluate gradient-boosting-1.0.0       # re-evaluate; checks results reproduce
+fraud-ai evaluate reproduce gradient-boosting-1.0.0   # re-evaluate; checks results reproduce
 fraud-ai score <event-id> --model gradient-boosting-1.0.0   # store a prediction (no decision)
 python scripts/benchmark_models.py --database-url sqlite:///data/fraud_ai.db
+
+# Stage 4 - evaluation (JSON artefacts under evaluation/<model-id>/)
+M=gradient-boosting-1.0.0
+fraud-ai evaluate confidence $M --bootstrap 1000 --seed 0   # 95% bootstrap CIs
+fraud-ai evaluate walk-forward $M --period-days 30          # retrain per fold, as-of labels
+fraud-ai evaluate calibration $M                            # sigmoid / isotonic, fitted on validation
+fraud-ai evaluate scenarios $M                              # per-scenario + cohort FPR checks
+fraud-ai evaluate errors $M --limit 50                      # pseudonymised FP / FN
+fraud-ai evaluate costs $M --fraud-loss 500 --review-cost 5 --friction 10
+fraud-ai evaluate compare                                   # paired tests, agreement, ensembles
+fraud-ai evaluate drift-baseline --model $M                 # PSI / Jensen-Shannon reference
+fraud-ai evaluate report $M                                 # every per-model artefact at once
+fraud-ai seed --users 300 --fraud-multiplier 2              # prevalence experiments
+python scripts/evaluation_benchmark.py --users 1000         # larger synthetic benchmark
 python -m fraud_ai --help        # equivalent entry point
 ```
 
@@ -76,6 +96,7 @@ fraud-ai db init
 | `LOG_LEVEL` | `INFO` | |
 | `DATA_DIRECTORY` | `data` | |
 | `MODEL_DIRECTORY` | `models` | |
+| `EVALUATION_DIRECTORY` | `evaluation` | Stage 4 report artefacts |
 | `PSEUDONYMISATION_KEY` | a generated dev key file | Required outside development/test; at least 32 characters |
 | `STORE_RAW_IP` | `false` | Store raw IPs alongside their keyed hash |
 | `LOCAL_LLM_MODEL`, `LOCAL_LLM_ENDPOINT` | unset | Stage 7; the endpoint must be local or private |

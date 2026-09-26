@@ -61,6 +61,7 @@ SCENARIO_WEIGHTS: dict[str, float] = {
     "friendly_fraud": 0.04,
 }
 SCENARIOS = tuple(SCENARIO_WEIGHTS)
+FRAUD_SCENARIOS = ("account_takeover", "new_account_fraud", "friendly_fraud")
 
 _STREETS = [
     "High Street",
@@ -225,13 +226,23 @@ class SyntheticDataset:
 
 
 class SyntheticDataGenerator:
-    def __init__(self, *, seed: int, reference_time: datetime, activity_days: int = 90) -> None:
+    def __init__(
+        self,
+        *,
+        seed: int,
+        reference_time: datetime,
+        activity_days: int = 90,
+        fraud_multiplier: float = 1.0,
+    ) -> None:
         if activity_days < 30:
             raise ValueError("activity_days must be at least 30")
         self.rng = random.Random(seed)
         self.end = reference_time
         self.start = reference_time - timedelta(days=activity_days)
         self.activity_days = activity_days
+        if not 0 < fraud_multiplier <= 4:
+            raise ValueError("fraud_multiplier must be in (0, 4]")
+        self.fraud_multiplier = fraud_multiplier
         self._events: list[tuple[datetime, int, Event]] = []
         self._seq = 0
         self._fraud_txns: set[uuid.UUID] = set()
@@ -524,23 +535,27 @@ class SyntheticDataGenerator:
         address_id: uuid.UUID | None = None,
         pm_id: uuid.UUID | None = None,
         approve_prob: float = 0.98,
+        ship: bool = True,
     ) -> tuple[uuid.UUID, bool]:
+        """``ship=False`` models digital goods: no shipping address at all."""
         txn_id = self._uuid()
+        metadata: dict[str, Any] = {
+            "transaction_id": str(txn_id),
+            "amount": amount,
+            "currency": "GBP",
+            "payment_method_id": str(pm_id or profile.payment_method_id),
+            "merchant_category": self.rng.choice(_MCCS),
+            "channel": "mobile_app" if device.context["device_type"] == "mobile" else "web",
+            "network": net,
+            "device": device.context,
+        }
+        if ship:
+            metadata["shipping_address_id"] = str(address_id or profile.home_address_id)
         self._emit(
             EventType.TRANSACTION_CREATED,
             ts,
             profile.user_id,
-            {
-                "transaction_id": str(txn_id),
-                "amount": amount,
-                "currency": "GBP",
-                "payment_method_id": str(pm_id or profile.payment_method_id),
-                "shipping_address_id": str(address_id or profile.home_address_id),
-                "merchant_category": self.rng.choice(_MCCS),
-                "channel": "mobile_app" if device.context["device_type"] == "mobile" else "web",
-                "network": net,
-                "device": device.context,
-            },
+            metadata,
             device=device.identifier,
             session_id=session,
         )
@@ -578,20 +593,66 @@ class SyntheticDataGenerator:
                 net = _network(cgnat, self.rng.choice(_MOBILE))
             if network_picker is not None:
                 net = network_picker(ts, net)
+            if self.rng.random() < 0.08:  # away from home: a friend's Wi-Fi, a hotel, a cafe
+                net = _network(self._residential_ip(), self.rng.choice(_RESIDENTIAL), "England")
+            if self.rng.random() < 0.04:  # a one-off device: work PC, a friend's laptop...
+                device = self._device(self.rng.choice([DeviceType.DESKTOP, DeviceType.TABLET]))
+            forgot = self.rng.random() < 0.02  # legitimate "forgot password" before shopping
+            if forgot:
+                self._emit(
+                    EventType.PASSWORD_RESET,
+                    ts - timedelta(minutes=3),
+                    profile.user_id,
+                    {"method": "email_link", "network": net, "device": device.context},
+                    device=device.identifier,
+                )
             _, session = self._login(
                 profile, ts, device, net, typo=self.rng.random() < 0.05, mfa=self.rng.random() < 0.1
             )
-            if self.rng.random() < purchase_prob:
-                # ~3% of legitimate purchases are unusually large (a TV, a holiday...).
-                big = self.rng.random() < 0.03
-                mean = profile.avg_amount * (self.rng.uniform(4.0, 9.0) if big else 1.0)
+            if forgot or self.rng.random() < purchase_prob:
+                at = ts + timedelta(minutes=self.rng.randint(1, 20))
+                # ~8% of legitimate purchases are unusually large (a TV, a holiday...).
+                big = self.rng.random() < 0.08
+                mean = profile.avg_amount * (self.rng.uniform(3.0, 9.0) if big else 1.0)
+                kind = self.rng.random()
+                if kind < 0.15:  # digital goods: no shipping address
+                    self._purchase(
+                        profile,
+                        at,
+                        device,
+                        net,
+                        session,
+                        self._amount(mean, 0.15 if big else 0.35),
+                        ship=False,
+                    )
+                    continue
+                address = None
+                if kind < 0.18:  # a gift sent to a newly added address
+                    address = self._uuid()
+                    town = self.rng.choice(_TOWNS)
+                    self._emit(
+                        EventType.ADDRESS_ADDED,
+                        at - timedelta(minutes=1),
+                        profile.user_id,
+                        {
+                            "address_id": str(address),
+                            "address_type": "shipping",
+                            "full_address": self._address_text(town),
+                            "country": town[0],
+                            "region": town[1],
+                            "postal_prefix": town[3],
+                        },
+                        device=device.identifier,
+                        session_id=session,
+                    )
                 self._purchase(
                     profile,
-                    ts + timedelta(minutes=self.rng.randint(1, 20)),
+                    at,
                     device,
                     net,
                     session,
                     self._amount(mean, 0.15 if big else 0.35),
+                    address_id=address,
                 )
 
     # ------------------------------------------------------------------ scenarios
@@ -737,10 +798,15 @@ class SyntheticDataGenerator:
         )
         attack = self._attack_time()
         self._routine_activity(profile, self.start, attack - timedelta(hours=2))
-        stealth = self.rng.random() < 0.35
+        variant = self.rng.random()
+        hijack = variant < 0.20  # malware / session hijack on the victim's own device
+        stealth = hijack or variant < 0.50
 
         attacker_dev = self._device(self.rng.choice([DeviceType.DESKTOP, DeviceType.MOBILE]))
-        if stealth:
+        if hijack:
+            attacker_dev = profile.primary_device
+            attacker_net = profile.home_network
+        elif stealth:
             # Credential reuse from a domestic residential connection: few loud signals.
             attacker_net = _network(
                 self._residential_ip(), self.rng.choice(_RESIDENTIAL), "England"
@@ -800,22 +866,26 @@ class SyntheticDataGenerator:
                         session_id=session,
                     )
         drop_town = self.rng.choice(_TOWNS if stealth else _FOREIGN_TOWNS)
-        drop_address = self._uuid()
-        self._emit(
-            EventType.ADDRESS_ADDED,
-            t + timedelta(minutes=12),
-            profile.user_id,
-            {
-                "address_id": str(drop_address),
-                "address_type": "shipping",
-                "full_address": self._address_text(drop_town),
-                "country": drop_town[0],
-                "region": drop_town[1],
-                "postal_prefix": drop_town[3],
-            },
-            device=attacker_dev.identifier,
-            session_id=session,
-        )
+        destination = self.rng.random()
+        ship = destination >= 0.30  # 30% digital goods (gift cards, top-ups): nothing shipped
+        drop_address: uuid.UUID | None = None
+        if destination >= 0.50:  # 50% a new drop address; 20% the victim's own address
+            drop_address = self._uuid()
+            self._emit(
+                EventType.ADDRESS_ADDED,
+                t + timedelta(minutes=12),
+                profile.user_id,
+                {
+                    "address_id": str(drop_address),
+                    "address_type": "shipping",
+                    "full_address": self._address_text(drop_town),
+                    "country": drop_town[0],
+                    "region": drop_town[1],
+                    "postal_prefix": drop_town[3],
+                },
+                device=attacker_dev.identifier,
+                session_id=session,
+            )
         pm_id = None
         if self.rng.random() < (0.2 if stealth else 0.4):
             pm_id = self._uuid()
@@ -827,7 +897,8 @@ class SyntheticDataGenerator:
                 device=attacker_dev.identifier,
                 session_id=session,
             )
-        multiplier = (2.0, 5.0) if stealth else (5.0, 12.0)
+        # Amounts overlap legitimate large purchases (which reach 3-9x the usual spend).
+        multiplier = (1.0, 3.0) if stealth else (2.0, 6.0)
         purchase_at = t + timedelta(minutes=17)
         for _ in range(self.rng.randint(1, 3)):
             amount = self._amount(profile.avg_amount * self.rng.uniform(*multiplier), 0.1)
@@ -841,6 +912,7 @@ class SyntheticDataGenerator:
                 address_id=drop_address,
                 pm_id=pm_id,
                 approve_prob=0.85,
+                ship=ship,
             )
             self._fraud_outcome(profile, txn_id, approved, purchase_at, FraudType.ACCOUNT_TAKEOVER)
             purchase_at += timedelta(minutes=self.rng.randint(3, 40))
@@ -926,7 +998,7 @@ class SyntheticDataGenerator:
                 profile.primary_device,
                 net,
                 session,
-                self._amount(self.rng.uniform(120, 600), 0.2),
+                self._amount(self.rng.uniform(40, 450), 0.3),
                 pm_id=pm,
                 approve_prob=0.85,
             )
@@ -1008,23 +1080,29 @@ class SyntheticDataGenerator:
 
     # ------------------------------------------------------------------ orchestration
     @staticmethod
-    def allocate(n_users: int) -> dict[str, int]:
+    def allocate(n_users: int, fraud_multiplier: float = 1.0) -> dict[str, int]:
+        """Users per scenario. ``fraud_multiplier`` scales the fraud scenarios (prevalence
+        experiments); ``normal`` absorbs the difference."""
         if n_users < len(SCENARIOS):
             raise ValueError(f"need at least {len(SCENARIOS)} users (one per scenario)")
-        counts = {s: max(1, int(w * n_users)) for s, w in SCENARIO_WEIGHTS.items()}
+        weights = {
+            s: w * (fraud_multiplier if s in FRAUD_SCENARIOS else 1.0)
+            for s, w in SCENARIO_WEIGHTS.items()
+        }
+        counts = {s: max(1, int(w * n_users)) for s, w in weights.items()}
         counts["normal"] += n_users - sum(counts.values())
         if counts["normal"] < 1:
             raise ValueError("user allocation failed")
         return counts
 
     def generate(self, n_users: int) -> SyntheticDataset:
-        counts = self.allocate(n_users)
+        counts = self.allocate(n_users, self.fraud_multiplier)
         for _ in range(counts["normal"]):
             self._scenario_normal()
         for _ in range(counts["legitimate_vpn"]):
             self._scenario_legitimate_vpn()
-        for i in range(counts["shared_network"]):
-            self._scenario_shared_network(self._office_ips[i % len(self._office_ips)])
+        for i in range(counts["shared_network"]):  # offices of (at least) two staff
+            self._scenario_shared_network(self._office_ips[(i // 2) % len(self._office_ips)])
         for _ in range(counts["new_home_address"]):
             self._scenario_new_home_address()
         for _ in range(counts["account_takeover"]):

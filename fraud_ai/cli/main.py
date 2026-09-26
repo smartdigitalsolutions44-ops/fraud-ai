@@ -148,6 +148,13 @@ def db_status(app: AppContext) -> None:
 @click.option("--users", "n_users", default=60, show_default=True, type=click.IntRange(6, 5000))
 @click.option("--seed", "rng_seed", default=42, show_default=True, type=int)
 @click.option(
+    "--fraud-multiplier",
+    default=1.0,
+    show_default=True,
+    type=click.FloatRange(0.1, 4.0),
+    help="Scale the share of fraud scenarios (prevalence experiments).",
+)
+@click.option(
     "--days",
     default=90,
     show_default=True,
@@ -162,7 +169,12 @@ def db_status(app: AppContext) -> None:
 )
 @pass_app
 def seed(
-    app: AppContext, n_users: int, rng_seed: int, days: int, reference_time: datetime | None
+    app: AppContext,
+    n_users: int,
+    rng_seed: int,
+    fraud_multiplier: float,
+    days: int,
+    reference_time: datetime | None,
 ) -> None:
     """Load deterministic synthetic demo data through the ingestion pipeline."""
     if app.settings.environment in {Environment.STAGING, Environment.PRODUCTION}:
@@ -184,6 +196,7 @@ def seed(
                 reference_time=ref,
                 activity_days=days,
                 store_raw_ip=app.settings.store_raw_ip,
+                fraud_multiplier=fraud_multiplier,
             )
     except FraudAIError as exc:
         raise click.ClickException(str(exc)) from None
@@ -860,7 +873,12 @@ def models_activate(app: AppContext, model_ref: str) -> None:
     click.echo(f"{model_ref} is now active")
 
 
-@cli.command("evaluate")
+@cli.group("evaluate")
+def evaluate() -> None:
+    """Evaluation, calibration, error analysis and robustness (analysis only)."""
+
+
+@evaluate.command("reproduce")
 @click.argument("model_ref")
 @pass_app
 def evaluate_model(app: AppContext, model_ref: str) -> None:
@@ -888,6 +906,453 @@ def evaluate_model(app: AppContext, model_ref: str) -> None:
     click.echo(SYNTHETIC_NOTE)
     if not result.reproduced:
         sys.exit(1)
+
+
+# --------------------------------------------------------------------------- evaluate (Stage 4)
+def _eval_options(func: Any) -> Any:
+    options = [
+        click.option(
+            "--bootstrap",
+            "iterations",
+            type=click.IntRange(50, 100000),
+            default=1000,
+            show_default=True,
+            help="Bootstrap iterations.",
+        ),
+        click.option(
+            "--level",
+            type=click.FloatRange(0.5, 0.999),
+            default=0.95,
+            show_default=True,
+            help="Confidence level.",
+        ),
+        click.option(
+            "--seed", type=int, default=0, show_default=True, help="Bootstrap random seed."
+        ),
+        click.option(
+            "--threshold",
+            type=click.FloatRange(0, 1),
+            default=None,
+            help="Evaluation threshold (default: the model's recorded threshold).",
+        ),
+        click.option(
+            "--output-dir",
+            type=click.Path(file_okay=False, path_type=Path),
+            default=None,
+            help="Default: EVALUATION_DIRECTORY.",
+        ),
+    ]
+    for option in reversed(options):
+        func = option(func)
+    return func
+
+
+def _settings_from(opts: dict[str, Any], **extra: Any) -> Any:
+    from fraud_ai.evaluation.reports import EvaluationSettings
+
+    return EvaluationSettings(
+        iterations=opts["iterations"],
+        level=opts["level"],
+        seed=opts["seed"],
+        threshold=opts["threshold"],
+        **extra,
+    )
+
+
+def _out_dir(app: AppContext, opts: dict[str, Any], name: str) -> Path:
+    base = opts.get("output_dir") or app.settings.evaluation_directory
+    return Path(base) / name
+
+
+def _with_context(app: AppContext, refs: list[str], body: Any) -> None:
+    app.require_migrated()
+    from fraud_ai.evaluation.context import build_context
+
+    with session_scope(make_session_factory(app.engine)) as session:
+        try:
+            ctx = build_context(session, refs)
+            body(session, ctx)
+        except FraudAIError as exc:
+            raise click.ClickException(str(exc)) from None
+
+
+def _ci(entry: dict[str, Any]) -> str:
+    if entry.get("estimate") is None:
+        return "n/a"
+    if entry.get("lower") is None:
+        return f"{entry['estimate']:.3f}"
+    return f"{entry['estimate']:.3f} [{entry['lower']:.3f}, {entry['upper']:.3f}]"
+
+
+def _print_confidence(report: dict[str, Any]) -> None:
+    for split in ("validation", "test"):
+        part = report[split]
+        click.echo(
+            f"{split}: n={part['n']} fraud={part['fraud']} "
+            f"({int(100 * report['level'])}% bootstrap CI, {report['iterations']} "
+            f"iterations, seed {report['seed']}, threshold {report['threshold']})"
+        )
+        for name, entry in part["metrics"].items():
+            click.echo(f"  {name:<9} {_ci(entry)}")
+
+
+@evaluate.command("confidence")
+@click.argument("model_ref")
+@_eval_options
+@pass_app
+def evaluate_confidence(app: AppContext, /, model_ref: str, **opts: Any) -> None:
+    """Bootstrap confidence intervals for PR-AUC, ROC-AUC, precision, recall, F1, FPR, FNR."""
+    from fraud_ai.evaluation import reports
+
+    def body(session: Any, ctx: Any) -> None:
+        report = reports.confidence(ctx, ctx.model(model_ref), _settings_from(opts))
+        path = reports.write_report(_out_dir(app, opts, model_ref), "confidence", report)
+        _print_confidence(report)
+        click.echo(f"written {path}")
+
+    _with_context(app, [model_ref], body)
+
+
+@evaluate.command("walk-forward")
+@click.argument("model_ref")
+@click.option("--period-days", type=click.IntRange(7, 365), default=30, show_default=True)
+@click.option("--initial-periods", type=click.IntRange(1, 24), default=3, show_default=True)
+@click.option("--max-folds", type=click.IntRange(1, 60), default=12, show_default=True)
+@_eval_options
+@pass_app
+def evaluate_walk_forward(
+    app: AppContext,
+    /,
+    model_ref: str,
+    period_days: int,
+    initial_periods: int,
+    max_folds: int,
+    **opts: Any,
+) -> None:
+    """Expanding-window retrain/evaluate folds with as-of labels (no future leakage)."""
+    from fraud_ai.evaluation import reports
+    from fraud_ai.evaluation.walk_forward import WalkForwardConfig
+
+    config = WalkForwardConfig(
+        period_days, initial_periods, max_folds, bootstrap_iterations=min(opts["iterations"], 500)
+    )
+
+    def body(session: Any, ctx: Any) -> None:
+        report = reports.walk_forward_report(
+            ctx, ctx.model(model_ref), _settings_from(opts, walk_forward=config)
+        )
+        path = reports.write_report(_out_dir(app, opts, model_ref), "walk_forward", report)
+        click.echo(
+            f"{'fold':<6}{'train':>8}{'fraud':>7}{'test':>7}{'fraud':>7}"
+            f"{'PR-AUC':>9}{'recall':>8}{'FPR':>8}  test period"
+        )
+        for f in report["folds"]:
+            if "test_metrics" not in f:
+                click.echo(f"{f['fold']:<6}skipped: {f['skipped']}")
+                continue
+            m = f["test_metrics"]
+            pr = "n/a" if m["pr_auc"] is None else f"{m['pr_auc']:.3f}"
+            rec = "n/a" if m["recall"] is None else f"{m['recall']:.3f}"
+            fpr = "n/a" if m["fpr"] is None else f"{m['fpr']:.4f}"
+            click.echo(
+                f"{f['fold']:<6}{f['train']['rows']:>8}{f['train']['fraud']:>7}"
+                f"{f['test']['rows']:>7}{f['test']['fraud']:>7}{pr:>9}{rec:>8}{fpr:>8}"
+                f"  {f['test']['start'][:10]}..{f['test']['end'][:10]}"
+            )
+        click.echo(f"PR-AUC across folds: {report['stability']['pr_auc']}")
+        click.echo(f"written {path}")
+
+    _with_context(app, [model_ref], body)
+
+
+@evaluate.command("calibration")
+@click.argument("model_ref")
+@click.option(
+    "--persist/--no-persist",
+    default=True,
+    show_default=True,
+    help="Store the fitted calibrators with the model version.",
+)
+@_eval_options
+@pass_app
+def evaluate_calibration(app: AppContext, /, model_ref: str, persist: bool, **opts: Any) -> None:
+    """Uncalibrated vs sigmoid vs isotonic (fitted on validation only, reported on test)."""
+    from fraud_ai.evaluation import reports
+
+    def body(session: Any, ctx: Any) -> None:
+        model = ctx.model(model_ref)
+        report = reports.calibration(ctx, model, _settings_from(opts))
+        if persist:
+            reports.persist_calibrations(session, ctx, model, report)
+        path = reports.write_report(_out_dir(app, opts, model_ref), "calibration", report)
+        click.echo(f"{'method':<14}{'Brier':>9}{'log loss':>10}{'ECE':>8}{'PR-AUC':>9}  (test)")
+        for method, r in report["methods"].items():
+            if "test" not in r:
+                click.echo(f"{method:<14}{r.get('error')}")
+                continue
+            t = r["test"]
+            pr = "n/a" if t["pr_auc"] is None else f"{t['pr_auc']:.3f}"
+            ece = "n/a" if t["ece"] is None else f"{t['ece']:.4f}"
+            click.echo(f"{method:<14}{t['brier']:>9.5f}{t['log_loss']:>10.4f}{ece:>8}{pr:>9}")
+        click.echo("reliability (test, uncalibrated): bucket  n  mean predicted  fraud rate")
+        for b in report["methods"]["uncalibrated"]["test"]["reliability"]:
+            if b["count"]:
+                click.echo(
+                    f"  {b['lower']:.1f}-{b['upper']:.1f} {b['count']:>6} "
+                    f"{b['mean_predicted']:>8.3f} {b['fraud_rate']:>8.3f}"
+                )
+        click.echo(f"written {path}{' (calibrators persisted)' if persist else ''}")
+
+    _with_context(app, [model_ref], body)
+
+
+@evaluate.command("scenarios")
+@click.argument("model_ref")
+@_eval_options
+@pass_app
+def evaluate_scenarios(app: AppContext, /, model_ref: str, **opts: Any) -> None:
+    """Per-scenario metrics and operational-cohort false-positive checks."""
+    from fraud_ai.evaluation import reports
+
+    def body(session: Any, ctx: Any) -> None:
+        report = reports.scenarios(ctx, ctx.model(model_ref), _settings_from(opts))
+        path = reports.write_report(_out_dir(app, opts, model_ref), "scenarios", report)
+
+        def f(v: Any, d: int = 3) -> str:
+            return "n/a" if v is None else f"{v:.{d}f}"
+
+        click.echo(
+            f"{'segment':<28}{'n':>6}{'fraud':>6}{'recall':>8}{'FPR':>8}{'prec':>7}"
+            f"{'PR-AUC':>8}  notes"
+        )
+        for seg in report["scenarios"]["segments"]:
+            click.echo(
+                f"{seg['segment']:<28}{seg['n']:>6}{seg.get('fraud', 0):>6}"
+                f"{f(seg.get('recall')):>8}{f(seg.get('fpr'), 4):>8}"
+                f"{f(seg.get('precision')):>7}{f(seg.get('pr_auc')):>8}  "
+                f"{'; '.join(seg.get('notes', []))}"
+            )
+        cohorts = report["cohorts"]
+        click.echo(
+            f"\noperational cohorts (legitimate events; global FPR {cohorts['global_fpr']:.4f}):"
+        )
+        for c in cohorts["cohorts"]:
+            flag = "FLAG " if c["flagged_higher_fpr"] else ""
+            click.echo(
+                f"  {flag}{c['cohort']:<24} n={c['legitimate_events']:<6} "
+                f"FPR={f(c['fpr'], 4)} CI={c['fpr_interval_95']}"
+            )
+        click.echo(f"written {path}")
+
+    _with_context(app, [model_ref], body)
+
+
+@evaluate.command("errors")
+@click.argument("model_ref")
+@click.option("--limit", type=click.IntRange(0, 10000), default=50, show_default=True)
+@_eval_options
+@pass_app
+def evaluate_errors(app: AppContext, /, model_ref: str, limit: int, **opts: Any) -> None:
+    """False-positive and false-negative analysis (pseudonymised, no raw identifiers)."""
+    from fraud_ai.evaluation import reports
+
+    def body(session: Any, ctx: Any) -> None:
+        report = reports.errors(ctx, ctx.model(model_ref), _settings_from(opts, error_limit=limit))
+        path = reports.write_report(_out_dir(app, opts, model_ref), "errors", report)
+        fps, fns = report["false_positives"], report["false_negatives"]
+        click.echo(f"false positives: {fps['count']} by scenario {fps['by_scenario']}")
+        for trait, t in fps["traits"].items():
+            lift = "n/a" if t["lift"] is None else f"{t['lift']:.1f}x"
+            click.echo(f"  {trait:<22} {t['false_positives_with_trait']:>4} FPs  lift {lift}")
+        click.echo(f"false negatives: {fns['count']} by fraud type {fns['by_fraud_type']}")
+        for ex in fns["examples"][:5]:
+            click.echo(
+                f"  {ex['ref']} p={ex['probability']:.3f} {ex['fraud_type']} "
+                f"device_seen_before={ex['context']['device_seen_before']} "
+                f"new_address={ex['context']['new_address']}"
+            )
+        click.echo(f"written {path}")
+
+    _with_context(app, [model_ref], body)
+
+
+@evaluate.command("costs")
+@click.argument("model_ref")
+@click.option("--fraud-loss", type=click.FloatRange(0), default=500.0, show_default=True)
+@click.option("--review-cost", type=click.FloatRange(0), default=5.0, show_default=True)
+@click.option("--step-up-cost", type=click.FloatRange(0), default=1.0, show_default=True)
+@click.option(
+    "--friction",
+    type=click.FloatRange(0),
+    default=10.0,
+    show_default=True,
+    help="Cost of inconveniencing a legitimate customer.",
+)
+@click.option(
+    "--loss-mode", type=click.Choice(["fixed", "amount"]), default="fixed", show_default=True
+)
+@click.option(
+    "--bands",
+    default="0.3,0.7",
+    show_default=True,
+    help="Conceptual low/review/high band boundaries.",
+)
+@_eval_options
+@pass_app
+def evaluate_costs(
+    app: AppContext,
+    /,
+    model_ref: str,
+    fraud_loss: float,
+    review_cost: float,
+    step_up_cost: float,
+    friction: float,
+    loss_mode: str,
+    bands: str,
+    **opts: Any,
+) -> None:
+    """Expected cost per threshold and risk-band analysis (decision support only)."""
+    from fraud_ai.evaluation import reports
+    from fraud_ai.evaluation.costs import CostConfig
+
+    try:
+        low, high = (float(x) for x in bands.split(","))
+        if not 0 < low < high < 1:
+            raise ValueError("bands must satisfy 0 < low < high < 1")
+        config = CostConfig(
+            fraud_loss, review_cost, step_up_cost, friction, fraud_loss_mode=loss_mode
+        )
+    except ValueError as exc:
+        raise click.BadParameter(str(exc)) from None
+
+    def body(session: Any, ctx: Any) -> None:
+        settings = _settings_from(opts, costs=config, bands=(low, high))
+        model = ctx.model(model_ref)
+        report = reports.costs(ctx, model, settings)
+        bands_report = reports.thresholds(ctx, model, settings)
+        path = reports.write_report(_out_dir(app, opts, model_ref), "costs", report)
+        reports.write_report(_out_dir(app, opts, model_ref), "thresholds", bands_report)
+        curve = report["manual_review"]
+        click.echo(f"{'thr':>6}{'caught':>8}{'missed':>8}{'FP':>6}{'flagged':>9}{'total cost':>13}")
+        for r in curve["rows"]:
+            label = r["label"] or f"{r['threshold']:.2f}"
+            click.echo(
+                f"{label:>6}{r['fraud_caught']:>8}{r['fraud_missed']:>8}"
+                f"{r['false_positives']:>6}{r['flagged']:>9}{r['total_cost']:>13.2f}"
+            )
+        click.echo(
+            f"lowest-cost threshold in this experiment: {curve['lowest_cost_threshold']} "
+            "(NOT applied - decision support only)"
+        )
+        for b in bands_report["bands"]["bands"]:
+            click.echo(
+                f"  band {b['band']:<10} {b['range']} population "
+                f"{100 * (b['population_share'] or 0):.1f}%  fraud {b['fraud']} "
+                f"({100 * (b['share_of_all_fraud'] or 0):.0f}% of all)  "
+                f"legitimate {b['legitimate_in_band']}"
+            )
+        click.echo(f"written {path}")
+
+    _with_context(app, [model_ref], body)
+
+
+def _default_comparison_refs(app: AppContext) -> list[str]:
+    from collections import Counter
+
+    from fraud_ai.models.registry import list_model_versions
+
+    with session_scope(make_session_factory(app.engine)) as session:
+        rows = list_model_versions(session)
+        if not rows:
+            raise click.ClickException("no models registered")
+        counts = Counter(r.dataset_fingerprint for r in rows)
+        latest = max(rows, key=lambda r: r.training_timestamp).dataset_fingerprint
+        best = max(counts, key=lambda fp: (counts[fp], fp == latest))
+        return [f"{r.model_name}-{r.model_version}" for r in rows if r.dataset_fingerprint == best]
+
+
+@evaluate.command("compare")
+@click.argument("model_refs", nargs=-1)
+@_eval_options
+@pass_app
+def evaluate_compare(app: AppContext, /, model_refs: tuple[str, ...], **opts: Any) -> None:
+    """Paired tests, agreement and ensemble research on identical examples."""
+    from fraud_ai.evaluation import reports
+
+    refs = list(model_refs) or _default_comparison_refs(app)
+    if len(refs) < 2:
+        raise click.ClickException("need at least two models trained on the same dataset")
+
+    def body(session: Any, ctx: Any) -> None:
+        report = reports.compare(ctx, _settings_from(opts))
+        path = reports.write_report(
+            _out_dir(app, opts, f"comparisons/{ctx.fingerprint[:16]}"), "compare", report
+        )
+        for name, part in report["confidence"].items():
+            click.echo(f"{name:<34} PR-AUC {_ci(part['metrics']['pr_auc'])}")
+        for pair in report["pairwise"]:
+            d = pair["pr_auc_difference"]
+            click.echo(
+                f"{pair['a']} - {pair['b']}: {_ci(d)}  McNemar p="
+                f"{pair['mcnemar']['p_value']:.3f}  -> {pair['conclusion']}"
+            )
+        click.echo("agreement groups (test):")
+        for g in report["agreement"]["groups"]:
+            click.echo(
+                f"  {g['group']:<44} {g['events']:>6} events  fraud rate {g['fraud_rate']:.3f}"
+            )
+        ens = report["ensembles"]
+        click.echo(f"ensembles vs {ens['reference_model']} (chosen on validation):")
+        for name, e in ens["ensembles"].items():
+            click.echo(
+                f"  {name:<24} PR-AUC {_ci(e['pr_auc'])}  difference "
+                f"{_ci(e['vs_reference_pr_auc_difference'])}  appears useful: "
+                f"{e['appears_useful']}"
+            )
+        click.echo(f"written {path}")
+
+    _with_context(app, refs, body)
+
+
+@evaluate.command("drift-baseline")
+@click.option(
+    "--model", "model_ref", required=True, help="Model whose training split defines the reference."
+)
+@_eval_options
+@pass_app
+def evaluate_drift_baseline(app: AppContext, /, model_ref: str, **opts: Any) -> None:
+    """Reference distributions (PSI / Jensen-Shannon) from the model's training data."""
+    from fraud_ai.evaluation import reports
+
+    def body(session: Any, ctx: Any) -> None:
+        report = reports.drift_baseline(ctx, _settings_from(opts), ctx.model(model_ref))
+        path = reports.write_report(_out_dir(app, opts, model_ref), "drift_baseline", report)
+        click.echo(f"reference: training split ({report['baseline']['rows']} rows)")
+        click.echo("test period vs baseline:")
+        for name, r in report["test_period_vs_baseline"]["features"].items():
+            click.echo(f"  {name:<32} PSI {r['psi']:.4f}  JS {r['js_distance']:.4f}  {r['status']}")
+        click.echo(f"written {path}")
+
+    _with_context(app, [model_ref], body)
+
+
+@evaluate.command("report")
+@click.argument("model_ref")
+@_eval_options
+@pass_app
+def evaluate_report(app: AppContext, /, model_ref: str, **opts: Any) -> None:
+    """Write every per-model report (summary, confidence, thresholds, calibration, scenarios,
+    errors, costs, walk-forward, drift baseline)."""
+    from fraud_ai.evaluation import reports
+
+    def body(session: Any, ctx: Any) -> None:
+        paths = reports.full_model_report(
+            ctx, ctx.model(model_ref), _settings_from(opts), _out_dir(app, opts, model_ref), session
+        )
+        for name, path in sorted(paths.items()):
+            click.echo(f"{name:<16} {path}")
+
+    _with_context(app, [model_ref], body)
 
 
 @cli.command("compare-models")

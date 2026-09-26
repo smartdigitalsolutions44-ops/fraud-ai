@@ -213,3 +213,53 @@ def test_fraud_is_spread_over_time_and_overlaps_legitimate_behaviour() -> None:
         if e.event_type is EventType.PAYMENT_METHOD_ADDED and e.metadata.get("funding") == "prepaid"
     ]
     assert legit_prepaid
+
+
+def test_account_takeovers_have_no_single_giveaway_signal() -> None:
+    """Takeovers are loud, quiet or session hijacks, and ship to a drop address, the
+    victim's own address or buy digital goods - so no one signal identifies them all."""
+    from datetime import timedelta
+
+    ds = SyntheticDataGenerator(seed=4, reference_time=REF, activity_days=180).generate(300)
+    ato_txns = {
+        e.metadata["transaction_id"]
+        for e in ds.events
+        if e.event_type is EventType.FRAUD_CONFIRMED
+        and e.metadata.get("fraud_type") == "account_takeover"
+        and e.metadata.get("transaction_id")
+    }
+    by_user: dict[uuid.UUID | None, list[object]] = {}
+    for e in ds.events:
+        by_user.setdefault(e.user_id, []).append(e)
+    variants: set[str] = set()
+    destinations: set[str] = set()
+    for e in ds.events:
+        if e.event_type is not EventType.TRANSACTION_CREATED:
+            continue
+        if e.metadata["transaction_id"] not in ato_txns:
+            continue
+        history = by_user[e.user_id]
+        window = [
+            h
+            for h in history
+            if e.timestamp - timedelta(minutes=45) <= h.timestamp < e.timestamp  # type: ignore[attr-defined]
+        ]
+        first_login = min(
+            (h for h in history if h.event_type is EventType.LOGIN_SUCCESS),  # type: ignore[attr-defined]
+            key=lambda h: h.timestamp,  # type: ignore[attr-defined]
+        )
+        if any(h.event_type is EventType.LOGIN_FAILURE for h in window):  # type: ignore[attr-defined]
+            variants.add("loud")
+        elif e.device_id == first_login.device_id:  # type: ignore[attr-defined]
+            variants.add("hijack")
+        else:
+            variants.add("quiet")
+        address = e.metadata.get("shipping_address_id")
+        added = {
+            h.metadata.get("address_id")  # type: ignore[attr-defined]
+            for h in window
+            if h.event_type is EventType.ADDRESS_ADDED  # type: ignore[attr-defined]
+        }
+        destinations.add("digital" if address is None else "drop" if address in added else "own")
+    assert variants == {"loud", "quiet", "hijack"}
+    assert destinations == {"digital", "drop", "own"}

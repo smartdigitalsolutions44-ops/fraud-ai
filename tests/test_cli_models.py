@@ -64,7 +64,7 @@ def test_train_evaluate_compare_score_flow(run, tmp_path: Path) -> None:  # type
     )
     assert run("models", "show", "nope-1.0.0").exit_code != 0
 
-    evaluated = run("evaluate", "logistic-regression-1.0.0")
+    evaluated = run("evaluate", "reproduce", "logistic-regression-1.0.0")
     assert evaluated.exit_code == 0, evaluated.output
     assert "unchanged" in evaluated.output and "reproduced exactly" in evaluated.output
 

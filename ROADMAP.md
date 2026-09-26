@@ -59,25 +59,42 @@ ahead: models are only as good as the data and features beneath them.
 * CLI: `train logistic|random-forest|gradient-boosting|all`, `models list|show|activate`,
   `evaluate`, `compare-models`, `score`.
 
-## Stage 4: Evaluation framework
+## Stage 4: Evaluation framework ✅
 
-* Stage 3 already reports PR-AUC, ROC-AUC, precision, recall, F1, FPR and FNR, a
-  threshold analysis and overfitting warnings. Stage 4 adds:
-  * bootstrap confidence intervals;
-  * calibration curves and recalibration;
-  * cost-weighted metrics (fraud loss versus customer friction);
-  * rolling-origin (walk-forward) evaluation;
-  * statistical tests between models on the same split.
-* Per-scenario breakdowns. In particular, false-positive rates on `new_home_address`,
-  `legitimate_vpn` and `shared_network`.
-* Model comparison across versions from stored predictions.
-* `fraud-ai evaluate`.
+Details are in [EVALUATION.md](EVALUATION.md). All evidence is synthetic.
+
+* **Confidence intervals.** Seeded, stratified bootstrap intervals for PR-AUC, ROC-AUC,
+  precision, recall, F1, FPR and FNR.
+* **Walk-forward evaluation.** Expanding-window retraining with *as-of* training labels
+  (later chargebacks never leak into earlier folds), with fold stability statistics.
+* **Calibration.** Uncalibrated vs sigmoid vs isotonic, fitted on validation only. The
+  report gives Brier, log loss, ECE and reliability buckets. Calibrators are persisted in
+  `model_calibrations` (migration `0004`), where a constraint makes "fitted on test"
+  impossible.
+* **Costs.** Configurable expected cost per threshold, plus a low / review / high band
+  analysis. Decision support only: no threshold is applied.
+* **Scenarios and cohorts.** Scenario-level metrics with small-sample notes, and
+  operational-cohort FPR checks (no demographic inference).
+* **Error analysis.** Pseudonymised false-positive and false-negative reports.
+* **Model comparison.** A paired PR-AUC bootstrap and McNemar test, agreement groups, and
+  ensemble research (never persisted). No winner is ever declared.
+* **Drift baseline.** PSI and Jensen–Shannon distance for eight tracked features.
+* **Synthetic generator.** Giveaway signals removed, with a guard test against
+  single-feature separation. Configurable fraud prevalence and a 1,000-user benchmark
+  script.
+* **CLI:** `fraud-ai evaluate confidence|walk-forward|calibration|scenarios|errors|costs|
+  compare|drift-baseline|report|reproduce`.
+* **Deferred:**
+  * applying a calibrator in scoring (it needs an explicit adoption decision);
+  * a live drift service (Stage 8);
+  * account-clustered bootstrap intervals.
 
 ## Stage 5: Neural-network fraud model
 
 * A feed-forward network (Dense, ReLU, Dropout, Dense, ReLU, sigmoid) implementing the same
   `FraudModel` interface, evaluated with the Stage 4 framework against the baselines.
-* It is adopted only if it measurably beats them; no special trust.
+* It is adopted only if the paired comparison shows a reliable difference on several
+  walk-forward folds and seeds. It gets no special trust.
 
 ## Stage 6: Anomaly detection
 
