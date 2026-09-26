@@ -48,7 +48,8 @@ def _is_case(ctx: EvaluationContext, i: int) -> bool:
     return stealthy_ato or ctx.scenarios[i] == "slow_account_takeover"
 
 
-def _summary(batch: SequenceBatch, row: int) -> dict[str, Any]:
+def sequence_summary(batch: SequenceBatch, row: int) -> dict[str, Any]:
+    """Counts and a short timeline from one point-in-time sequence (no identifiers)."""
     positions = batch.decode(row)
     history, target = positions[:-1], positions[-1]
 
@@ -116,7 +117,7 @@ def stealth_report(
             "caught_only_by_sequence_models": bool(caught_by) and set(caught_by) <= sequence_models,
         }
         if sequences is not None:
-            entry["behaviour"] = _summary(sequences, i)
+            entry["behaviour"] = sequence_summary(sequences, i)
         cases.append(entry)
     recall = {
         m.model_id: (

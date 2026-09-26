@@ -352,3 +352,20 @@ On the Stage 6 synthetic 1,000-user world, **gradient boosting remains stronger*
 * the GRU catches one stealthy takeover that gradient boosting misses.
 
 No sequence model is adopted.
+
+## 16. Explanations of stored predictions (Stage 7)
+
+The local LLM layer ([LLM_ANALYST.md](LLM_ANALYST.md)) reads what this document produces
+and changes none of it:
+
+* the stored `model_predictions` rows (probability and threshold);
+* the sigmoid `model_calibrations`;
+* gradient boosting's recorded permutation importance (`metrics.explanation`).
+
+* **No rescoring.** `fraud-ai investigate` refuses an event without stored predictions.
+  Scoring stays a separate, explicit step (`fraud-ai score`, or `--score-missing`), with
+  the same one-prediction-per-model-version rule as above.
+* **Anomaly models are excluded.** Autoencoder scores are not fraud probabilities, so they
+  are never presented as one.
+* **No model output is changed.** No investigation writes to `model_predictions`,
+  `model_versions` or `model_calibrations`; the tests compare row counts before and after.

@@ -1,7 +1,6 @@
 """``fraud-ai`` command-line entry point.
 
-Only commands with real functionality exist. Future commands (score, train, evaluate,
-investigate) will be added by the stages that implement them.
+Only commands with real functionality exist.
 """
 
 from __future__ import annotations
@@ -1723,8 +1722,18 @@ def system_status(app: AppContext) -> None:
         with session_scope(make_session_factory(app.engine)) as session:
             snapshots = session.scalar(select(func.count()).select_from(FeatureSnapshot))
         click.echo(f"  snapshots     {snapshots}")
-    llm_state = f"configured: {s.local_llm_endpoint}" if s.local_llm_endpoint else "not configured"
-    click.echo(f"local LLM       {llm_state} (Stage 7)")
+    if s.local_llm_runtime:
+        llm_state = f"{s.local_llm_runtime} {s.local_llm_model or ''}".rstrip()
+        llm_state += " (explanations only; see `fraud-ai llm status`)"
+    else:
+        llm_state = "not configured (explanations only; reference template available)"
+    click.echo(f"local LLM       {llm_state}")
+    if status is not None and status.up_to_date:
+        from fraud_ai.database.models import Investigation
+
+        with session_scope(make_session_factory(app.engine)) as session:
+            stored = session.scalar(select(func.count()).select_from(Investigation))
+        click.echo(f"  investigations {stored}")
 
 
 # --------------------------------------------------------------------------- sequence (Stage 6)
@@ -2343,6 +2352,470 @@ def evaluate_complementarity(
         click.echo(f"written {path}")
 
     _with_context(app, refs, body, allow_anomaly=anomaly_ref is not None)
+
+
+# --------------------------------------------------------------------------- llm (Stage 7)
+def _generation_settings(s: Settings) -> Any:
+    from fraud_ai.llm.service import GenerationSettings
+
+    return GenerationSettings(
+        temperature=s.local_llm_temperature,
+        top_p=s.local_llm_top_p,
+        seed=s.local_llm_seed,
+        max_tokens=s.local_llm_max_tokens,
+        context_window=s.local_llm_context_window,
+    )
+
+
+def _llm_client(s: Settings, runtime: str | None = None, model: str | None = None) -> Any:
+    """The configured local runtime (or an explicit override). Never a remote service."""
+    from fraud_ai.llm.runtime import LLMRuntimeError, make_client
+
+    runtime = runtime or s.local_llm_runtime
+    if runtime is None:
+        raise click.ClickException(
+            "no local LLM runtime configured: set LOCAL_LLM_RUNTIME (ollama, llamacpp-server, "
+            "llamacpp-process) or pass --runtime reference for the built-in template "
+            "(not an LLM)"
+        )
+    try:
+        return make_client(
+            runtime,
+            model=model or s.local_llm_model,
+            endpoint=s.local_llm_endpoint,
+            timeout=s.local_llm_timeout,
+            binary=s.local_llm_binary,
+            model_path=str(s.local_llm_model_path) if s.local_llm_model_path else None,
+        )
+    except LLMRuntimeError as exc:
+        raise click.ClickException(str(exc)) from None
+
+
+def _runtime_spec(spec: str) -> tuple[str, str | None]:
+    runtime, _, model = spec.partition(":")
+    return runtime, model or None
+
+
+_RUNTIME_OPTION = click.option(
+    "--runtime",
+    "runtime_spec",
+    default=None,
+    help="RUNTIME[:MODEL], e.g. ollama:qwen2.5:7b or reference. Default: LOCAL_LLM_RUNTIME.",
+)
+
+
+@cli.group()
+def llm() -> None:
+    """Local, offline analyst assistant: runtime status, models and benchmarks."""
+
+
+@llm.command("status")
+@_RUNTIME_OPTION
+@pass_app
+def llm_status(app: AppContext, runtime_spec: str | None) -> None:
+    """Show the local LLM configuration and whether the runtime is reachable."""
+    from fraud_ai.llm.evidence import EVIDENCE_SCHEMA_VERSION
+    from fraud_ai.llm.prompt import PROMPT_VERSION
+    from fraud_ai.llm.runtime import DEFAULT_ENDPOINTS
+    from fraud_ai.llm.schema import EXPLANATION_SCHEMA_VERSION
+
+    s = app.settings
+    runtime, model = _runtime_spec(runtime_spec) if runtime_spec else (s.local_llm_runtime, None)
+    click.echo(f"runtime           {runtime or 'not configured'}")
+    click.echo(f"model             {model or s.local_llm_model or '-'}")
+    endpoint = s.local_llm_endpoint or DEFAULT_ENDPOINTS.get(runtime or "", "-")
+    click.echo(f"endpoint          {endpoint} (local only)")
+    click.echo(f"timeout           {s.local_llm_timeout}s")
+    g = _generation_settings(s)
+    click.echo(
+        f"generation        temperature={g.temperature} top_p={g.top_p} seed={g.seed} "
+        f"max_tokens={g.max_tokens} context_window={g.context_window}"
+    )
+    click.echo(
+        f"versions          prompt {PROMPT_VERSION}  evidence {EVIDENCE_SCHEMA_VERSION}  "
+        f"explanation {EXPLANATION_SCHEMA_VERSION}"
+    )
+    if runtime is None:
+        click.echo("health            not configured (the reference template is always available)")
+        return
+    try:
+        client = _llm_client(s, runtime, model)
+    except click.ClickException as exc:
+        click.echo(f"health            MISCONFIGURED: {exc.message}")
+        return
+    health = client.health()
+    state = "available" if health.available else "UNAVAILABLE"
+    click.echo(f"health            {state}: {health.detail}")
+    if health.available:
+        from fraud_ai.llm.runtime import LLMRuntimeError
+
+        try:
+            installed = client.list_models()
+        except LLMRuntimeError as exc:
+            click.echo(f"model installed   unknown ({exc.kind})")
+            return
+        click.echo(f"model installed   {'yes' if client.model in installed else 'NO'}")
+
+
+@llm.command("models")
+@_RUNTIME_OPTION
+@pass_app
+def llm_models(app: AppContext, runtime_spec: str | None) -> None:
+    """List the models the local runtime has installed (nothing is downloaded)."""
+    from fraud_ai.llm.runtime import LLMRuntimeError
+
+    runtime, model = _runtime_spec(runtime_spec) if runtime_spec else (None, None)
+    client = _llm_client(app.settings, runtime, model)
+    try:
+        names = client.list_models()
+    except LLMRuntimeError as exc:
+        raise click.ClickException(f"{exc.kind}: {exc}") from None
+    if not names:
+        click.echo("no models installed")
+    for name in names:
+        click.echo(name)
+
+
+def _score_for_benchmark(session: Any, model_refs: list[str], latest: int, labelled: int) -> int:
+    """Store predictions (normal scoring, outside the LLM pipeline) for the latest
+    transactions and for the latest fraud-labelled transactions, so the benchmark has
+    cases of every type. Labels only choose which events to explain."""
+    from sqlalchemy import or_
+
+    from fraud_ai.models.registry import resolve_model
+    from fraud_ai.models.scoring import load_registered_model, score_event
+
+    models = [resolve_model(session, ref) for ref in model_refs]
+    loaded = [load_registered_model(m) for m in models]
+    ids = list(
+        session.scalars(
+            select(Transaction.event_id).order_by(Transaction.occurred_at.desc()).limit(latest)
+        )
+    )
+    if labelled:
+        ids += session.scalars(
+            select(Transaction.event_id)
+            .join(
+                FraudLabel,
+                or_(
+                    FraudLabel.transaction_id == Transaction.transaction_id,
+                    FraudLabel.event_id == Transaction.event_id,
+                ),
+            )
+            .where(FraudLabel.label == LabelValue.FRAUD)
+            .order_by(Transaction.occurred_at.desc())
+            .distinct()
+            .limit(labelled)
+        ).all()
+    unique = list(dict.fromkeys(ids))
+    for event_id in unique:
+        for model, fitted in zip(models, loaded, strict=True):
+            score_event(session, event_id, model, loaded=fitted)
+    return len(unique)
+
+
+@llm.command("benchmark")
+@click.option(
+    "--model",
+    "model_refs",
+    multiple=True,
+    required=True,
+    help="Fraud models whose stored predictions form the evidence (repeatable).",
+)
+@click.option(
+    "--runtime",
+    "runtime_specs",
+    multiple=True,
+    help="RUNTIME[:MODEL] to compare (repeatable). Default: reference + LOCAL_LLM_RUNTIME.",
+)
+@click.option("--per-case", type=click.IntRange(1, 20), default=1, show_default=True)
+@click.option("--max-candidates", type=click.IntRange(1), default=2000, show_default=True)
+@click.option(
+    "--score-latest",
+    type=click.IntRange(0),
+    default=0,
+    show_default=True,
+    help="First store predictions for the latest N transactions (normal scoring).",
+)
+@click.option(
+    "--score-labelled",
+    type=click.IntRange(0),
+    default=0,
+    show_default=True,
+    help="Also store predictions for the latest N fraud-labelled transactions.",
+)
+@click.option("--output", type=click.Path(path_type=Path), default=None)
+@pass_app
+def llm_benchmark(
+    app: AppContext,
+    model_refs: tuple[str, ...],
+    runtime_specs: tuple[str, ...],
+    per_case: int,
+    max_candidates: int,
+    score_latest: int,
+    score_labelled: int,
+    output: Path | None,
+) -> None:
+    """Compare local models on explanation faithfulness, format, privacy and latency.
+
+    This measures the explanation layer only; it is not a fraud-detection metric."""
+    app.require_migrated()
+    from fraud_ai.llm.builder import event_ref
+    from fraud_ai.llm.evaluation import CASE_TYPES, benchmark, select_cases
+    from fraud_ai.llm.prompt import PROMPT_VERSION
+
+    s = app.settings
+    specs = list(runtime_specs) or ["reference"] + (
+        [s.local_llm_runtime] if s.local_llm_runtime not in (None, "reference") else []
+    )
+    clients = [_llm_client(s, *_runtime_spec(spec)) for spec in specs]
+    with session_scope(make_session_factory(app.engine)) as session:
+        try:
+            if score_latest or score_labelled:
+                scored = _score_for_benchmark(
+                    session, list(model_refs), score_latest, score_labelled
+                )
+                click.echo(f"stored predictions for {scored} transactions")
+                session.commit()
+            selection = select_cases(
+                session, list(model_refs), per_case=per_case, max_candidates=max_candidates
+            )
+        except FraudAIError as exc:
+            raise click.ClickException(str(exc)) from None
+        if not selection.cases:
+            raise click.ClickException(
+                "no evaluation cases: no event has stored predictions from every model "
+                "(score events first, e.g. --score-latest 500 --score-labelled 100)"
+            )
+        click.echo(
+            f"{len(selection.cases)} cases from {selection.candidates_examined} candidate events"
+        )
+        if selection.missing:
+            click.echo(f"no matching event for: {', '.join(selection.missing)}")
+        reports = benchmark(selection.cases, clients, _generation_settings(s))
+    columns = (
+        ("valid", "valid_rate"),
+        ("schema", "schema_compliance"),
+        ("bad-cite", "invalid_citation_rate"),
+        ("unsupported", "unsupported_claim_rate"),
+        ("privacy", "privacy_violation_rate"),
+        ("action", "forbidden_action_rate"),
+        ("coverage", "evidence_coverage_mean"),
+        ("latency-s", "latency_mean_seconds"),
+        ("chars", "response_chars_mean"),
+    )
+    click.echo(f"{'runtime/model':<44}" + "".join(f"{h:>12}" for h, _ in columns))
+    payload = []
+    for r in reports:
+        row = r.to_dict()
+        for outcome in row["cases"]:  # pseudonymous refs only, never raw event ids
+            outcome["event_ref"] = event_ref(uuid.UUID(outcome.pop("event_id")))
+        payload.append(row)
+        name = f"{r.runtime}/{r.model}"[:43]
+        if not r.available:
+            click.echo(f"{name:<44}  UNAVAILABLE: {r.detail}")
+            continue
+        metrics = row["metrics"]
+        cells = "".join(
+            f"{'-' if metrics[k] is None else format(metrics[k], '.3f'):>12}" for _, k in columns
+        )
+        click.echo(f"{name:<44}{cells}")
+    target = output or (
+        Path(s.evaluation_directory)
+        / "llm"
+        / f"benchmark_{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}.json"
+    )
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        json.dumps(
+            {
+                "kind": "llm_explanation_benchmark",
+                "note": "explanation quality and safety on synthetic cases; not a fraud metric",
+                "prompt_version": PROMPT_VERSION,
+                "fraud_models": list(model_refs),
+                "case_types": list(CASE_TYPES),
+                "missing_case_types": selection.missing,
+                "generation": _generation_settings(s).request("", "").parameters(),
+                "reports": payload,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    click.echo(f"written {target}")
+
+
+class _InvestigateGroup(click.Group):
+    """``investigate <event-id>`` runs an investigation; ``show``/``validate`` inspect one."""
+
+    def resolve_command(
+        self, ctx: click.Context, args: list[str]
+    ) -> tuple[str | None, click.Command | None, list[str]]:
+        if args and args[0] not in self.commands and not args[0].startswith("-"):
+            args = ["event", *args]
+        return super().resolve_command(ctx, args)
+
+
+@cli.group(cls=_InvestigateGroup)
+def investigate() -> None:
+    """Explain one event for an analyst with the local LLM (decision support only).
+
+    \b
+    fraud-ai investigate <event-id> [--model REF ...] [--runtime R[:M]] [--score-missing]
+    fraud-ai investigate show <investigation-id>
+    fraud-ai investigate validate <investigation-id>
+
+    The event is never rescored and nothing is decided: no score, label, threshold, rule
+    or decision changes. Only validated, cited explanations are stored, as a new version.
+    """
+
+
+@investigate.command("event", hidden=True)
+@click.argument("event_id")
+@click.option("--model", "model_refs", multiple=True, help="Fraud model refs (default: all).")
+@_RUNTIME_OPTION
+@click.option(
+    "--score-missing",
+    is_flag=True,
+    help="Store missing predictions for --model first (normal scoring, before the pipeline).",
+)
+@click.option("--json", "as_json", is_flag=True)
+@pass_app
+def investigate_event(
+    app: AppContext,
+    event_id: str,
+    model_refs: tuple[str, ...],
+    runtime_spec: str | None,
+    score_missing: bool,
+    as_json: bool,
+) -> None:
+    app.require_migrated()
+    from fraud_ai.llm.service import investigate as run_investigation
+
+    runtime, model = _runtime_spec(runtime_spec) if runtime_spec else (None, None)
+    client = _llm_client(app.settings, runtime, model)
+    eid = _parse_uuid(event_id)
+    if score_missing and not model_refs:
+        raise click.BadParameter("--score-missing needs --model", param_hint="--score-missing")
+    with session_scope(make_session_factory(app.engine)) as session:
+        try:
+            if score_missing:
+                from fraud_ai.models.registry import resolve_model
+                from fraud_ai.models.scoring import score_event
+
+                for ref in model_refs:
+                    score_event(session, eid, resolve_model(session, ref))
+            result = run_investigation(
+                session,
+                eid,
+                client,
+                settings=_generation_settings(app.settings),
+                model_refs=list(model_refs) or None,
+            )
+        except FraudAIError as exc:
+            raise click.ClickException(str(exc)) from None
+        if as_json:
+            click.echo(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+        if not result.ok:
+            if not as_json:
+                click.echo(f"investigation FAILED: {result.failure}", err=True)
+                for error in result.errors[:20]:
+                    click.echo(f"  {error}", err=True)
+                click.echo("nothing was stored", err=True)
+            session.rollback()
+            raise SystemExit(2)
+        row = result.investigation
+        assert row is not None
+        if not as_json:
+            click.echo(
+                f"investigation {row.investigation_id} (version {row.explanation_version}, "
+                f"{row.llm_runtime}/{row.llm_model}, {row.prompt_version})"
+            )
+            click.echo(row.explanation_text)
+
+
+def _investigation(session: Any, investigation_id: str) -> Any:
+    from fraud_ai.llm.service import load_investigation
+
+    try:
+        return load_investigation(session, _parse_uuid(investigation_id))
+    except FraudAIError as exc:
+        raise click.ClickException(str(exc)) from None
+
+
+@investigate.command("show")
+@click.argument("investigation_id")
+@click.option("--json", "as_json", is_flag=True)
+@click.option("--evidence", is_flag=True, help="Also print the evidence packet.")
+@pass_app
+def investigate_show(app: AppContext, investigation_id: str, as_json: bool, evidence: bool) -> None:
+    """Show a stored investigation and its provenance."""
+    app.require_migrated()
+    with session_scope(make_session_factory(app.engine)) as session:
+        row = _investigation(session, investigation_id)
+        meta = {
+            "investigation_id": str(row.investigation_id),
+            "event_id": str(row.event_id),
+            "explanation_version": row.explanation_version,
+            "created_at": row.created_at.isoformat(),
+            "llm_runtime": row.llm_runtime,
+            "llm_model": row.llm_model,
+            "llm_model_version": row.llm_model_version,
+            "prompt_version": row.prompt_version,
+            "evidence_schema_version": row.evidence_schema_version,
+            "explanation_schema_version": row.explanation_schema_version,
+            "evidence_packet_sha256": row.evidence_packet_sha256,
+            "generation_parameters": row.generation_parameters,
+            "validation": row.validation,
+            "latency_seconds": row.latency_seconds,
+        }
+        if as_json:
+            payload = meta | {"explanation": row.explanation_json}
+            if evidence:
+                payload["evidence_packet"] = row.evidence_packet
+            click.echo(json.dumps(payload, indent=2, sort_keys=True))
+            return
+        for key, value in meta.items():
+            if isinstance(value, dict):
+                value = json.dumps(value, sort_keys=True)
+            click.echo(f"{key:<27} {value}")
+        click.echo("")
+        click.echo(row.explanation_text)
+        if evidence:
+            click.echo("")
+            for item in row.evidence_packet["evidence"]:
+                click.echo(f"  {item['id']:<5} {item['section']}.{item['name']} = {item['value']}")
+            for lim in row.evidence_packet["limitations"]:
+                click.echo(f"  {lim['id']:<5} {lim['text']}")
+
+
+@investigate.command("validate")
+@click.argument("investigation_id")
+@click.option(
+    "--no-compare-current",
+    is_flag=True,
+    help="Skip rebuilding today's evidence to detect changes since generation.",
+)
+@pass_app
+def investigate_validate(app: AppContext, investigation_id: str, no_compare_current: bool) -> None:
+    """Re-run every check on a stored investigation (read-only)."""
+    app.require_migrated()
+    from fraud_ai.llm.service import revalidate
+
+    with session_scope(make_session_factory(app.engine)) as session:
+        row = _investigation(session, investigation_id)
+        report = revalidate(session, row.investigation_id, compare_current=not no_compare_current)
+    click.echo(f"valid                 {'yes' if report.valid else 'NO'}")
+    click.echo(f"packet hash matches   {report.packet_hash_matches}")
+    click.echo(f"packet privacy clean  {report.packet_privacy_clean}")
+    click.echo(f"text matches JSON     {report.text_matches_json}")
+    click.echo(f"output validation     {report.output_validation['failure'] or 'passed'}")
+    if report.evidence_current is not None:
+        click.echo(f"evidence current      {report.evidence_current}")
+    for note in report.notes:
+        click.echo(f"  - {note}")
+    if not report.valid:
+        raise SystemExit(2)
 
 
 def main() -> None:  # pragma: no cover

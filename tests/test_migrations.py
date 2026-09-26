@@ -17,6 +17,7 @@ EXPECTED_TABLES = {
     "users",
     "feature_snapshots",
     "model_calibrations",
+    "investigations",
     "devices",
     "user_devices",
     "login_events",
@@ -37,12 +38,12 @@ EXPECTED_TABLES = {
 
 def test_single_linear_head() -> None:
     assert migrations_directory().joinpath("env.py").exists()
-    assert head_revision("sqlite://") == "0004"
+    assert head_revision("sqlite://") == "0005"
 
 
 def test_upgrade_creates_all_tables(any_engine: Engine, backend_url: str) -> None:
     status = schema_status(any_engine, backend_url)
-    assert status.up_to_date and status.current == "0004"
+    assert status.up_to_date and status.current == "0005"
     assert set(status.tables) == EXPECTED_TABLES
     assert set(Base.metadata.tables) == EXPECTED_TABLES
 

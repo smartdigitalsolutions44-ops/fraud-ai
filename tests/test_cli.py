@@ -31,7 +31,8 @@ def test_help_lists_only_real_commands(run) -> None:  # type: ignore[no-untyped-
         assert command in out
     for command in ("train", "models", "evaluate", "compare-models", "score"):  # Stage 3
         assert f"  {command} " in out
-    assert "  investigate " not in out  # Stage 7: not implemented, so not offered
+    for command in ("investigate", "llm"):  # Stage 7
+        assert f"  {command} " in out
 
 
 def test_db_lifecycle(run) -> None:  # type: ignore[no-untyped-def]
@@ -39,7 +40,7 @@ def test_db_lifecycle(run) -> None:  # type: ignore[no-untyped-def]
     assert status.exit_code == 0 and "<not initialised>" in status.output
     assert run("seed").exit_code != 0  # refuses before init
     init = run("db", "init")
-    assert init.exit_code == 0 and "revision 0004" in init.output
+    assert init.exit_code == 0 and "revision 0005" in init.output
     again = run("db", "init")
     assert again.exit_code != 0 and "already initialised" in again.output
     migrate = run("db", "migrate")
@@ -50,7 +51,7 @@ def test_db_lifecycle(run) -> None:  # type: ignore[no-untyped-def]
 
 def test_db_migrate_from_empty(run) -> None:  # type: ignore[no-untyped-def]
     result = run("db", "migrate")
-    assert result.exit_code == 0 and "<empty> -> 0004" in result.output
+    assert result.exit_code == 0 and "<empty> -> 0005" in result.output
 
 
 def test_seed_and_stats(run) -> None:  # type: ignore[no-untyped-def]
@@ -107,7 +108,8 @@ def test_system_status(run) -> None:  # type: ignore[no-untyped-def]
     run("db", "init")
     after = run("system-status")
     assert "up to date" in after.output and "active: none" in after.output
-    assert "not configured (Stage 7)" in after.output
+    assert "local LLM       not configured (explanations only" in after.output
+    assert "investigations 0" in after.output
 
 
 def test_seed_refused_outside_development(run, monkeypatch: pytest.MonkeyPatch) -> None:  # type: ignore[no-untyped-def]

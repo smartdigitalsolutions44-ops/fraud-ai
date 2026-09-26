@@ -672,4 +672,43 @@ class FeatureSnapshot(Base):
     source_event_count: Mapped[int] = mapped_column(Integer)
 
 
+class Investigation(Base):
+    """A validated analyst explanation of one event from the local LLM layer (Stage 7).
+
+    Decision support only: nothing here changes a score, label, threshold, rule or decision.
+    Rows are append-only. Re-investigating an event adds ``explanation_version`` + 1 and
+    never overwrites an earlier explanation. Only output that passed validation is stored.
+    ``evidence_packet`` is the privacy-checked packet the model saw (no raw identifiers), and
+    ``evidence_packet_sha256`` is the SHA-256 of its canonical JSON.
+    """
+
+    __tablename__ = "investigations"
+    __table_args__ = (
+        UniqueConstraint("event_id", "explanation_version"),
+        CheckConstraint("explanation_version >= 1", name="explanation_version_positive"),
+        CheckConstraint("length(evidence_packet_sha256) = 64", name="packet_hash_sha256"),
+        Index("ix_investigations_event_id", "event_id"),
+    )
+
+    investigation_id: Mapped[uuid.UUID] = _uuid_pk()
+    event_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("events.event_id"))
+    explanation_version: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+    explanation_text: Mapped[str] = mapped_column(Text)
+    explanation_json: Mapped[dict[str, Any]]
+    explanation_schema_version: Mapped[str] = mapped_column(String(64))
+    evidence_packet: Mapped[dict[str, Any]]
+    evidence_packet_sha256: Mapped[str] = mapped_column(String(64))
+    evidence_schema_version: Mapped[str] = mapped_column(String(64))
+    prompt_version: Mapped[str] = mapped_column(String(64))
+    llm_runtime: Mapped[str] = mapped_column(String(32))
+    llm_model: Mapped[str] = mapped_column(String(200))
+    llm_model_version: Mapped[str | None] = mapped_column(String(200))
+    generation_parameters: Mapped[dict[str, Any]]
+    validation: Mapped[dict[str, Any]]
+    latency_seconds: Mapped[float] = mapped_column(Float)
+    prompt_tokens: Mapped[int | None] = mapped_column(Integer)
+    completion_tokens: Mapped[int | None] = mapped_column(Integer)
+
+
 ALL_TABLES = sorted(Base.metadata.tables)

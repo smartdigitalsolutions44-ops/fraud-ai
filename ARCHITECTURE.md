@@ -54,13 +54,16 @@ Risk Engine (fraud_ai.risk)                      – ML probability + rules → 
       ▼
 Decision (ALLOW / STEP_UP_AUTHENTICATION / MANUAL_REVIEW / BLOCK) → risk_assessments
       ▼
-Local Offline LLM (Stage 7, fraud_ai.llm)        – explains the decision from evidence only
+Local Offline LLM (Stage 7, fraud_ai.llm)        – explains STORED outputs from evidence only
+      │  privacy-checked EvidencePacket → versioned prompt → local runtime
+      │  validated, cited explanation → investigations (append-only); never a decision
 ```
 
-Stages 1-3 implement everything up to and including baseline ML scoring: events, the
-fraud database, point-in-time features and snapshots, training datasets, and trained,
-versioned baseline models whose probabilities are stored as predictions. The risk engine,
-rules engine and LLM layers exist as interfaces only; no decision is made anywhere yet.
+Stages 1-6 implement everything up to and including ML scoring: events, the fraud
+database, point-in-time features and snapshots, training datasets, and trained, versioned
+models (baselines, neural and sequence) whose probabilities are stored as predictions.
+Stage 7 adds the local LLM *explanation* layer over those stored outputs. The risk engine
+and rules engine exist as interfaces only; no decision is made anywhere yet.
 
 ### The event envelope
 
@@ -100,9 +103,13 @@ In one sentence each:
   "recent password reset ⇒ at least step-up"), but they never lower one.
 * **The risk engine decides.** The decision is never a bare `if p > x: block`; it is a
   versioned `RiskPolicy` (weights, ordered thresholds, a conservative no-model fallback).
-* **The LLM explains and assists investigation.** It is *not* the classifier. It receives an
-  `EvidencePacket` (score, decision, signals, history), never raw personal data, and its text
-  never replaces or alters the numerical score.
+* **The LLM explains and assists investigation.** It is *not* the classifier, the risk
+  engine, the rules engine or the decision maker.
+  * It receives a typed, privacy-checked `EvidencePacket` built from *stored* outputs
+    (predictions, features, sequence summary, labels), never raw personal data or free text.
+  * It returns a cited explanation, which is stored only if it passes validation.
+  * Its text never replaces or alters a score, label, threshold, rule or decision (Stage 7,
+    [LLM_ANALYST.md](LLM_ANALYST.md)).
 
 ## 4. Package layout
 
@@ -129,7 +136,10 @@ fraud_ai/
   models/      FraudModel interface, model-version registry, prediction storage
   rules/       Rule / RuleEngine
   risk/        RiskPolicy / RiskEngine
-  llm/         EvidencePacket (privacy-checked) and ExplanationProvider protocol
+  llm/         Stage 7 analyst assistance: evidence builder + typed EvidencePacket, privacy
+               gate, versioned prompt, output schema + faithfulness validator, local
+               runtimes (Ollama, llama.cpp server/process, reference template), the
+               investigation service (append-only storage) and the explanation benchmark
   security/    keyed pseudonymisation, sensitive-data detection/redaction, key handling
   data/        deterministic synthetic scenario generator and seeding
   cli/         the `fraud-ai` command
@@ -164,6 +174,8 @@ Tables (revisions `0001`-`0003`):
 | `model_predictions` | Every model output, FK'd to the exact model version. |
 | `risk_assessments` | Final score and decision, the policy version and triggered rules. |
 | `feature_snapshots` | (0002) Exact hashed feature vector per (event, feature version, as_of). |
+| `model_calibrations` | (0004) Calibrators fitted on a non-test split of a model's dataset. |
+| `investigations` | (0005) Validated, cited LLM explanations: append-only, versioned per event, with the evidence packet and its hash, prompt/schema versions, runtime, model and generation parameters. Never a score or decision. |
 
 Revision `0002` also added `transactions.decision_outcome` (the immutable authorisation
 outcome; `status` is overwritten by chargebacks), `addresses.verified_at`,
@@ -218,9 +230,17 @@ Key decisions:
   unmask users behind VPNs or proxies.
 * **No invasive surveillance.** Device data is limited to an app-level identifier hash, OS
   family, client family and device type. There is no fingerprinting.
-* **LLM privacy.** `EvidencePacket` rejects keys such as `ip_address`, `email`,
-  `full_address`, and any value that looks like an IP, email or card number.
-  `LOCAL_LLM_ENDPOINT` must be localhost or a private/loopback address.
+* **LLM privacy.** Evidence values are typed tokens, numbers or booleans. Free text cannot
+  be represented.
+  * The privacy gate refuses the packet before generation if it finds any of:
+    * sensitive names;
+    * emails, IPs, card numbers, tokens, UUIDs or long hex identifiers;
+    * street addresses or phone numbers;
+    * instruction-shaped text.
+  * The event is referenced by a one-way pseudonym.
+  * Model output is scanned again before storage.
+  * `LOCAL_LLM_ENDPOINT` must be localhost or a private/loopback address. HTTP to the
+    runtime bypasses any configured proxy.
 * **Environment guards:** staging/production require PostgreSQL and a configured key;
   synthetic seeding is refused there.
 * **Synthetic data safety:** synthetic IPs come only from private, CGNAT and documentation
@@ -355,7 +375,36 @@ Summary (details in [SEQUENCE_MODELS.md](SEQUENCE_MODELS.md)):
 * **No identity embeddings.** Vocabularies cover event, network, device, authentication
   and channel *types* only.
 
-## 13. Extending the platform
+## 13. Local LLM analyst assistance (Stage 7)
+
+Summary (details in [LLM_ANALYST.md](LLM_ANALYST.md)):
+
+* **Explanation, never decision.**
+  * `fraud-ai investigate <event-id>` explains an event from what the platform already
+    stored.
+  * The event is **never rescored**; it needs stored predictions.
+  * Nothing writes to scores, labels, thresholds, rules or decisions.
+* **Evidence packet.** A deterministic, SHA-256-hashed packet with stable ids (`E1…`,
+  `L1…`) and controlled limitation texts. It contains no identifiers and no free text.
+* **Validated output only.** The output must be schema-valid JSON in which:
+  * every citation exists;
+  * every number matches the evidence cited;
+  * "confirmed fraud" requires a fraud label;
+  * there is no decision language and no identifier.
+
+  Failures are structured, for example `timeout`, `invalid_json` or
+  `unsupported_citation`, and are never stored.
+* **Append-only storage.** Each explanation is stored in `investigations` (migration
+  0005) as a new version per event. The row records:
+  * the packet and its hash;
+  * the prompt, evidence and explanation schema versions;
+  * the runtime, model and generation parameters;
+  * the validation result.
+* **Local runtimes.** Behind `LocalLLMClient`: Ollama, a llama.cpp server, a llama.cpp
+  process, and a deterministic reference template (not an LLM) for offline use and as the
+  benchmark baseline.
+
+## 14. Extending the platform
 
 * **New model:** add a `ModelSpec`, or a new `FraudModel` implementation registered in
   `fraud_ai/models/factory.py`. Train it on the same prepared split as the baselines, then

@@ -3,7 +3,7 @@
 A locally runnable fraud-prevention software platform written in Python. It is not a web
 application.
 
-The current release covers **Stages 1 to 6**:
+The current release covers **Stages 1 to 7**:
 
 * **Stage 1:** the software core, the event architecture, the fraud database (PostgreSQL in
   production, SQLite for local use), migrations, synthetic data and the CLI.
@@ -29,11 +29,19 @@ The current release covers **Stages 1 to 6**:
   * versioned and fingerprinted sequence definitions, with leakage-tested extraction;
   * complementarity and stealthy-takeover analysis against gradient boosting.
 
+* **Stage 7:** local, offline analyst assistance:
+  * a local LLM (Ollama or llama.cpp) *explains* stored model outputs from a
+    privacy-checked evidence packet;
+  * every statement cites evidence, and output is validated before it is stored;
+  * the LLM never scores, decides, blocks, approves, or changes labels, thresholds or
+    rules.
+
 No fraud *decisions* are made yet, and all bundled data is synthetic. Evaluation results
 describe synthetic data only; they are not real-world detection rates or savings. See
 [ARCHITECTURE.md](ARCHITECTURE.md), [FEATURES.md](FEATURES.md), [MODELS.md](MODELS.md),
 [EVALUATION.md](EVALUATION.md), [NEURAL_MODELS.md](NEURAL_MODELS.md),
-[SEQUENCE_MODELS.md](SEQUENCE_MODELS.md) and [ROADMAP.md](ROADMAP.md).
+[SEQUENCE_MODELS.md](SEQUENCE_MODELS.md), [LLM_ANALYST.md](LLM_ANALYST.md) and
+[ROADMAP.md](ROADMAP.md).
 
 ## Install
 
@@ -107,6 +115,17 @@ fraud-ai train gru ; fraud-ai train transformer ; fraud-ai train hybrid
 fraud-ai sequence compare                                   # fraud caught only by each model
 fraud-ai sequence stealth-report                            # stealthy/temporal takeovers
 python scripts/sequence_benchmark.py --seed-users 1000      # full Stage 6 benchmark
+
+# Stage 7 - local analyst assistant (explanations only; never scores or decides)
+fraud-ai llm status                                         # runtime, versions, health
+fraud-ai llm models                                         # models installed locally
+fraud-ai score <event-id> --model gradient-boosting-1.0.0   # investigations never rescore
+fraud-ai investigate <event-id>                             # cited, validated explanation
+fraud-ai investigate <event-id> --runtime reference         # offline template (not an LLM)
+fraud-ai investigate show <investigation-id> --evidence     # provenance + evidence packet
+fraud-ai investigate validate <investigation-id>            # re-check a stored explanation
+fraud-ai llm benchmark --model gradient-boosting-1.0.0 --runtime reference \
+    --runtime ollama:qwen2.5:7b-instruct --score-latest 1500 --score-labelled 300
 python -m fraud_ai --help        # equivalent entry point
 ```
 
@@ -130,7 +149,12 @@ fraud-ai db init
 | `EVALUATION_DIRECTORY` | `evaluation` | Stage 4 report artefacts |
 | `PSEUDONYMISATION_KEY` | a generated dev key file | Required outside development/test; at least 32 characters |
 | `STORE_RAW_IP` | `false` | Store raw IPs alongside their keyed hash |
-| `LOCAL_LLM_MODEL`, `LOCAL_LLM_ENDPOINT` | unset | Stage 7; the endpoint must be local or private |
+| `LOCAL_LLM_RUNTIME` | unset | Stage 7: `ollama`, `llamacpp-server`, `llamacpp-process` or `reference` |
+| `LOCAL_LLM_MODEL`, `LOCAL_LLM_ENDPOINT` | unset; the runtime's localhost default | The endpoint must be local or private; proxies are never used |
+| `LOCAL_LLM_TIMEOUT` | `120` | Seconds |
+| `LOCAL_LLM_BINARY`, `LOCAL_LLM_MODEL_PATH` | `llama-cli`, unset | llama.cpp process mode |
+| `LOCAL_LLM_TEMPERATURE`, `LOCAL_LLM_TOP_P`, `LOCAL_LLM_SEED` | `0`, `1`, `0` | Deterministic by default |
+| `LOCAL_LLM_CONTEXT_WINDOW`, `LOCAL_LLM_MAX_TOKENS` | `8192`, `1200` | |
 
 ## Develop
 

@@ -48,9 +48,22 @@ class Settings(BaseSettings):
     # Raw IP addresses are personal data; only keep them when explicitly enabled.
     store_raw_ip: bool = False
 
-    # Stage 7 (local offline LLM). Declared now so configuration is stable.
+    # Stage 7: local, offline analyst-assistance LLM (explanations only, never decisions).
+    # Runtime: ollama | llamacpp-server | llamacpp-process | reference (template, not an LLM).
+    local_llm_runtime: str | None = None
     local_llm_model: str | None = None
+    # Defaults per runtime (localhost) when unset; public addresses are refused.
     local_llm_endpoint: str | None = None
+    local_llm_timeout: float = Field(default=120.0, gt=0, le=3600)
+    # llamacpp-process only: the local binary and GGUF model file.
+    local_llm_binary: str = "llama-cli"
+    local_llm_model_path: Path | None = None
+    local_llm_context_window: int = Field(default=8192, ge=1024, le=262_144)
+    local_llm_max_tokens: int = Field(default=1200, ge=64, le=8192)
+    # Deterministic by default: temperature 0, fixed seed.
+    local_llm_temperature: float = Field(default=0.0, ge=0.0, le=2.0)
+    local_llm_top_p: float = Field(default=1.0, gt=0.0, le=1.0)
+    local_llm_seed: int = 0
 
     database_echo: bool = Field(default=False, description="Echo SQL (never in production).")
 
@@ -61,6 +74,16 @@ class Settings(BaseSettings):
         if level not in _LOG_LEVELS:
             raise ValueError(f"LOG_LEVEL must be one of {sorted(_LOG_LEVELS)}")
         return level
+
+    @field_validator("local_llm_runtime")
+    @classmethod
+    def _validate_llm_runtime(cls, value: str | None) -> str | None:
+        runtimes = {"ollama", "llamacpp-server", "llamacpp-process", "reference"}
+        if value is None or value == "":
+            return None
+        if value not in runtimes:
+            raise ValueError(f"LOCAL_LLM_RUNTIME must be one of {sorted(runtimes)}")
+        return value
 
     @field_validator("local_llm_endpoint")
     @classmethod

@@ -11,7 +11,8 @@ ahead: models are only as good as the data and features beneath them.
 * Event processor: idempotent, atomic per event, pseudonymising, history-keeping.
 * PostgreSQL/SQLite schema with Alembic migration `0001`.
 * Model-version registry, prediction storage, risk policy/rules boundary, and a
-  privacy-checked LLM evidence packet (interfaces plus reference logic; no ML).
+  privacy-checked LLM evidence packet (interfaces plus reference logic; no ML; replaced
+  in Stage 7).
 * Deterministic synthetic scenarios for future ML experimentation.
 * Security rules: no PAN/CVV/PIN/password storage, keyed hashing, log redaction.
 
@@ -146,19 +147,92 @@ Details are in [SEQUENCE_MODELS.md](SEQUENCE_MODELS.md). All evidence is synthet
   * more worlds and seeds for the small-data walk-forward hint;
   * categorical embeddings for the static model.
 
-## Stage 7: Local offline LLM
+## Stage 7: Local offline LLM analyst assistance ✅
 
-* An `ExplanationProvider` for a local runtime (Ollama / llama.cpp) at `LOCAL_LLM_ENDPOINT`.
-* Input is `EvidencePacket` only; output is stored in `risk_assessments.explanation`.
-* Analyst assistance: `fraud-ai investigate <event>`.
-* It never changes the score or the decision.
+* **Explanation only.** A local LLM explains *stored* outputs to a human analyst. It never
+  scores, decides, blocks or approves, and never changes labels, thresholds or rules.
+  `investigate` never rescores.
+* **Evidence packet (`analyst-evidence-1.0.0`).**
+  * Built from stored predictions, calibrators, the point-in-time snapshot, the Stage 6
+    sequence summary and the labels known now.
+  * Typed, deterministic and SHA-256-hashed, with stable ids `E1…` and controlled
+    limitations `L1…`.
+  * No identifiers, no free text, and not the synthetic scenario.
+* **Privacy gate before generation.** It refuses:
+  * sensitive names;
+  * emails, IPs, cards, tokens, UUIDs and hex ids;
+  * street addresses and phone numbers;
+  * instruction-shaped values.
 
-## Stage 8: Real-time scoring engine
+  Model output is scanned again.
+* **Versioned prompt (`analyst-prompt-1.0.0`).** It separates instructions from data.
+* **Structured, validated output (`investigation-explanation-1.0.0`).** The validator
+  checks:
+  * citations;
+  * numbers against the cited evidence;
+  * that "confirmed fraud" rests on a fraud label;
+  * decision language;
+  * privacy and length.
 
-* Event → features → model → rules → risk decision within a latency budget.
-* A service interface (for example an internal API or queue consumer), backpressure and
-  idempotency.
-* Monitoring: score drift, feature drift, and decision distribution.
+  Ten explicit failure modes, and no fallback to prose.
+* **Runtimes.** `LocalLLMClient` for Ollama, a llama.cpp server, a llama.cpp process, and a
+  deterministic reference template (not an LLM). Endpoints are local only and proxies are
+  bypassed. Temperature 0 and seed 0 by default.
+* **Storage.** `investigations` (migration `0005`): append-only and versioned per event,
+  with packet and hash, versions, runtime, model, parameters, validation, latency and
+  tokens. `investigate validate` re-checks a stored explanation and detects evidence
+  changes.
+* **CLI.**
+  * `llm status`, `llm models`, `llm benchmark`;
+  * `investigate <event-id>`, `investigate show`, `investigate validate`.
+* **Evaluation.** Eleven synthetic case types, measured on explanation quality and safety
+  (schema, citations, unsupported claims, privacy, decision language, coverage, latency),
+  never on fraud metrics.
+* **Measured.** On the 1,000-user synthetic world: 30 cases covering 10 of the 11 types.
+  * The reference template scored valid 1.0, invalid citations 0, unsupported claims 0,
+    privacy violations 0 and evidence coverage 0.72.
+  * No real local model was available in the build environment (Ollama and llama.cpp
+    were reported unavailable), so there is no LLM measurement yet (see
+    [LLM_ANALYST.md](LLM_ANALYST.md) §12).
+* **Deferred:**
+  * a real multi-model comparison (needs installed models);
+  * a boolean-contradiction check;
+  * analyst feedback on explanations.
+
+## Stage 8: Real-time scoring engine (next; not started)
+
+Recommended design, built on what Stages 1–7 made trustworthy:
+
+* **One synchronous path, one worker.** Each event goes through:
+  1. validate;
+  2. ingest idempotently;
+  3. build the point-in-time snapshot and sequence;
+  4. score with the **active** model version (gradient boosting; the sequence models are
+     optional shadow scorers);
+  5. apply rules;
+  6. `RiskPolicy`;
+  7. write a `risk_assessments` row.
+
+  The whole path runs inside one transaction per event, keyed on `event_id`, so retries
+  are idempotent.
+* **The latency budget is measured, not assumed.**
+  * Put a p95 budget on each stage (features, sequence, model, rules).
+  * Precompute or cache history aggregates only where profiling shows a need.
+  * The Stage 2 cache-corruption tests become the regression gate for any cache.
+* **A conservative fallback.** If the model or features are unavailable or over budget,
+  the versioned no-model policy applies (step-up or manual review, never a silent allow),
+  and the fallback is recorded.
+* **Shadow mode first.**
+  * New models and policies score in parallel and write predictions but not decisions.
+  * Compare their decision distributions before promotion.
+* **Monitoring.**
+  * Score and feature drift against the Stage 4 drift baseline (PSI or Jensen–Shannon).
+  * Decision-rate and fallback-rate alarms, and per-stage latency histograms.
+* **Interface.** A small internal service boundary (a queue consumer or a local HTTP or
+  gRPC API) around the same library code, with backpressure and bounded queues. The CLI
+  stays as the batch interface.
+* **The LLM stays out of the hot path.** Explanations are generated asynchronously after
+  the decision, for analyst review only. They are never an input to a decision.
 
 ## Stage 9: Analyst desktop interface (only if required)
 

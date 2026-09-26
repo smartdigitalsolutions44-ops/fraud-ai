@@ -81,3 +81,36 @@ def test_local_llm_endpoint_accepts_local(endpoint: str) -> None:
 def test_local_llm_endpoint_rejects_remote(endpoint: str) -> None:
     with pytest.raises(ValidationError):
         Settings(local_llm_endpoint=endpoint)
+
+
+def test_local_llm_defaults_are_offline_and_deterministic(monkeypatch: pytest.MonkeyPatch) -> None:
+    for var in ("LOCAL_LLM_RUNTIME", "LOCAL_LLM_MODEL", "LOCAL_LLM_TEMPERATURE"):
+        monkeypatch.delenv(var, raising=False)
+    s = Settings()
+    assert s.local_llm_runtime is None and s.local_llm_model is None
+    assert s.local_llm_temperature == 0.0 and s.local_llm_seed == 0 and s.local_llm_top_p == 1.0
+    assert s.local_llm_timeout > 0 and s.local_llm_context_window >= 1024
+
+
+def test_local_llm_settings_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LOCAL_LLM_RUNTIME", "llamacpp-process")
+    monkeypatch.setenv("LOCAL_LLM_MODEL_PATH", "/models/m.gguf")
+    monkeypatch.setenv("LOCAL_LLM_TIMEOUT", "30")
+    s = Settings()
+    assert s.local_llm_runtime == "llamacpp-process"
+    assert s.local_llm_model_path == Path("/models/m.gguf") and s.local_llm_timeout == 30
+    assert Settings(local_llm_runtime="").local_llm_runtime is None
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"local_llm_runtime": "openai"},
+        {"local_llm_timeout": 0},
+        {"local_llm_temperature": -1},
+        {"local_llm_max_tokens": 10},
+    ],
+)
+def test_invalid_local_llm_settings_rejected(overrides: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        Settings(**overrides)  # type: ignore[arg-type]

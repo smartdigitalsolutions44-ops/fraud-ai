@@ -353,3 +353,25 @@ distribution to test.
   scoring time. It is bounded, but still a database cost separate from inference.
 * **Attention is not explanation.** Permutation importance of sequence channels describes
   reliance on this data, not causes.
+
+## 10. Sequence evidence in analyst explanations (Stage 7)
+
+The Stage 7 evidence packet ([LLM_ANALYST.md](LLM_ANALYST.md)) reuses this point-in-time
+sequence. `fraud_ai.evaluation.stealth.sequence_summary`, formerly private, feeds the
+`temporal_summary` section:
+
+* **Counts over the window:** history length, device, ASN, country and address changes,
+  payment methods added, security changes, failed logins and transactions.
+* **Cadence:** minutes since the previous event and the median gap.
+* **A 6-event timeline:** the event type, hours before, and whether the device and the
+  network were known.
+
+The packet uses the window of the sequence models being explained (default 16 events) and
+contains no identifiers. It carries the GRU's stored probability next to gradient
+boosting's, so a stealthy takeover that only the GRU flags is described as a
+disagreement: "gru-1.0.0 scored … while gradient-boosting-1.0.0 scored …". The GRU's
+flag is never presented as a confirmed finding.
+
+The controlled limitation `sequence_models_limited` states the §8 finding: sequence models
+added little over gradient boosting on this synthetic data.
+

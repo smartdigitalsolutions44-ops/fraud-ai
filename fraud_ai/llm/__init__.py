@@ -1,11 +1,41 @@
-"""Local offline LLM layer (Stage 7) - interfaces only.
+"""Local, offline analyst assistance (Stage 7).
 
-The LLM explains decisions and assists analysts. It is never the fraud classifier and its
-output never replaces the numerical risk score. It receives only structured, minimised
-evidence (:class:`EvidencePacket`), never raw personal data.
+The LLM **explains** stored system outputs to a human analyst. It is not the classifier,
+the risk engine, the rules engine, the authentication system or the decision maker: it never
+changes a score, label, threshold, rule or decision, and it never blocks or approves.
+
+Pipeline (:mod:`fraud_ai.llm.service`): stored predictions and features -> privacy-checked
+:class:`EvidencePacket` -> versioned prompt -> local runtime -> validated, cited
+:class:`InvestigationExplanation` -> append-only ``investigations`` row.
 """
 
-from fraud_ai.llm.evidence import EvidencePacket, EvidencePrivacyError
-from fraud_ai.llm.provider import Explanation, ExplanationProvider
+from fraud_ai.llm.evidence import (
+    EVIDENCE_SCHEMA_VERSION,
+    EvidenceError,
+    EvidencePacket,
+    EvidencePrivacyError,
+)
+from fraud_ai.llm.prompt import PROMPT_VERSION
+from fraud_ai.llm.runtime import LocalLLMClient, make_client
+from fraud_ai.llm.schema import EXPLANATION_SCHEMA_VERSION, InvestigationExplanation
+from fraud_ai.llm.service import GenerationSettings, InvestigationResult, investigate, revalidate
+from fraud_ai.llm.validation import FailureKind, ValidationResult, validate_output
 
-__all__ = ["EvidencePacket", "EvidencePrivacyError", "Explanation", "ExplanationProvider"]
+__all__ = [
+    "EVIDENCE_SCHEMA_VERSION",
+    "EXPLANATION_SCHEMA_VERSION",
+    "PROMPT_VERSION",
+    "EvidenceError",
+    "EvidencePacket",
+    "EvidencePrivacyError",
+    "FailureKind",
+    "GenerationSettings",
+    "InvestigationExplanation",
+    "InvestigationResult",
+    "LocalLLMClient",
+    "ValidationResult",
+    "investigate",
+    "make_client",
+    "revalidate",
+    "validate_output",
+]

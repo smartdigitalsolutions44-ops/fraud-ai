@@ -524,7 +524,21 @@ The results on this world are in [NEURAL_MODELS.md](NEURAL_MODELS.md) §9.
   every model's probability and the prior behaviour from the sequence, as pseudonymised
   summaries.
 
-## 13. What this does not show
+## 13. Explanation-layer evaluation (Stage 7)
+
+The Stage 7 LLM layer is evaluated **separately**, on explanation quality and safety, and
+**not** with the fraud metrics above: an explanation never classifies.
+`fraud-ai llm benchmark` measures, over the same synthetic cases for each local runtime:
+
+* schema compliance;
+* the invalid-citation, unsupported-claim, privacy-violation and decision-language rates;
+* evidence coverage;
+* latency and response length.
+
+Cases are chosen by synthetic scenario, stored predictions and packet facts. The metric
+definitions and results are in [LLM_ANALYST.md](LLM_ANALYST.md) §12.
+
+## 14. What this does not show
 
 * **Real-world performance.** Nothing here measures real fraud, real customers or real
   losses.
