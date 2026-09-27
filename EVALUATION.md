@@ -538,7 +538,26 @@ The Stage 7 LLM layer is evaluated **separately**, on explanation quality and sa
 Cases are chosen by synthetic scenario, stored predictions and packet facts. The metric
 definitions and results are in [LLM_ANALYST.md](LLM_ANALYST.md) §12.
 
-## 14. What this does not show
+## 14. Policy simulation and live monitoring (Stage 8)
+
+Stage 8 builds on this framework:
+
+* **Band proposal.** `fraud-ai policy propose` derives experimental decision bands from
+  `cost_curve` on **calibrated validation** scores. It needs at least 10 fraud and 10
+  legitimate validation events.
+* **Simulation.** `fraud-ai policy simulate` runs a policy over the **test split**
+  through the live `decide()`. It reports volumes, fraud caught, challenged and missed,
+  false positives and assumed cost, and changes no stored decision.
+* **Comparison.** `fraud-ai policy compare` runs two policies on identical events, with
+  a paired bootstrap interval for the cost difference.
+* **Monitoring.** `fraud-ai monitoring summary` compares live assessments with the
+  policy's stored baselines, using the drift maths of section 9. It covers features,
+  predictions, decision rates, prevalence and the anomaly score. The results are
+  **warnings only**.
+
+See [RISK_POLICY.md](RISK_POLICY.md) and [REALTIME_SCORING.md](REALTIME_SCORING.md).
+
+## 15. What this does not show
 
 * **Real-world performance.** Nothing here measures real fraud, real customers or real
   losses.

@@ -162,12 +162,18 @@ class SignalSource(StrEnum):
 
 
 class Decision(StrEnum):
-    """Final risk-engine outcomes, ordered from least to most restrictive."""
+    """Internal risk-policy outcomes, ordered from least to most restrictive.
+
+    These are *policy outputs*, not actions executed anywhere: no payment system is called.
+    There is deliberately no permanent ban. ``TEMPORARY_BLOCK`` always expires and always
+    goes to manual review.
+    """
 
     ALLOW = "ALLOW"
+    ALLOW_WITH_MONITORING = "ALLOW_WITH_MONITORING"
     STEP_UP_AUTHENTICATION = "STEP_UP_AUTHENTICATION"
     MANUAL_REVIEW = "MANUAL_REVIEW"
-    BLOCK = "BLOCK"
+    TEMPORARY_BLOCK = "TEMPORARY_BLOCK"
 
     @property
     def severity(self) -> int:
@@ -176,7 +182,27 @@ class Decision(StrEnum):
 
 _DECISION_ORDER = [
     Decision.ALLOW,
+    Decision.ALLOW_WITH_MONITORING,
     Decision.STEP_UP_AUTHENTICATION,
     Decision.MANUAL_REVIEW,
-    Decision.BLOCK,
+    Decision.TEMPORARY_BLOCK,
 ]
+
+
+class RuleSeverity(StrEnum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    CRITICAL = "critical"
+
+
+class ReviewStatus(StrEnum):
+    OPEN = "open"
+    NEEDS_MORE_INFORMATION = "needs_more_information"
+    RESOLVED = "resolved"
+
+
+class ReviewResolution(StrEnum):
+    LEGITIMATE = "legitimate"
+    FRAUD = "fraud"
+    NEEDS_MORE_INFORMATION = "needs_more_information"

@@ -1,6 +1,6 @@
-"""Risk engine: combines ML probability and rule results into a policy-driven decision."""
+"""Risk policy: versioned definitions and the deterministic decision engine."""
 
-from fraud_ai.risk.engine import RiskEngine, RiskOutcome
-from fraud_ai.risk.policy import RiskPolicy
+from fraud_ai.risk.engine import PolicyDecision, PolicyInputs, decide
+from fraud_ai.risk.policy import FailureCategory, RiskPolicyDefinition
 
-__all__ = ["RiskEngine", "RiskOutcome", "RiskPolicy"]
+__all__ = ["FailureCategory", "PolicyDecision", "PolicyInputs", "RiskPolicyDefinition", "decide"]

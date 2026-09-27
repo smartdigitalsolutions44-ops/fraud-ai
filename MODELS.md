@@ -369,3 +369,31 @@ and changes none of it:
   are never presented as one.
 * **No model output is changed.** No investigation writes to `model_predictions`,
   `model_versions` or `model_calibrations`; the tests compare row counts before and after.
+
+## 17. Models in the real-time path (Stage 8)
+
+In [REALTIME_SCORING.md](REALTIME_SCORING.md), models are **evidence, never decisions**:
+
+* **Primary classifier** (gradient boosting in the experiments). Its probability is
+  calibrated with the sigmoid calibrator, fitted on validation and embedded in the
+  policy, and becomes the risk score that the policy's bands map to a decision.
+* **Secondary and sequence models** corroborate. A flag raises a low decision to
+  monitoring, and it is one of the two things that can corroborate a temporary block.
+* **Anomaly signal** (the autoencoder). It can only raise a decision to monitoring. It
+  is never stored as a fraud probability.
+* **Shadow models** are scored and stored in `model_predictions` for every decided
+  event, but never affect the decision.
+
+**Pinning and verification.**
+
+* Every active model is pinned in the policy by its artefact SHA-256.
+* Activation reloads and verifies each artefact.
+* The service caches loaded models by (name, version, digest) and reloads them after
+  any deployment change.
+
+**Failures.** A corrupt or missing primary artefact, or an invalid score, is an explicit
+failure that ends in manual review. A failing secondary or sequence model means at least
+a step-up.
+
+**Predictions.** They keep the one-per-(event, model version) rule. The live path uses
+the same conflict check as `fraud-ai score` (`models.scoring.store_prediction`).

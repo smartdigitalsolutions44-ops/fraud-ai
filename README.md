@@ -3,7 +3,7 @@
 A locally runnable fraud-prevention software platform written in Python. It is not a web
 application.
 
-The current release covers **Stages 1 to 7**:
+The current release covers **Stages 1 to 8**:
 
 * **Stage 1:** the software core, the event architecture, the fraud database (PostgreSQL in
   production, SQLite for local use), migrations, synthetic data and the CLI.
@@ -36,11 +36,25 @@ The current release covers **Stages 1 to 7**:
   * the LLM never scores, decides, blocks, approves, or changes labels, thresholds or
     rules.
 
-No fraud *decisions* are made yet, and all bundled data is synthetic. Evaluation results
+* **Stage 8:** real-time scoring and risk-decision orchestration:
+  * an idempotent hot path: event contract → ingestion (with arrival time) →
+    point-in-time features → cached, verified models → calibration → versioned rules →
+    a versioned, immutable risk policy → an immutable assessment;
+  * shadow models and policies that are recorded but never decide;
+  * explicit, conservative fallbacks for every failure;
+  * a manual-review queue, a policy simulator and comparison, and monitoring with drift
+    warnings;
+  * the LLM stays outside the decision path.
+
+Decisions are **internal policy outputs** (`ALLOW`, `ALLOW_WITH_MONITORING`,
+`STEP_UP_AUTHENTICATION`, `MANUAL_REVIEW`, `TEMPORARY_BLOCK`). No payment or authentication
+system is called, and there are no permanent bans. Policy bands are synthetic-derived
+experimental defaults, and all bundled data is synthetic. Evaluation results
 describe synthetic data only; they are not real-world detection rates or savings. See
 [ARCHITECTURE.md](ARCHITECTURE.md), [FEATURES.md](FEATURES.md), [MODELS.md](MODELS.md),
 [EVALUATION.md](EVALUATION.md), [NEURAL_MODELS.md](NEURAL_MODELS.md),
-[SEQUENCE_MODELS.md](SEQUENCE_MODELS.md), [LLM_ANALYST.md](LLM_ANALYST.md) and
+[SEQUENCE_MODELS.md](SEQUENCE_MODELS.md), [LLM_ANALYST.md](LLM_ANALYST.md),
+[REALTIME_SCORING.md](REALTIME_SCORING.md), [RISK_POLICY.md](RISK_POLICY.md) and
 [ROADMAP.md](ROADMAP.md).
 
 ## Install
@@ -126,6 +140,20 @@ fraud-ai investigate show <investigation-id> --evidence     # provenance + evide
 fraud-ai investigate validate <investigation-id>            # re-check a stored explanation
 fraud-ai llm benchmark --model gradient-boosting-1.0.0 --runtime reference \
     --runtime ollama:qwen2.5:7b-instruct --score-latest 1500 --score-labelled 300
+# Stage 8 - real-time scoring (decisions are internal policy outputs; nothing is executed)
+fraud-ai seed --users 300 --days 180 --fraud-multiplier 2 \
+    --live-days 7 --live-output live.jsonl                  # history + held-out live stream
+fraud-ai train gradient-boosting ; fraud-ai train neural-network ; fraud-ai train logistic
+fraud-ai policy propose risk-policy-1.0.0 --primary gradient-boosting-1.0.0 \
+    --secondary neural-network-1.0.0                        # EXPERIMENTAL bands, stored inactive
+fraud-ai policy simulate risk-policy-1.0.0                  # test split; changes nothing
+fraud-ai policy compare risk-policy-1.0.0 risk-policy-1.1.0 # same events, paired
+fraud-ai deployment activate risk-policy-1.0.0 --shadow-model logistic-regression-1.0.0
+fraud-ai realtime replay live.jsonl                         # score in arrival order
+fraud-ai realtime score event.json                          # live: arrival = now
+fraud-ai review list ; fraud-ai review show <id> ; fraud-ai review resolve <id> --outcome fraud
+fraud-ai monitoring summary                                 # decisions, latency, drift warnings
+python scripts/realtime_benchmark.py --users 300            # full-path latency benchmark
 python -m fraud_ai --help        # equivalent entry point
 ```
 

@@ -485,3 +485,19 @@ fraud-ai llm benchmark --model gradient-boosting-1.0.0 --model gru-1.0.0 \
     --runtime reference --runtime ollama:qwen2.5:7b-instruct --runtime ollama:llama3.1:8b \
     --per-case 3 --score-latest 1500
 ```
+
+## 15. Relationship to real-time decisions (Stage 8)
+
+The LLM stays **after** the decision:
+
+```
+assessment exists (Stage 8)  ->  analyst requests an investigation  ->  Stage 7 packet  ->  explanation
+```
+
+* The hot path imports no LLM runtime code. Scoring works with no runtime configured or
+  with the runtime down (tested).
+* An investigation reads the **stored** predictions that the live path persisted. It
+  never rescores, and it never changes the assessment, the review item or the policy.
+* `fraud-ai review show <id>` prints the `fraud-ai investigate <event-id>` command for
+  analysts. Review outcomes are recorded by the analyst, not by the LLM.
+

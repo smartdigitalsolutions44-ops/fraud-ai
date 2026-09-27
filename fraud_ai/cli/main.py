@@ -166,6 +166,19 @@ def db_status(app: AppContext) -> None:
     default=None,
     help="End of the synthetic timeline (UTC). Default: today 00:00.",
 )
+@click.option(
+    "--live-days",
+    type=click.IntRange(1, 60),
+    default=None,
+    help="Stage 8: hold out the last N days as a live stream (not ingested).",
+)
+@click.option(
+    "--live-output",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="JSON-lines file for the held-out live events (with arrival times).",
+)
+@click.option("--late-fraction", type=click.FloatRange(0, 1), default=0.02, show_default=True)
 @pass_app
 def seed(
     app: AppContext,
@@ -174,6 +187,9 @@ def seed(
     fraud_multiplier: float,
     days: int,
     reference_time: datetime | None,
+    live_days: int | None,
+    live_output: Path | None,
+    late_fraction: float,
 ) -> None:
     """Load deterministic synthetic demo data through the ingestion pipeline."""
     if app.settings.environment in {Environment.STAGING, Environment.PRODUCTION}:
@@ -185,6 +201,38 @@ def seed(
     ref = reference_time or datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
     ref = ref.replace(tzinfo=UTC) if ref.tzinfo is None else ref
     factory = make_session_factory(app.engine)
+    if (live_days is None) != (live_output is None):
+        raise click.UsageError("--live-days and --live-output go together")
+    if live_days is not None and live_output is not None:
+        from fraud_ai.data.seed import seed_with_live_holdout
+
+        try:
+            with session_scope(factory) as session:
+                holdout = seed_with_live_holdout(
+                    session,
+                    build_pseudonymiser(app.settings),
+                    n_users=n_users,
+                    seed=rng_seed,
+                    reference_time=ref,
+                    activity_days=days,
+                    live_days=live_days,
+                    fraud_multiplier=fraud_multiplier,
+                    late_fraction=late_fraction,
+                    store_raw_ip=app.settings.store_raw_ip,
+                )
+        except FraudAIError as exc:
+            raise click.ClickException(str(exc)) from None
+        live_output.parent.mkdir(parents=True, exist_ok=True)
+        live_output.write_text("".join(json.dumps(e) + "\n" for e in holdout.events))
+        click.echo(
+            f"seeded {holdout.history.users} users, {holdout.history.events} history events "
+            f"before {holdout.cutoff.isoformat()}"
+        )
+        click.echo(
+            f"live stream: {len(holdout.events)} SYNTHETIC events ({holdout.late_events} late) "
+            f"-> {live_output}"
+        )
+        return
     try:
         with session_scope(factory) as session:
             summary = seed_synthetic_data(
@@ -1722,6 +1770,20 @@ def system_status(app: AppContext) -> None:
         with session_scope(make_session_factory(app.engine)) as session:
             snapshots = session.scalar(select(func.count()).select_from(FeatureSnapshot))
         click.echo(f"  snapshots     {snapshots}")
+    if status is not None and status.up_to_date:
+        from fraud_ai.risk.registry import active_deployment
+
+        with session_scope(make_session_factory(app.engine)) as session:
+            try:
+                deployed = active_deployment(session)
+                policy_state = (
+                    f"{deployed.policy.policy_version} (deployment #{deployed.deployment.sequence})"
+                    if deployed
+                    else "none active (decisions fall back to MANUAL_REVIEW)"
+                )
+            except FraudAIError as exc:
+                policy_state = f"UNTRUSTED ({exc})"
+        click.echo(f"risk policy     {policy_state}")
     if s.local_llm_runtime:
         llm_state = f"{s.local_llm_runtime} {s.local_llm_model or ''}".rstrip()
         llm_state += " (explanations only; see `fraud-ai llm status`)"
@@ -2816,6 +2878,655 @@ def investigate_validate(app: AppContext, investigation_id: str, no_compare_curr
         click.echo(f"  - {note}")
     if not report.valid:
         raise SystemExit(2)
+
+
+# --------------------------------------------------------------------------- realtime (Stage 8)
+def _service(app: AppContext, *, replay: bool) -> Any:
+    from fraud_ai.realtime.service import FraudScoringService
+    from fraud_ai.security.keys import build_pseudonymiser
+
+    return FraudScoringService(
+        make_session_factory(app.engine),
+        build_pseudonymiser(app.settings),
+        store_raw_ip=app.settings.store_raw_ip,
+        replay=replay,
+    )
+
+
+def _read_events(path: Path) -> list[Any]:
+    text = sys.stdin.read() if str(path) == "-" else path.read_text()
+    text = text.strip()
+    if not text:
+        raise click.ClickException("no events in the input")
+    if text.startswith("["):
+        data = json.loads(text)
+        return list(data)
+    if text.startswith("{") and "\n" not in text:
+        return [json.loads(text)]
+    events = []
+    for n, line in enumerate(text.splitlines(), 1):
+        if line.strip():
+            try:
+                events.append(json.loads(line))
+            except json.JSONDecodeError:
+                raise click.ClickException(f"line {n} is not valid JSON") from None
+    return events
+
+
+def _outcome_line(outcome: Any) -> str:
+    d = outcome.to_dict()
+    decision = d["decision"] or "-"
+    codes = ",".join(d["reason_codes"]) or "-"
+    return (
+        f"{d['event_ref'] or '-':<20} {d['status']:<13} {decision:<23} "
+        f"{d['risk_level'] or '-':<9} {d['latency_ms'].get('total', 0):>8.1f} ms  {codes}"
+    )
+
+
+@cli.group()
+def realtime() -> None:
+    """Real-time scoring: contract -> ingest -> features -> models -> rules -> policy."""
+
+
+@realtime.command("score")
+@click.argument("event_file", type=click.Path(path_type=Path, allow_dash=True))
+@click.option("--json", "as_json", is_flag=True)
+@pass_app
+def realtime_score(app: AppContext, event_file: Path, as_json: bool) -> None:
+    """Score live events (JSON object, array or JSON lines; '-' reads stdin).
+
+    Arrival time is the service clock; decisions are policy outputs, nothing is executed.
+    """
+    app.require_migrated()
+    service = _service(app, replay=False)
+    outcomes = [service.score_event(e) for e in _read_events(event_file)]
+    if as_json:
+        click.echo(json.dumps([o.to_dict() for o in outcomes], indent=2, sort_keys=True))
+        return
+    for outcome in outcomes:
+        click.echo(_outcome_line(outcome))
+
+
+@realtime.command("replay")
+@click.argument("event_file", type=click.Path(path_type=Path, allow_dash=True))
+@click.option("--verbose", is_flag=True, help="One line per event.")
+@click.option("--output", type=click.Path(dir_okay=False, path_type=Path), default=None)
+@pass_app
+def realtime_replay(app: AppContext, event_file: Path, verbose: bool, output: Path | None) -> None:
+    """Replay recorded events in ARRIVAL order (each may carry `arrival_time`)."""
+    app.require_migrated()
+    service = _service(app, replay=True)
+    events = _read_events(event_file)
+    keyed = sorted(
+        enumerate(events),
+        key=lambda x: (
+            (str(x[1].get("arrival_time") or x[1].get("timestamp") or ""), x[0])
+            if isinstance(x[1], dict)
+            else ("", x[0])
+        ),
+    )
+    outcomes = []
+    for _, event in keyed:
+        outcome = service.score_event(event)
+        outcomes.append(outcome)
+        if verbose:
+            click.echo(_outcome_line(outcome))
+    from collections import Counter
+
+    statuses = Counter(o.status for o in outcomes)
+    decisions = Counter(o.decision.value for o in outcomes if o.decision and o.status != "rejected")
+    metrics = service.metrics.snapshot()
+    click.echo(f"replayed {len(outcomes)} events: {dict(sorted(statuses.items()))}")
+    click.echo(f"decisions: {dict(sorted(decisions.items()))}")
+    if metrics["fallbacks"]:
+        click.echo(f"failures/fallbacks: {metrics['fallbacks']}")
+    total = metrics["latency_ms"].get("total", {})
+    click.echo(
+        f"latency total p50 {total.get('p50')} ms  p95 {total.get('p95')} ms  "
+        f"p99 {total.get('p99')} ms  (all events, incl. non-decision)"
+    )
+    click.echo(f"model cache: {service.cache.stats.to_dict()}")
+    if output is not None:
+        output.write_text(
+            json.dumps(
+                {"outcomes": [o.to_dict() for o in outcomes], "metrics": metrics},
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        click.echo(f"written {output}")
+
+
+@realtime.command("reassess")
+@click.argument("event_id")
+@pass_app
+def realtime_reassess(app: AppContext, event_id: str) -> None:
+    """Issue a NEW assessment version with today's evidence; the original is preserved."""
+    app.require_migrated()
+    service = _service(app, replay=False)
+    try:
+        outcome = service.reassess(_parse_uuid(event_id))
+    except FraudAIError as exc:
+        raise click.ClickException(str(exc)) from None
+    click.echo(
+        f"assessment version {outcome.assessment_version}: {outcome.decision} "
+        f"({outcome.risk_level}) {','.join(outcome.reason_codes)}"
+    )
+
+
+# --------------------------------------------------------------------------- policy
+@cli.group()
+def policy() -> None:
+    """Versioned, immutable risk policies (bands, rules, fallbacks, model set)."""
+
+
+def _policy_costs(opts: dict[str, Any]) -> Any:
+    from fraud_ai.risk.offline import PolicyCostConfig
+
+    return PolicyCostConfig(
+        fraud_loss=opts["fraud_loss"],
+        manual_review_cost=opts["review_cost"],
+        step_up_cost=opts["step_up_cost"],
+        false_positive_friction=opts["friction"],
+        step_up_fraud_stop_rate=opts["step_up_stop_rate"],
+    )
+
+
+def _cost_options(func: Any) -> Any:
+    for option in reversed(
+        [
+            click.option(
+                "--fraud-loss", type=click.FloatRange(0), default=500.0, show_default=True
+            ),
+            click.option("--review-cost", type=click.FloatRange(0), default=5.0, show_default=True),
+            click.option(
+                "--step-up-cost", type=click.FloatRange(0), default=1.0, show_default=True
+            ),
+            click.option("--friction", type=click.FloatRange(0), default=10.0, show_default=True),
+            click.option(
+                "--step-up-stop-rate",
+                type=click.FloatRange(0, 1),
+                default=0.5,
+                show_default=True,
+                help="ASSUMED share of fraud a step-up would stop (not measurable here).",
+            ),
+        ]
+    ):
+        func = option(func)
+    return func
+
+
+@policy.command("propose")
+@click.argument("version")
+@click.option("--primary", required=True, help="Primary classifier, e.g. gradient-boosting-1.0.0")
+@click.option("--secondary", default=None)
+@click.option("--sequence", "sequence_ref", default=None)
+@click.option("--anomaly", default=None)
+@click.option("--monitor-recall", type=click.FloatRange(0.5, 1.0), default=0.95, show_default=True)
+@click.option("--block-precision", type=click.FloatRange(0.5, 1.0), default=0.95, show_default=True)
+@click.option("--description", default="")
+@_cost_options
+@pass_app
+def policy_propose(
+    app: AppContext,
+    /,
+    version: str,
+    primary: str,
+    secondary: str | None,
+    sequence_ref: str | None,
+    anomaly: str | None,
+    monitor_recall: float,
+    block_precision: float,
+    description: str,
+    **opts: Any,
+) -> None:
+    """Derive EXPERIMENTAL bands from Stage 4 cost analysis (validation split) and store a
+    new, INACTIVE policy version. Activation is a separate, explicit step."""
+    app.require_migrated()
+    from fraud_ai.evaluation.costs import CostConfig
+    from fraud_ai.risk.offline import propose_policy
+    from fraud_ai.risk.registry import create_policy
+
+    costs = CostConfig(
+        fraud_loss=opts["fraud_loss"],
+        manual_review_cost=opts["review_cost"],
+        step_up_cost=opts["step_up_cost"],
+        false_positive_friction=opts["friction"],
+    )
+    with session_scope(make_session_factory(app.engine)) as session:
+        try:
+            proposal = propose_policy(
+                session,
+                version,
+                primary=primary,
+                secondary=secondary,
+                sequence=sequence_ref,
+                anomaly=anomaly,
+                costs=costs,
+                monitor_recall=monitor_recall,
+                block_precision=block_precision,
+                description=description,
+            )
+            create_policy(session, proposal.definition, derivation=proposal.derivation)
+        except (FraudAIError, ValueError) as exc:
+            raise click.ClickException(str(exc)) from None
+        click.echo(f"stored {version} (INACTIVE; synthetic-derived experimental defaults)")
+        for band in proposal.definition.bands:
+            click.echo(f"  >= {band.lower:<5} {band.risk_level:<9} {band.decision.value}")
+        click.echo(f"  sha256 {proposal.definition.sha256()}")
+
+
+@policy.command("list")
+@pass_app
+def policy_list(app: AppContext) -> None:
+    """All stored policy versions and which one is active."""
+    app.require_migrated()
+    from fraud_ai.risk.registry import deployment_history, list_policies
+
+    with session_scope(make_session_factory(app.engine)) as session:
+        history = deployment_history(session)
+        active = history[0].policy_version if history else None
+        rows = list_policies(session)
+        if not rows:
+            click.echo("no policies; create one with `fraud-ai policy propose`")
+        for row in rows:
+            flag = "ACTIVE" if row.policy_version == active else ""
+            origin = "synthetic-derived" if row.synthetic_derived else ""
+            click.echo(
+                f"{row.policy_version:<24} {row.created_at:%Y-%m-%d %H:%M}  {flag:<6} {origin}"
+            )
+
+
+@policy.command("show")
+@click.argument("version")
+@click.option("--json", "as_json", is_flag=True)
+@pass_app
+def policy_show(app: AppContext, version: str, as_json: bool) -> None:
+    """A policy's full definition (verified against its hash)."""
+    app.require_migrated()
+    from fraud_ai.risk.registry import get_policy_record, verified_definition
+
+    with session_scope(make_session_factory(app.engine)) as session:
+        try:
+            row = get_policy_record(session, version)
+            definition = verified_definition(row)
+        except FraudAIError as exc:
+            raise click.ClickException(str(exc)) from None
+        if as_json:
+            payload = {
+                "definition": definition.model_dump(mode="json"),
+                "sha256": row.definition_sha256,
+                "derivation": {k: v for k, v in row.derivation.items() if k != "baselines"},
+            }
+            click.echo(json.dumps(payload, indent=2, sort_keys=True))
+            return
+        click.echo(f"{definition.policy_version}  sha256 {row.definition_sha256}")
+        click.echo(f"  synthetic-derived: {definition.synthetic_derived}")
+        for role, slot in definition.slots().items():
+            cal = slot.calibration.method if slot.calibration else "none"
+            click.echo(f"  {role:<10} {slot.ref:<28} threshold {slot.threshold}  calibration {cal}")
+        click.echo(f"  rules      {definition.rules_version}")
+        click.echo(f"  decides on {', '.join(definition.decision_event_kinds)} events")
+        click.echo("  bands (calibrated primary score):")
+        for band in definition.bands:
+            click.echo(f"    >= {band.lower:<5} {band.risk_level:<9} {band.decision.value}")
+        click.echo("  rule severity -> minimum decision:")
+        for severity, decision in definition.severity_minimum.items():
+            click.echo(f"    {severity.value:<8} {decision.value}")
+        click.echo("  fallbacks:")
+        for failure, decision in sorted(definition.fallbacks.items()):
+            click.echo(f"    {failure.value:<30} {decision.value}")
+
+
+def _write_policy_report(app: AppContext, name: str, report: dict[str, Any]) -> Path:
+    directory = Path(app.settings.evaluation_directory) / "policies"
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{name}.json"
+    path.write_text(json.dumps(report, indent=2, sort_keys=True, default=str))
+    return path
+
+
+@policy.command("simulate")
+@click.argument("version")
+@click.option(
+    "--split", type=click.Choice(["validation", "test"]), default="test", show_default=True
+)
+@_cost_options
+@pass_app
+def policy_simulate(app: AppContext, /, version: str, split: str, **opts: Any) -> None:
+    """Run a policy over historical labelled events; stored decisions are NOT changed."""
+    app.require_migrated()
+    from fraud_ai.risk.offline import simulate
+    from fraud_ai.risk.registry import load_policy
+
+    with session_scope(make_session_factory(app.engine)) as session:
+        try:
+            report = simulate(
+                session, load_policy(session, version), split=split, costs=_policy_costs(opts)
+            )
+        except FraudAIError as exc:
+            raise click.ClickException(str(exc)) from None
+        session.rollback()  # simulation is read-only
+    click.echo(f"{version} on {report['events']} {split} events ({report['fraud_events']} fraud)")
+    for decision, count in report["decision_distribution"].items():
+        click.echo(f"  {decision:<24} {count:>6}")
+    click.echo(
+        f"fraud caught (review/block) {report['fraud_caught']}  challenged (step-up) "
+        f"{report['fraud_challenged_step_up']}  missed {report['fraud_missed']}"
+    )
+    click.echo(
+        f"false positives {report['false_positive_volume']}  estimated cost "
+        f"{report['estimated_cost']:.1f} (assumed costs; SYNTHETIC)"
+    )
+    click.echo(f"written {_write_policy_report(app, f'{version}_simulation_{split}', report)}")
+
+
+@policy.command("compare")
+@click.argument("version_a")
+@click.argument("version_b")
+@click.option(
+    "--split", type=click.Choice(["validation", "test"]), default="test", show_default=True
+)
+@click.option("--iterations", type=click.IntRange(10), default=1000, show_default=True)
+@_cost_options
+@pass_app
+def policy_compare(
+    app: AppContext, /, version_a: str, version_b: str, split: str, iterations: int, **opts: Any
+) -> None:
+    """Compare two policies on exactly the same historical events (never activates)."""
+    app.require_migrated()
+    from fraud_ai.risk.offline import compare_policies
+    from fraud_ai.risk.registry import load_policy
+
+    with session_scope(make_session_factory(app.engine)) as session:
+        try:
+            report = compare_policies(
+                session,
+                load_policy(session, version_a),
+                load_policy(session, version_b),
+                split=split,
+                costs=_policy_costs(opts),
+                iterations=iterations,
+            )
+        except FraudAIError as exc:
+            raise click.ClickException(str(exc)) from None
+        session.rollback()
+    click.echo(
+        f"{report['same_events']} identical {split} events; decisions differ on "
+        f"{report['decisions_differ']}"
+    )
+    for side in ("a", "b"):
+        r = report[side]
+        click.echo(
+            f"  {report['policy_' + side]:<24} caught {r['fraud_caught']:>4}  step-up "
+            f"{r['step_up_volume']:>5}  review {r['manual_review_volume']:>5}  block "
+            f"{r['temporary_block_volume']:>4}  FP {r['false_positive_volume']:>5}  cost "
+            f"{r['estimated_cost']:.1f}"
+        )
+    diff = report["cost_difference_a_minus_b"]
+    click.echo(
+        f"cost A-B {diff['estimate']:.1f} [{diff['lower_95']:.1f}, {diff['upper_95']:.1f}] "
+        "(bootstrap 95%; assumed costs; SYNTHETIC)"
+    )
+    click.echo(report["note"])
+    path = _write_policy_report(app, f"compare_{version_a}_vs_{version_b}_{split}", report)
+    click.echo(f"written {path}")
+
+
+# --------------------------------------------------------------------------- deployment
+@cli.group()
+def deployment() -> None:
+    """The active policy and shadow configuration (append-only history)."""
+
+
+@deployment.command("show")
+@click.option("--history", "show_history", is_flag=True)
+@pass_app
+def deployment_show(app: AppContext, show_history: bool) -> None:
+    """The active deployment (and optionally every earlier one)."""
+    app.require_migrated()
+    from fraud_ai.risk.registry import active_deployment, deployment_history
+
+    with session_scope(make_session_factory(app.engine)) as session:
+        try:
+            active = active_deployment(session)
+        except FraudAIError as exc:
+            raise click.ClickException(f"active deployment is not trustworthy: {exc}") from None
+        if active is None:
+            click.echo("no active deployment: every decision falls back to MANUAL_REVIEW")
+        else:
+            d = active.deployment
+            click.echo(f"deployment #{d.sequence} activated {d.activated_at:%Y-%m-%d %H:%M:%S}")
+            click.echo(f"  policy          {d.policy_version}")
+            for role, slot in active.policy.slots().items():
+                click.echo(f"  {role:<15} {slot.ref}")
+            click.echo(f"  shadow models   {', '.join(d.shadow_models) or '-'}")
+            click.echo(f"  shadow policies {', '.join(d.shadow_policies) or '-'}")
+            if d.note:
+                click.echo(f"  note            {d.note}")
+        if show_history:
+            for row in deployment_history(session):
+                click.echo(
+                    f"  #{row.sequence:<3} {row.activated_at:%Y-%m-%d %H:%M} {row.policy_version}"
+                )
+
+
+@deployment.command("activate")
+@click.argument("policy_version")
+@click.option("--shadow-model", "shadow_models", multiple=True)
+@click.option("--shadow-policy", "shadow_policies", multiple=True)
+@click.option("--note", default=None)
+@click.option("--yes", is_flag=True, help="Do not ask for confirmation.")
+@pass_app
+def deployment_activate(
+    app: AppContext,
+    policy_version: str,
+    shadow_models: tuple[str, ...],
+    shadow_policies: tuple[str, ...],
+    note: str | None,
+    yes: bool,
+) -> None:
+    """Explicitly activate a policy (validated first). Never happens implicitly."""
+    app.require_migrated()
+    from fraud_ai.risk.registry import activate
+
+    if not yes:
+        click.confirm(
+            f"Activate {policy_version} for all newly scored events? (synthetic-derived "
+            "policies are experimental)",
+            abort=True,
+        )
+    with session_scope(make_session_factory(app.engine)) as session:
+        try:
+            row = activate(
+                session,
+                policy_version,
+                shadow_models=list(shadow_models),
+                shadow_policies=list(shadow_policies),
+                note=note,
+            )
+        except FraudAIError as exc:
+            raise click.ClickException(str(exc)) from None
+        click.echo(f"deployment #{row.sequence}: {policy_version} is active")
+
+
+# --------------------------------------------------------------------------- review
+@cli.group()
+def review() -> None:
+    """Manual-review queue (resolutions never rewrite the original assessment)."""
+
+
+@review.command("list")
+@click.option(
+    "--status",
+    type=click.Choice(["open", "needs_more_information", "resolved", "all"]),
+    default="open",
+    show_default=True,
+)
+@click.option("--limit", type=click.IntRange(1, 1000), default=50, show_default=True)
+@pass_app
+def review_list(app: AppContext, status: str, limit: int) -> None:
+    """Queue entries, most urgent first."""
+    app.require_migrated()
+    from fraud_ai.core.enums import ReviewStatus
+    from fraud_ai.realtime.review import list_reviews
+
+    with session_scope(make_session_factory(app.engine)) as session:
+        items = list_reviews(
+            session, status=None if status == "all" else ReviewStatus(status), limit=limit
+        )
+        if not items:
+            click.echo("review queue is empty")
+        for item in items:
+            click.echo(
+                f"{item.review_id}  p{item.priority}  {item.status.value:<22} "
+                f"{item.created_at:%Y-%m-%d %H:%M}  {','.join(item.reason_codes)}"
+            )
+
+
+@review.command("show")
+@click.argument("review_id")
+@pass_app
+def review_show(app: AppContext, review_id: str) -> None:
+    """A queue entry with its (unchanged) assessment and outcomes."""
+    app.require_migrated()
+    from fraud_ai.realtime.review import get_review
+
+    with session_scope(make_session_factory(app.engine)) as session:
+        try:
+            detail = get_review(session, _parse_uuid(review_id))
+        except FraudAIError as exc:
+            raise click.ClickException(str(exc)) from None
+        item, a = detail.item, detail.assessment
+        click.echo(f"review {item.review_id}  priority {item.priority}  status {item.status.value}")
+        click.echo(f"  event        {a.event_id}")
+        click.echo(
+            f"  assessment   {a.assessment_id} v{a.assessment_version}  {a.decision.value}  "
+            f"risk {a.risk_level}  policy {a.policy_version}"
+        )
+        click.echo(f"  reasons      {', '.join(a.reason_codes)}")
+        if a.calibrated_score is not None:
+            click.echo(f"  score        {a.calibrated_score:.4f} (calibrated {a.primary_model})")
+        matched = [r for r in a.triggered_rules.get("results", []) if r["matched"]]
+        for r in matched:
+            click.echo(f"  rule         {r['rule_id']} {r['reason_code']} ({r['severity']})")
+        for f in a.failures:
+            click.echo(f"  failure      {f['category']}")
+        click.echo(f"  action       {json.dumps(a.action, sort_keys=True)}")
+        for outcome in detail.outcomes:
+            click.echo(
+                f"  outcome      {outcome.created_at:%Y-%m-%d %H:%M}  {outcome.resolution.value}"
+                + (f"  note: {outcome.note}" if outcome.note else "")
+            )
+        click.echo(f"  (explain with: fraud-ai investigate {a.event_id})")
+
+
+@review.command("resolve")
+@click.argument("review_id")
+@click.option(
+    "--outcome",
+    type=click.Choice(["legitimate", "fraud", "needs_more_information"]),
+    required=True,
+)
+@click.option("--note", default=None, help="Short note without personal data.")
+@pass_app
+def review_resolve(app: AppContext, review_id: str, outcome: str, note: str | None) -> None:
+    """Record a review outcome (the assessment itself is never modified)."""
+    app.require_migrated()
+    from fraud_ai.core.enums import ReviewResolution
+    from fraud_ai.realtime.review import resolve
+
+    with session_scope(make_session_factory(app.engine)) as session:
+        try:
+            row = resolve(session, _parse_uuid(review_id), ReviewResolution(outcome), note=note)
+        except FraudAIError as exc:
+            raise click.ClickException(str(exc)) from None
+        click.echo(f"recorded outcome {row.resolution.value} for review {review_id}")
+
+
+# --------------------------------------------------------------------------- monitoring
+@cli.group()
+def monitoring() -> None:
+    """Operational metrics, drift warnings and shadow evaluation (warnings only)."""
+
+
+def _since(hours: float | None) -> datetime | None:
+    from datetime import timedelta
+
+    return datetime.now(UTC) - timedelta(hours=hours) if hours else None
+
+
+@monitoring.command("summary")
+@click.option("--since-hours", type=click.FloatRange(min=0, min_open=True), default=None)
+@click.option("--json", "as_json", is_flag=True)
+@click.option("--drift/--no-drift", "with_drift", default=True, show_default=True)
+@pass_app
+def monitoring_summary(
+    app: AppContext, since_hours: float | None, as_json: bool, with_drift: bool
+) -> None:
+    """Decisions, fallbacks, latency percentiles, review queue, shadow and drift."""
+    app.require_migrated()
+    from fraud_ai.realtime import monitoring as mon
+
+    since = _since(since_hours)
+    with session_scope(make_session_factory(app.engine)) as session:
+        report = {"summary": mon.summary(session, since=since)}
+        if with_drift:
+            try:
+                report["drift"] = mon.drift(session, since=since)
+            except FraudAIError as exc:
+                report["drift"] = {"status": "unavailable", "error": str(exc), "warnings": []}
+        report["shadow"] = mon.shadow_report(session, since=since)
+    if as_json:
+        click.echo(json.dumps(report, indent=2, sort_keys=True, default=str))
+        return
+    s = report["summary"]
+    click.echo(f"events ingested {s['events_ingested']}  assessments {s['assessments']}")
+    click.echo(
+        f"fallbacks {s['assessments_with_fallback']}  late events {s['late_events']}  "
+        f"review queue {s['review_queue']}"
+    )
+    for decision, count in s["decisions"].items():
+        click.echo(f"  {decision:<24} {count:>6}")
+    for category, count in s["fallbacks_by_category"].items():
+        click.echo(f"  failure {category:<30} {count:>5}")
+    click.echo("latency (ms):")
+    for stage, p in s["latency_ms"].items():
+        click.echo(f"  {stage:<22} p50 {p['p50']:>8}  p95 {p['p95']:>8}  p99 {p['p99']:>8}")
+    rate = s["shadow_disagreement_rate"]
+    click.echo(
+        f"shadow comparisons {s['shadow_comparisons']}  disagreement rate "
+        f"{'-' if rate is None else f'{rate:.3f}'}"
+    )
+    if with_drift:
+        warnings = report["drift"].get("warnings", [])
+        click.echo(f"drift warnings ({len(warnings)}):" if warnings else "drift: no warnings")
+        for w in warnings:
+            click.echo(f"  WARNING {w}")
+
+
+@monitoring.command("shadow")
+@click.option("--since-hours", type=click.FloatRange(min=0, min_open=True), default=None)
+@pass_app
+def monitoring_shadow(app: AppContext, since_hours: float | None) -> None:
+    """Shadow models/policies vs the active system (labels known now)."""
+    app.require_migrated()
+    from fraud_ai.realtime.monitoring import shadow_report
+
+    with session_scope(make_session_factory(app.engine)) as session:
+        report = shadow_report(session, since=_since(since_hours))
+    click.echo(f"{report['assessments_with_shadow']} assessments with shadow results")
+    for kind in ("models", "policies"):
+        for name, r in report[kind].items():
+            rate = r["agreement_rate"]
+            only = r.get("fraud_only_shadow", r.get("fraud_caught_only_shadow"))
+            click.echo(
+                f"  {name:<28} agreement {'-' if rate is None else f'{rate:.3f}'}  "
+                f"disagreements {r['disagreements']}  fraud only shadow {only}  "
+                f"FP only shadow {r['false_positives_only_shadow']}  "
+                f"latency p50 {r['latency_ms']['p50']} ms"
+            )
+    click.echo(report["note"])
 
 
 def main() -> None:  # pragma: no cover

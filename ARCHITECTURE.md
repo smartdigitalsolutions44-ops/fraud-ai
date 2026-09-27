@@ -48,11 +48,14 @@ ML Fraud Model (fraud_ai.models)                 – P(fraud) from a verified, v
       │  prediction stored in model_predictions, linked to the exact feature snapshot
       │  (neural networks are Stage 5 and must beat these baselines)
       ▼
-Rules Engine (fraud_ai.rules)                    – explicit security policy
+Rules Engine (fraud_ai.rules)                    – fraud-rules-1.0.0: explicit, versioned
+      ▼                                            security conditions emitting evidence
+Risk Policy (fraud_ai.risk)                      – versioned, immutable policy: calibrated
+      │                                            score bands + rule minimums + fallbacks
       ▼
-Risk Engine (fraud_ai.risk)                      – ML probability + rules → score → decision
-      ▼
-Decision (ALLOW / STEP_UP_AUTHENTICATION / MANUAL_REVIEW / BLOCK) → risk_assessments
+Decision (ALLOW / ALLOW_WITH_MONITORING / STEP_UP_AUTHENTICATION / MANUAL_REVIEW /
+          TEMPORARY_BLOCK) → immutable risk_assessments (+ review_queue)
+      │  orchestrated in real time by FraudScoringService (fraud_ai.realtime, Stage 8)
       ▼
 Local Offline LLM (Stage 7, fraud_ai.llm)        – explains STORED outputs from evidence only
       │  privacy-checked EvidencePacket → versioned prompt → local runtime
@@ -62,8 +65,11 @@ Local Offline LLM (Stage 7, fraud_ai.llm)        – explains STORED outputs fro
 Stages 1-6 implement everything up to and including ML scoring: events, the fraud
 database, point-in-time features and snapshots, training datasets, and trained, versioned
 models (baselines, neural and sequence) whose probabilities are stored as predictions.
-Stage 7 adds the local LLM *explanation* layer over those stored outputs. The risk engine
-and rules engine exist as interfaces only; no decision is made anywhere yet.
+Stage 7 adds the local LLM *explanation* layer over those stored outputs. Stage 8 adds
+the real-time orchestration: rules, versioned risk policies and immutable decisions,
+with shadow mode, fallbacks, review and monitoring. See
+[REALTIME_SCORING.md](REALTIME_SCORING.md) and [RISK_POLICY.md](RISK_POLICY.md).
+Decisions are internal policy outputs; nothing calls a payment or authentication system.
 
 ### The event envelope
 
@@ -88,8 +94,8 @@ Event types: `ACCOUNT_CREATED`, `LOGIN_ATTEMPT`, `LOGIN_SUCCESS`, `LOGIN_FAILURE
 | **Feature engineering** | *How does this event compare to history?* | Deterministic transforms of facts into a numerical vector, computed point-in-time. | 2 |
 | **ML model** | *How likely is this to be fraud?* | A statistical estimate, P(fraud), learned from labelled history and measured with metrics. | 3–6 |
 | **Neural network** | (same as ML model) | *One kind* of ML model. Not a separate layer. | 5 |
-| **Rules engine** | *Does this violate security policy?* | Explicit, human-written, auditable conditions. | 1 (engine), 2+ (rule sets) |
-| **Risk engine** | *What do we do about it?* | Policy that combines ML probability and rule results into a final score and decision. | 1 (boundary) |
+| **Rules engine** | *Does this violate security policy?* | Explicit, human-written, versioned conditions that emit evidence (`fraud-rules-1.0.0`). | 1 (engine), 8 (rule set) |
+| **Risk policy** | *What do we do about it?* | A versioned, immutable policy that maps the calibrated score and rule matches to a decision, with explicit fallbacks. | 8 |
 | **LLM** | *Why was this decided, in plain words?* | Explanation and analyst assistance from structured evidence. | 7 |
 
 In one sentence each:
@@ -101,8 +107,15 @@ In one sentence each:
   same evaluation framework. It gets no special trust.
 * **Rules enforce security policy.** They can raise a decision to a minimum level (e.g.
   "recent password reset ⇒ at least step-up"), but they never lower one.
-* **The risk engine decides.** The decision is never a bare `if p > x: block`; it is a
-  versioned `RiskPolicy` (weights, ordered thresholds, a conservative no-model fallback).
+* **The risk policy decides.** The decision is never a bare `if p > x: block`. It is a
+  versioned, hashed `RiskPolicyDefinition`:
+  * calibrated score bands;
+  * rule-severity minimums;
+  * escalations;
+  * corroboration: a model alone never blocks;
+  * conservative fallbacks per failure.
+
+  It is applied by the pure `decide()`.
 * **The LLM explains and assists investigation.** It is *not* the classifier, the risk
   engine, the rules engine or the decision maker.
   * It receives a typed, privacy-checked `EvidencePacket` built from *stored* outputs
@@ -134,8 +147,12 @@ fraud_ai/
                scenario/cohort/error analysis, comparison and ensembles, drift baseline,
                shortcut detection, complementarity, anomaly evaluation, JSON reports
   models/      FraudModel interface, model-version registry, prediction storage
-  rules/       Rule / RuleEngine
-  risk/        RiskPolicy / RiskEngine
+  rules/       Rule / RuleSet engine and the versioned rule set fraud-rules-1.0.0
+  risk/        RiskPolicyDefinition, the deterministic decide(), policy registry
+               (immutable versions, append-only deployments), offline proposal /
+               simulation / comparison
+  realtime/    Stage 8 FraudScoringService (hot path), event contract, model cache,
+               review queue, monitoring (drift, shadow), structured decision logs
   llm/         Stage 7 analyst assistance: evidence builder + typed EvidencePacket, privacy
                gate, versioned prompt, output schema + faithfulness validator, local
                runtimes (Ollama, llama.cpp server/process, reference template), the
@@ -172,9 +189,12 @@ Tables (revisions `0001`-`0003`):
 | `fraud_labels` | Ground truth with `labelled_at` (when it became known) and `label_source`. |
 | `model_versions` | Reproducibility record: dataset/feature versions, metrics, path, active. |
 | `model_predictions` | Every model output, FK'd to the exact model version. |
-| `risk_assessments` | Final score and decision, the policy version and triggered rules. |
+| `risk_assessments` | (0006) Immutable, versioned decisions: an idempotency key, the event and arrival time, the policy/deployment/rules versions, model and shadow scores, rule results, reason codes, action request, per-stage latency and failures/fallbacks. |
 | `feature_snapshots` | (0002) Exact hashed feature vector per (event, feature version, as_of). |
 | `model_calibrations` | (0004) Calibrators fitted on a non-test split of a model's dataset. |
+| `risk_policies` | (0006) Immutable, hashed policy versions with their derivation and drift baselines. |
+| `policy_deployments` | (0006) Append-only activation history: the active policy, shadow models and shadow policies. |
+| `review_queue`, `review_outcomes` | (0006) Manual-review entries and append-only outcomes; never rewrite the assessment. |
 | `investigations` | (0005) Validated, cited LLM explanations: append-only, versioned per event, with the evidence packet and its hash, prompt/schema versions, runtime, model and generation parameters. Never a score or decision. |
 
 Revision `0002` also added `transactions.decision_outcome` (the immutable authorisation
@@ -230,6 +250,9 @@ Key decisions:
   unmask users behind VPNs or proxies.
 * **No invasive surveillance.** Device data is limited to an app-level identifier hash, OS
   family, client family and device type. There is no fingerprinting.
+* **Real-time decisions.** Decision logs carry pseudonyms and categories only. Review
+  notes with personal data are refused. Rejected events never echo values. Decisions are
+  internal outputs: there are no permanent bans and no external calls.
 * **LLM privacy.** Evidence values are typed tokens, numbers or booleans. Free text cannot
   be represented.
   * The privacy gate refuses the packet before generation if it finds any of:
@@ -404,7 +427,27 @@ Summary (details in [LLM_ANALYST.md](LLM_ANALYST.md)):
   process, and a deterministic reference template (not an LLM) for offline use and as the
   benchmark baseline.
 
-## 14. Extending the platform
+## 14. Real-time scoring (Stage 8)
+
+Summary (details in [REALTIME_SCORING.md](REALTIME_SCORING.md) and
+[RISK_POLICY.md](RISK_POLICY.md)):
+
+* **One idempotent hot path.** `FraudScoringService.score_event` runs the contract,
+  ingestion, snapshot, sequence, cached models, calibration, rules, policy, shadow and
+  persistence. Redelivery returns the stored assessment, and concurrent duplicates
+  cannot create two.
+* **Arrival time.** Decisions are made at ingestion from what had arrived. Late events
+  are flagged and never rewrite earlier decisions, and out-of-arrival-order use of
+  information is refused.
+* **Versioned authority.** Models give evidence and the versioned policy decides.
+  Policies and deployments are hashed and immutable, and activation is explicit and
+  validated.
+* **Shadow mode.** Shadow models and policies are scored and recorded, never used.
+* **Failure safety.** Every failure maps to a conservative fallback; none allows.
+* **Operations.** A review queue, offline simulation and comparison, monitoring with
+  drift warnings, and structured logs. The LLM stays post-decision.
+
+## 15. Extending the platform
 
 * **New model:** add a `ModelSpec`, or a new `FraudModel` implementation registered in
   `fraud_ai/models/factory.py`. Train it on the same prepared split as the baselines, then

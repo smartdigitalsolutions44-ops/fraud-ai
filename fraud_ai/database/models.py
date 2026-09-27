@@ -57,6 +57,8 @@ from fraud_ai.core.enums import (
     LoginOutcome,
     NetworkType,
     PaymentMethodType,
+    ReviewResolution,
+    ReviewStatus,
     SecurityEventType,
     SignalSource,
     TransactionChannel,
@@ -64,7 +66,7 @@ from fraud_ai.core.enums import (
     TransactionStatus,
     UserStatus,
 )
-from fraud_ai.database.base import Base, enum_type
+from fraud_ai.database.base import Base, JSONType, enum_type
 from fraud_ai.utils.money import from_minor_units
 from fraud_ai.utils.time import utcnow
 
@@ -221,6 +223,9 @@ class EventRecord(Base):
     metadata_json: Mapped[dict[str, Any]] = mapped_column("metadata", default=dict)
     schema_version: Mapped[int] = mapped_column(SmallInteger)
     ingested_at: Mapped[datetime] = mapped_column(default=utcnow)
+    # Stage 8: when the event reached the platform (NULL for historical/bulk loads, which
+    # are treated as arriving on time). Decisions only use what had arrived by then.
+    arrival_time: Mapped[datetime | None]
 
 
 class NetworkEvent(Base):
@@ -540,7 +545,13 @@ class ModelPrediction(Base):
 
 
 class RiskAssessment(Base):
-    """The risk engine's final output: ML probability + rules -> score -> decision."""
+    """An issued risk decision (Stage 8): model scores + rules + a versioned policy.
+
+    Immutable once written. New evidence produces a new ``assessment_version`` that
+    ``supersedes`` the earlier row; nothing is updated in place. ``idempotency_key`` is
+    SHA-256 of (event, policy version, assessment version), so a duplicate delivery of an
+    event returns the stored assessment instead of deciding again.
+    """
 
     __tablename__ = "risk_assessments"
     __table_args__ = (
@@ -549,14 +560,25 @@ class RiskAssessment(Base):
             name="ml_probability_range",
         ),
         CheckConstraint(
-            "final_risk_score >= 0 AND final_risk_score <= 1", name="final_score_range"
+            "final_risk_score IS NULL OR (final_risk_score >= 0 AND final_risk_score <= 1)",
+            name="final_score_range",
         ),
+        CheckConstraint("assessment_version >= 1", name="assessment_version_positive"),
+        UniqueConstraint("event_id", "assessment_version"),
+        UniqueConstraint("idempotency_key"),
         Index("ix_risk_assessments_user_id_assessed_at", "user_id", "assessed_at"),
         Index("ix_risk_assessments_transaction_id", "transaction_id"),
+        Index("ix_risk_assessments_assessed_at", "assessed_at"),
     )
 
     assessment_id: Mapped[uuid.UUID] = _uuid_pk()
     event_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("events.event_id"))
+    assessment_version: Mapped[int] = mapped_column(Integer, default=1)
+    supersedes_assessment_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("risk_assessments.assessment_id")
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(64))
+    mode: Mapped[str] = mapped_column(String(16), default="live")
     user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.user_id"))
     transaction_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("transactions.transaction_id")
@@ -564,16 +586,116 @@ class RiskAssessment(Base):
     prediction_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("model_predictions.prediction_id")
     )
+    deployment_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("policy_deployments.deployment_id")
+    )
     assessed_at: Mapped[datetime] = mapped_column(default=utcnow)
-    ml_probability: Mapped[float | None] = mapped_column(Float)
-    rule_score: Mapped[float] = mapped_column(Float, default=0.0)
-    final_risk_score: Mapped[float] = mapped_column(Float)
-    decision: Mapped[Decision] = mapped_column(enum_type(Decision, "decision"))
+    event_time: Mapped[datetime | None]
+    arrival_time: Mapped[datetime | None]
+    lateness_seconds: Mapped[float | None] = mapped_column(Float)
     policy_version: Mapped[str] = mapped_column(String(32))
+    rules_version: Mapped[str | None] = mapped_column(String(32))
+    primary_model: Mapped[str | None] = mapped_column(String(120))
+    ml_probability: Mapped[float | None] = mapped_column(Float)
+    calibrated_score: Mapped[float | None] = mapped_column(Float)
+    final_risk_score: Mapped[float | None] = mapped_column(Float)
+    risk_level: Mapped[str] = mapped_column(String(16))
+    decision: Mapped[Decision] = mapped_column(enum_type(Decision, "decision"))
+    reason_codes: Mapped[list[Any]] = mapped_column(JSONType, default=list)
+    model_scores: Mapped[dict[str, Any]] = mapped_column(default=dict)
     triggered_rules: Mapped[dict[str, Any]] = mapped_column(default=dict)
-    # Stage 7: human-readable explanation from the local LLM. Never replaces the score.
-    explanation: Mapped[str | None] = mapped_column(Text)
-    explanation_model: Mapped[str | None] = mapped_column(String(100))
+    shadow: Mapped[dict[str, Any]] = mapped_column(default=dict)
+    action: Mapped[dict[str, Any]] = mapped_column(default=dict)
+    latency_ms: Mapped[dict[str, Any]] = mapped_column(default=dict)
+    fallback_used: Mapped[bool] = mapped_column(Boolean, default=False)
+    failures: Mapped[list[Any]] = mapped_column(JSONType, default=list)
+
+
+class RiskPolicyRecord(Base):
+    """An immutable, versioned risk policy (Stage 8).
+
+    ``definition`` is the complete policy (model set, calibrations, bands, rule set, rule
+    severities, fallbacks); ``definition_sha256`` is verified on every load, so a policy
+    that was edited in place is refused. ``derivation`` records how the bands were
+    proposed (synthetic Stage 4 analysis) and the drift baselines.
+    """
+
+    __tablename__ = "risk_policies"
+    __table_args__ = (
+        UniqueConstraint("policy_version"),
+        CheckConstraint("length(definition_sha256) = 64", name="definition_sha256_length"),
+    )
+
+    policy_id: Mapped[uuid.UUID] = _uuid_pk()
+    policy_version: Mapped[str] = mapped_column(String(32))
+    definition: Mapped[dict[str, Any]]
+    definition_sha256: Mapped[str] = mapped_column(String(64))
+    derivation: Mapped[dict[str, Any]] = mapped_column(default=dict)
+    synthetic_derived: Mapped[bool] = mapped_column(Boolean, default=True)
+    description: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
+class PolicyDeployment(Base):
+    """Append-only deployment history. The row with the highest ``sequence`` is active.
+
+    A deployment names the active policy plus shadow models and shadow policies, which are
+    scored and recorded but can never affect a decision.
+    """
+
+    __tablename__ = "policy_deployments"
+    __table_args__ = (UniqueConstraint("sequence"),)
+
+    deployment_id: Mapped[uuid.UUID] = _uuid_pk()
+    sequence: Mapped[int] = mapped_column(Integer)
+    policy_version: Mapped[str] = mapped_column(ForeignKey("risk_policies.policy_version"))
+    shadow_models: Mapped[list[Any]] = mapped_column(JSONType, default=list)
+    shadow_policies: Mapped[list[Any]] = mapped_column(JSONType, default=list)
+    config_sha256: Mapped[str] = mapped_column(String(64))
+    note: Mapped[str | None] = mapped_column(String(500))
+    activated_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
+class ReviewItem(Base):
+    """A manual-review queue entry for one assessment. Resolving it never changes the
+    assessment; the outcome is recorded in ``review_outcomes``."""
+
+    __tablename__ = "review_queue"
+    __table_args__ = (
+        UniqueConstraint("assessment_id"),
+        CheckConstraint("priority >= 1 AND priority <= 5", name="priority_range"),
+        Index("ix_review_queue_status_priority", "status", "priority"),
+    )
+
+    review_id: Mapped[uuid.UUID] = _uuid_pk()
+    assessment_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("risk_assessments.assessment_id"))
+    event_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("events.event_id"))
+    priority: Mapped[int] = mapped_column(SmallInteger)
+    reason_codes: Mapped[list[Any]] = mapped_column(JSONType, default=list)
+    status: Mapped[ReviewStatus] = mapped_column(
+        enum_type(ReviewStatus, "review_status"), default=ReviewStatus.OPEN
+    )
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+    reviewed_at: Mapped[datetime | None]
+    outcome: Mapped[ReviewResolution | None] = mapped_column(
+        enum_type(ReviewResolution, "review_resolution")
+    )
+
+
+class ReviewOutcome(Base):
+    """An analyst's review outcome (append-only; several per item are possible when more
+    information was requested first)."""
+
+    __tablename__ = "review_outcomes"
+    __table_args__ = (Index("ix_review_outcomes_review_id", "review_id"),)
+
+    outcome_id: Mapped[uuid.UUID] = _uuid_pk()
+    review_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("review_queue.review_id"))
+    resolution: Mapped[ReviewResolution] = mapped_column(
+        enum_type(ReviewResolution, "review_resolution")
+    )
+    note: Mapped[str | None] = mapped_column(String(500))
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
 
 
 class FraudLabel(Base):

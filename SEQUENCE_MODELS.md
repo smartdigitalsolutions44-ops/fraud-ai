@@ -375,3 +375,20 @@ flag is never presented as a confirmed finding.
 The controlled limitation `sequence_models_limited` states the §8 finding: sequence models
 added little over gradient boosting on this synthetic data.
 
+## 11. Sequence models in real-time scoring (Stage 8)
+
+A policy may name a sequence model (the GRU in the experiments) as its **sequence**
+slot. The live path builds the point-in-time sequence once per event, under the model's
+recorded definition (default 16 events), from the events that had arrived.
+
+* **Evidence only.** The GRU's flag raises a low decision to monitoring and can
+  corroborate a temporary block, but never decides alone.
+* **Sequence failures.** If extraction fails, the primary model still scores and the
+  decision is raised to at least a step-up (`SEQUENCE_EXTRACTION_FAILED`).
+* **Timing.** Sequence extraction is timed separately (`sequence` in the latency
+  breakdown). It is the largest model-side cost after features (see
+  [REALTIME_SCORING.md](REALTIME_SCORING.md) §11).
+
+Given the §8 finding (the GRU adds little over gradient boosting), shadow mode is the
+natural place to keep evaluating sequence models before giving them any authority.
+

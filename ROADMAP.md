@@ -87,7 +87,7 @@ Details are in [EVALUATION.md](EVALUATION.md). All evidence is synthetic.
   compare|drift-baseline|report|reproduce`.
 * **Deferred:**
   * applying a calibrator in scoring (it needs an explicit adoption decision);
-  * a live drift service (Stage 8);
+  * a live drift service (done in Stage 8 as monitoring warnings);
   * account-clustered bootstrap intervals.
 
 ## Stage 5: Neural-network fraud models ✅
@@ -199,46 +199,87 @@ Details are in [SEQUENCE_MODELS.md](SEQUENCE_MODELS.md). All evidence is synthet
   * a boolean-contradiction check;
   * analyst feedback on explanations.
 
-## Stage 8: Real-time scoring engine (next; not started)
+## Stage 8: Real-time scoring and risk-decision orchestration ✅
 
-Recommended design, built on what Stages 1–7 made trustworthy:
+* **Hot path.** `FraudScoringService.score_event` runs contract → ingest (arrival time) →
+  verified active deployment → information-cutoff check → point-in-time snapshot →
+  sequence → cached, verified models → predictions → calibration → rules → policy →
+  shadow → immutable assessment and review item. The LLM is not in the path.
+* **Event contract `realtime-event-1`.** `event_id` and `schema_version` are required,
+  the session is required for decision points, and future events are refused. Arrival
+  time comes from the service clock; recorded values are accepted in replay only.
+* **Arrival-time semantics.** Decisions are made at ingestion and frozen. Late events
+  are flagged (`LATE_EVENT`) and cannot rewrite issued decisions. Out-of-arrival-order use
+  of information falls back to review. Reassessment writes a new version.
+* **Idempotency.** A unique idempotency key and a unique (event, version) pair: a
+  redelivery returns the stored decision, and concurrent duplicates are tested on SQLite
+  and PostgreSQL.
+* **Policies (`risk-policy-schema-1.0.0`).** Immutable and hashed. Each pins the model
+  set and calibration and holds the bands, rule-severity minimums, escalations, block
+  corroboration and fallbacks, none of which may allow. Deployments are append-only;
+  activation is explicit and validated.
+* **Rules `fraud-rules-1.0.0`.** Six rules; VPN alone never matches.
+* **Decisions.** `ALLOW`, `ALLOW_WITH_MONITORING`, `STEP_UP_AUTHENTICATION` (a
+  placeholder request), `MANUAL_REVIEW` and `TEMPORARY_BLOCK` (expires; always reviewed).
+  There is no permanent ban.
+* **Shadow mode.** Models and policies are scored and recorded, never used. Tested:
+  identical decisions with, without and with broken shadows.
+* **Operations:**
+  * the review queue (append-only outcomes);
+  * `policy propose`, `simulate` and `compare` (Stage 4 costs; validation for bands, test
+    for simulation);
+  * monitoring: decisions, fallbacks, latency percentiles, the queue, shadow
+    disagreement, and drift warnings (features, predictions, decision rates, prevalence,
+    anomaly);
+  * structured JSON decision logs.
+* **Migration `0006`.**
+* **Results:** synthetic; see [REALTIME_SCORING.md](REALTIME_SCORING.md) §11 and
+  [RISK_POLICY.md](RISK_POLICY.md) §6.
+* **Deferred:**
+  * a queue consumer or network service boundary with backpressure;
+  * a cross-user information-cutoff check;
+  * review outcomes feeding labels;
+  * profiling-driven caching.
 
-* **One synchronous path, one worker.** Each event goes through:
-  1. validate;
-  2. ingest idempotently;
-  3. build the point-in-time snapshot and sequence;
-  4. score with the **active** model version (gradient boosting; the sequence models are
-     optional shadow scorers);
-  5. apply rules;
-  6. `RiskPolicy`;
-  7. write a `risk_assessments` row.
+## Stage 9: External authentication and payment integration (next; not started)
 
-  The whole path runs inside one transaction per event, keyed on `event_id`, so retries
-  are idempotent.
-* **The latency budget is measured, not assumed.**
-  * Put a p95 budget on each stage (features, sequence, model, rules).
-  * Precompute or cache history aggregates only where profiling shows a need.
-  * The Stage 2 cache-corruption tests become the regression gate for any cache.
-* **A conservative fallback.** If the model or features are unavailable or over budget,
-  the versioned no-model policy applies (step-up or manual review, never a silent allow),
-  and the fallback is recorded.
-* **Shadow mode first.**
-  * New models and policies score in parallel and write predictions but not decisions.
-  * Compare their decision distributions before promotion.
-* **Monitoring.**
-  * Score and feature drift against the Stage 4 drift baseline (PSI or Jensen–Shannon).
-  * Decision-rate and fallback-rate alarms, and per-stage latency histograms.
-* **Interface.** A small internal service boundary (a queue consumer or a local HTTP or
-  gRPC API) around the same library code, with backpressure and bounded queues. The CLI
-  stays as the batch interface.
-* **The LLM stays out of the hot path.** Explanations are generated asynchronously after
-  the decision, for analyst review only. They are never an input to a decision.
+Recommended design, built on the Stage 8 action requests:
 
-## Stage 9: Analyst desktop interface (only if required)
+* **Adapters behind interfaces, not in the hot path.**
+  * A `StepUpProvider` (WebAuthn/passkeys, OTP via an authentication service, 3-D Secure
+    for payments).
+  * A `PaymentGatewayAdapter` (authorise / hold / release).
+  * Both consume the stored `action` request asynchronously through an **outbox** table
+    written in the same transaction as the assessment. This gives exactly-once delivery
+    and no dual writes.
+* **Outcomes are new events.** A step-up passed or failed, or a gateway result, comes
+  back as a new typed event (for example `STEP_UP_COMPLETED`). It is ingested like any
+  other event and may lead to a reassessment (a new version). An issued decision is never
+  mutated.
+* **Safety.**
+  * A temporary block becomes a gateway *hold* with an expiry. It is never a permanent
+    refusal.
+  * Idempotency keys are passed to providers.
+  * Timeouts map to explicit, conservative outcomes.
+  * Provider failures are recorded like Stage 8 failures.
+* **Security.**
+  * Provider credentials come only from a secrets manager, never from code or `.env`
+    in production.
+  * Webhooks are signature-verified with replay protection.
+  * No card data enters the platform: provider tokens only, as today.
+* **Testing.**
+  * Contract tests against provider sandboxes or recorded fixtures.
+  * The Stage 8 failure matrix is extended to provider failures.
+  * Shadow mode for new providers: requests are logged, not sent.
+* **Still no real-world claims.** The strength of authentication and the fraud reduction
+  have to be measured with real traffic and real labels, which the synthetic platform
+  cannot do.
+
+## Stage 10: Analyst desktop interface (only if required)
 
 * A client of the core platform for case review and labelling, which feeds `fraud_labels`.
 
-## Stage 10: Deployment and security hardening
+## Stage 11: Deployment and security hardening
 
 * PostgreSQL roles and least privilege, encryption at rest, and key rotation for
   pseudonymisation.

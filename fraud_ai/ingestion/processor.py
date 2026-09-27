@@ -107,22 +107,27 @@ class EventProcessor:
         self._ip_users: set[tuple[uuid.UUID, uuid.UUID]] = set()
 
     # ------------------------------------------------------------------ public API
-    def process(self, event: Event, *, atomic: bool = True) -> ProcessResult:
+    def process(
+        self, event: Event, *, atomic: bool = True, arrival_time: datetime | None = None
+    ) -> ProcessResult:
         """Apply one event.
 
         ``atomic=True`` wraps the event in a SAVEPOINT so a failure leaves no partial state
         and the surrounding transaction stays usable. Bulk loaders that roll back the
         whole batch on any failure may pass ``atomic=False`` for throughput.
+
+        ``arrival_time`` (Stage 8) records when the event reached the platform; bulk and
+        historical loads leave it NULL, meaning "arrived on time".
         """
         if self._session.get(EventRecord, event.event_id) is not None:
             log.info("duplicate event ignored: %s", event.event_id)
             return ProcessResult(event.event_id, event.event_type, duplicate=True)
         if not atomic:
-            self._apply(event)
+            self._apply(event, arrival_time)
             return ProcessResult(event.event_id, event.event_type)
         savepoint = self._session.begin_nested()
         try:
-            self._apply(event)
+            self._apply(event, arrival_time)
             savepoint.commit()
         except Exception:
             savepoint.rollback()
@@ -134,7 +139,7 @@ class EventProcessor:
         return ProcessResult(event.event_id, event.event_type)
 
     # ------------------------------------------------------------------ pipeline
-    def _apply(self, event: Event) -> None:
+    def _apply(self, event: Event, arrival_time: datetime | None = None) -> None:
         payload = event.payload()
         user = self._resolve_user(event, payload)
         if event.event_type in _DEVICE_REQUIRED and event.device_id is None:
@@ -156,6 +161,7 @@ class EventProcessor:
             source=event.source,
             metadata_json=self._sanitise(payload),
             schema_version=event.schema_version,
+            arrival_time=arrival_time,
         )
         self._session.add(record)
         self._session.flush()

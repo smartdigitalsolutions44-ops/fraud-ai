@@ -98,8 +98,14 @@ For an event scored as of time **T**:
      seen them at T, but a recomputation would.
    * `feature_snapshots` store exactly what was computed and when; recomputation that
      disagrees is reported as drift.
-   * Ingestion-time availability (`events.ingested_at <= generated_at`) is a Stage 8
-     real-time-scoring concern.
+   * **Stage 8 handles this for live decisions.**
+     * `events.arrival_time` is recorded, and a decision is made at ingestion from what
+       had arrived.
+     * Late events are flagged and cannot rewrite issued decisions.
+     * Out-of-arrival-order use of information is refused.
+
+     See [REALTIME_SCORING.md](REALTIME_SCORING.md) §3. Historical recomputation still
+     uses event time and may differ from what was known live.
 
 ### How leakage prevention is tested
 

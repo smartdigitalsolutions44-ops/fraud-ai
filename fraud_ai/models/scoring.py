@@ -162,6 +162,26 @@ def score_event(
     if threshold is None:
         raise ScoringError("no threshold given and none recorded with the model")
 
+    prediction, existed = store_prediction(
+        session, event_id, model, probability, threshold, snapshot, vector
+    )
+    return ScoreResult(prediction, vector, snapshot.snapshot_id, existing=existed)
+
+
+def store_prediction(
+    session: Session,
+    event_id: uuid.UUID,
+    model: ModelVersion,
+    probability: float,
+    threshold: float,
+    snapshot: FeatureSnapshot,
+    vector: FraudFeatureVector,
+) -> tuple[ModelPrediction, bool]:
+    """Persist one prediction per (event, model version).
+
+    Returns ``(prediction, existed)``. A stored prediction that the new score reproduces is
+    returned as is; one it contradicts raises :class:`PredictionConflictError`.
+    """
     existing = session.scalar(
         select(ModelPrediction).where(
             ModelPrediction.event_id == event_id,
@@ -182,8 +202,7 @@ def score_event(
                 f"rescore gives p={probability:.6f}, threshold={threshold}. Historical "
                 "predictions are never replaced."
             )
-        return ScoreResult(existing, vector, snapshot.snapshot_id, existing=True)
-
+        return existing, True
     prediction = record_prediction(
         session,
         event_id=event_id,
@@ -197,4 +216,4 @@ def score_event(
         feature_snapshot_id=snapshot.snapshot_id,
         feature_snapshot_reference=f"feature_snapshots/{snapshot.snapshot_id}",
     )
-    return ScoreResult(prediction, vector, snapshot.snapshot_id, existing=False)
+    return prediction, False

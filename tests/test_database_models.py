@@ -355,22 +355,37 @@ def test_prediction_constraints(db: Session) -> None:
 def test_risk_assessment_constraints(db: Session) -> None:
     user = _user(db)
     ev = _event(db, user)
-    db.add(
-        RiskAssessment(
-            event_id=ev.event_id,
-            user_id=user.user_id,
-            ml_probability=0.78,
-            rule_score=0.1,
-            final_risk_score=0.88,
-            decision=Decision.STEP_UP_AUTHENTICATION,
-            policy_version="p1",
-            triggered_rules={"triggered": ["new_device"]},
-        )
-    )
+
+    def assessment(**overrides: object) -> RiskAssessment:
+        base: dict[str, object] = {
+            "event_id": ev.event_id,
+            "user_id": user.user_id,
+            "ml_probability": 0.78,
+            "final_risk_score": 0.88,
+            "risk_level": "elevated",
+            "decision": Decision.STEP_UP_AUTHENTICATION,
+            "policy_version": "risk-policy-1.0.0",
+            "idempotency_key": "k" * 64,
+            "triggered_rules": {"results": []},
+        }
+        base.update(overrides)
+        return RiskAssessment(**base)
+
+    db.add(assessment())
     db.flush()
-    _expect_integrity_error(
-        db,
-        RiskAssessment(
-            event_id=ev.event_id, final_risk_score=1.5, decision=Decision.BLOCK, policy_version="p1"
-        ),
-    )
+    # A fallback assessment has no score.
+    db.add(assessment(assessment_version=2, final_risk_score=None, idempotency_key="f" * 64))
+    db.flush()
+    for bad in (
+        {"final_risk_score": 1.5, "assessment_version": 3, "idempotency_key": "a" * 64},
+        {"assessment_version": 0, "idempotency_key": "b" * 64},
+        {"assessment_version": 1, "idempotency_key": "c" * 64},  # duplicate version
+        {"assessment_version": 4},  # duplicate idempotency key
+        {"assessment_version": 5, "idempotency_key": "d" * 64, "decision": "BLOCK"},
+    ):
+        savepoint = db.begin_nested()
+        db.add(assessment(**bad))
+        with pytest.raises((IntegrityError, StatementError)):
+            db.flush()
+        savepoint.rollback()
+    db.rollback()
