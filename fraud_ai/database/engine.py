@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
+import threading
+import weakref
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -26,7 +29,9 @@ def create_db_engine(url: str, *, echo: bool = False) -> Engine:
         database = sa_url.database
         if database and database != ":memory:":
             Path(database).parent.mkdir(parents=True, exist_ok=True)
-        engine = create_engine(sa_url, echo=echo)
+        # Concurrent writers (the service's threads) wait for SQLite's single write lock
+        # instead of failing immediately.
+        engine = create_engine(sa_url, echo=echo, connect_args={"timeout": 30})
         # SQLite does not enforce foreign keys unless asked to, per connection.
         event.listen(engine, "connect", _enable_sqlite_foreign_keys)
         return engine
@@ -35,6 +40,28 @@ def create_db_engine(url: str, *, echo: bool = False) -> Engine:
 
 def engine_from_settings(settings: Settings) -> Engine:
     return create_db_engine(settings.resolved_database_url, echo=settings.database_echo)
+
+
+_WRITE_LOCKS: weakref.WeakKeyDictionary[Engine, threading.RLock] = weakref.WeakKeyDictionary()
+_WRITE_LOCKS_GUARD = threading.Lock()
+
+
+def write_lock(engine: Engine | None) -> AbstractContextManager[Any]:
+    """The process-wide write lock for an engine.
+
+    SQLite has a single writer. Two *deferred* write transactions that both read first
+    can deadlock: SQLite then fails one of them at once with "database is locked", and
+    the busy timeout does not help. So every writer in the process that shares an engine
+    serialises on one lock: the Stage 8 scorer and the Stage 9 service writes. PostgreSQL
+    needs no lock; there the unique constraints decide races.
+    """
+    if engine is None or engine.dialect.name != "sqlite":
+        return contextlib.nullcontext()
+    with _WRITE_LOCKS_GUARD:
+        lock = _WRITE_LOCKS.get(engine)
+        if lock is None:
+            lock = _WRITE_LOCKS[engine] = threading.RLock()
+        return lock
 
 
 def make_session_factory(engine: Engine) -> sessionmaker[Session]:
@@ -53,3 +80,10 @@ def session_scope(factory: sessionmaker[Session]) -> Iterator[Session]:
         raise
     finally:
         session.close()
+
+
+@contextmanager
+def write_scope(factory: sessionmaker[Session]) -> Iterator[Session]:
+    """:func:`session_scope` under the engine's write lock (see :func:`write_lock`)."""
+    with write_lock(factory.kw.get("bind")), session_scope(factory) as session:
+        yield session

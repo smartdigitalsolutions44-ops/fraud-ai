@@ -3529,6 +3529,194 @@ def monitoring_shadow(app: AppContext, since_hours: float | None) -> None:
     click.echo(report["note"])
 
 
+# --------------------------------------------------------------------------- service (Stage 9)
+@cli.group("service-key")
+def service_key() -> None:
+    """Machine-to-machine API keys (secrets are shown once and stored only as hashes)."""
+
+
+@service_key.command("create")
+@click.option("--name", required=True, help="What the key is for, e.g. 'checkout-backend'.")
+@click.option(
+    "--scope",
+    "scopes",
+    multiple=True,
+    required=True,
+    help="Grant a scope (repeatable). See `fraud-ai service-key scopes`.",
+)
+@click.option(
+    "--show-signing-secret",
+    is_flag=True,
+    help="Also print the key's request-signing secret (needs SERVICE_SIGNING_MASTER_KEY).",
+)
+@pass_app
+def service_key_create(
+    app: AppContext, name: str, scopes: tuple[str, ...], show_signing_secret: bool
+) -> None:
+    """Create a key. The credential is printed ONCE; only its salted hash is stored."""
+    app.require_migrated()
+    from fraud_ai.service.keys import ServiceKeyError, create_key, signing_secret
+
+    master = app.settings.service_signing_master_key
+    if show_signing_secret and master is None:
+        raise click.ClickException("--show-signing-secret needs SERVICE_SIGNING_MASTER_KEY")
+    with session_scope(make_session_factory(app.engine)) as session:
+        try:
+            issued = create_key(session, name, list(scopes))
+        except ServiceKeyError as exc:
+            raise click.ClickException(str(exc)) from None
+    click.echo(f"key id      {issued.key_id}")
+    click.echo(f"scopes      {', '.join(issued.scopes)}")
+    click.echo(f"credential  {issued.credential}")
+    if show_signing_secret and master is not None:
+        click.echo(f"signing     {signing_secret(master.get_secret_value(), issued.key_id)}")
+    click.echo(
+        "Store the credential in your secret manager now: it is not shown again and cannot "
+        "be recovered (only a salted SHA-256 is stored).",
+        err=True,
+    )
+
+
+@service_key.command("list")
+@pass_app
+def service_key_list(app: AppContext) -> None:
+    """List keys (ids, names, scopes, status; never secrets)."""
+    app.require_migrated()
+    from fraud_ai.service.keys import list_keys
+
+    with session_scope(make_session_factory(app.engine)) as session:
+        rows = list_keys(session)
+        if not rows:
+            click.echo("no service keys")
+        for row in rows:
+            state = f"revoked {row.revoked_at:%Y-%m-%d %H:%M}" if row.revoked_at else "active"
+            click.echo(
+                f"{row.key_id}  {state:<24} {row.created_at:%Y-%m-%d %H:%M}  "
+                f"{row.name}  [{', '.join(row.scopes)}]"
+            )
+
+
+@service_key.command("revoke")
+@click.argument("key_id")
+@pass_app
+def service_key_revoke(app: AppContext, key_id: str) -> None:
+    """Revoke a key immediately (the next request with it is refused)."""
+    app.require_migrated()
+    from fraud_ai.service.keys import ServiceKeyError, revoke_key
+
+    with session_scope(make_session_factory(app.engine)) as session:
+        try:
+            row = revoke_key(session, key_id)
+        except ServiceKeyError as exc:
+            raise click.ClickException(str(exc)) from None
+        click.echo(f"revoked {row.key_id} at {row.revoked_at}")
+
+
+@service_key.command("scopes")
+def service_key_scopes() -> None:
+    """List the available scopes."""
+    from fraud_ai.service.keys import SCOPES
+
+    for name, meaning in SCOPES.items():
+        click.echo(f"{name:<22} {meaning}")
+
+
+@cli.group()
+def service() -> None:
+    """The HTTP fraud service (machine-to-machine; see API.md and SERVICE_SECURITY.md)."""
+
+
+@service.command("run")
+@click.option("--host", default=None, help="Default: SERVICE_HOST (127.0.0.1).")
+@click.option("--port", type=click.IntRange(1, 65535), default=None, help="Default: SERVICE_PORT.")
+@click.option("--workers", type=click.IntRange(1, 64), default=1, show_default=True)
+@pass_app
+def service_run(app: AppContext, host: str | None, port: int | None, workers: int) -> None:
+    """Serve the API with uvicorn (plain HTTP: put TLS termination in front in production)."""
+    s = app.settings
+    if s.service_problems():
+        raise click.ClickException("; ".join(s.service_problems()))
+    app.require_migrated()
+    import uvicorn
+
+    host = host or s.service_host
+    if host not in {"127.0.0.1", "localhost", "::1"}:
+        click.echo(
+            f"listening on {host}: TLS is required in production - terminate it at a "
+            "reverse proxy and set TRUSTED_PROXIES to that proxy only",
+            err=True,
+        )
+    uvicorn.run(
+        "fraud_ai.service.app:create_app",
+        factory=True,
+        host=host,
+        port=port or s.service_port,
+        workers=workers,
+        proxy_headers=False,  # forwarding headers are handled by TRUSTED_PROXIES only
+        server_header=False,
+        date_header=False,
+        access_log=False,  # the service records metrics; access logs would carry client IPs
+        log_level=s.log_level.lower(),
+    )
+
+
+@service.command("status")
+@pass_app
+def service_status(app: AppContext) -> None:
+    """Readiness as the service would report it, plus the security-relevant configuration."""
+    from fraud_ai.service.app import build_container
+    from fraud_ai.service.health import is_ready, readiness
+    from fraud_ai.service.keys import list_keys
+
+    s = app.settings
+    if s.service_problems():
+        raise click.ClickException("; ".join(s.service_problems()))
+    container = build_container(s, engine=app.engine)
+    try:
+        checks = readiness(container)
+    finally:
+        container.close()
+    click.echo(f"service         {s.service_host}:{s.service_port}  api fraud-api-1.0.0")
+    for name, state in checks.items():
+        click.echo(f"  {name:<14}{state}")
+    click.echo(f"ready           {'yes' if is_ready(checks) else 'NO'}")
+    signing = "required" if s.service_require_signatures else "optional"
+    if s.service_signing_master_key is None:
+        signing = "disabled (no SERVICE_SIGNING_MASTER_KEY)"
+    click.echo(f"signatures      {signing} (max age {s.signature_max_age}s)")
+    click.echo(f"rate limit      {s.rate_limit} per key and route (burst {s.rate_limit_burst})")
+    click.echo(f"request limit   {s.request_size_limit} bytes")
+    click.echo(f"trusted proxies {s.trusted_proxies or 'none (forwarding headers ignored)'}")
+    click.echo(f"cors            {', '.join(s.cors_origins) or 'disabled'}")
+    click.echo(f"openapi         {'exposed' if s.service_expose_openapi else 'not exposed'}")
+    click.echo(f"webauthn        rp_id={s.webauthn_rp_id} origin={s.webauthn_origin}")
+    provider = s.payment_auth_provider or "none"
+    if provider == "fake":
+        provider += " (DEVELOPMENT FAKE - not 3-D Secure)"
+    click.echo(f"payment auth    {provider}")
+    if checks["migrations"] == "ok":
+        with session_scope(make_session_factory(app.engine)) as session:
+            keys = list_keys(session)
+        active = sum(1 for k in keys if k.revoked_at is None)
+        click.echo(f"service keys    {active} active, {len(keys) - active} revoked")
+    if not is_ready(checks):
+        raise SystemExit(1)
+
+
+@service.command("openapi")
+@click.option("--output", type=click.Path(dir_okay=False, path_type=Path), default=None)
+def service_openapi(output: Path | None) -> None:
+    """Print (or write) the OpenAPI document."""
+    from fraud_ai.service.app import openapi_document
+
+    text = json.dumps(openapi_document(), indent=2, sort_keys=True)
+    if output is None:
+        click.echo(text)
+    else:
+        output.write_text(text + "\n")
+        click.echo(f"written {output}")
+
+
 def main() -> None:  # pragma: no cover
     cli(prog_name="fraud-ai")
 

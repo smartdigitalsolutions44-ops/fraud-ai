@@ -32,6 +32,14 @@ _ENV_VARS = (
     "LOCAL_LLM_MODEL",
     "LOCAL_LLM_ENDPOINT",
     "DATABASE_ECHO",
+    "LOCAL_LLM_RUNTIME",
+    "SERVICE_SIGNING_MASTER_KEY",
+    "SERVICE_REQUIRE_SIGNATURES",
+    "PAYMENT_AUTH_PROVIDER",
+    "PAYMENT_AUTH_WEBHOOK_SECRET",
+    "TRUSTED_PROXIES",
+    "RATE_LIMIT",
+    "SERVICE_CORS_ORIGINS",
 )
 POSTGRES_URL = os.environ.get("TEST_POSTGRES_URL")
 
@@ -215,6 +223,15 @@ def seeded_model_world(migrated_template: Path, tmp_path_factory: pytest.TempPat
         )
     eng.dispose()
     return path
+
+
+@pytest.fixture(scope="session")
+def realtime_world_dir(migrated_template: Path, tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """The Stage 8 world (models, policies, live stream), built once per session. Tests
+    copy it (``tests.realtime_world.open_world``) before mutating anything."""
+    from tests.realtime_world import build_world
+
+    return build_world(tmp_path_factory.mktemp("realtime_world"), migrated_template)
 
 
 def fast_training_config(**overrides: Any) -> Any:

@@ -38,7 +38,6 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import math
-import threading
 import time
 import uuid
 from collections.abc import Callable, Iterator
@@ -53,6 +52,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from fraud_ai.core.enums import Decision
 from fraud_ai.core.exceptions import EventProcessingError, FraudAIError
+from fraud_ai.database.engine import write_lock
 from fraud_ai.database.models import (
     EventRecord,
     ModelVersion,
@@ -116,6 +116,7 @@ class ScoringOutcome:
     calibrated_score: float | None = None
     error: str | None = None
     shadow: dict[str, Any] = field(default_factory=dict)
+    primary_model: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -135,6 +136,7 @@ class ScoringOutcome:
             "persisted": self.persisted,
             "lateness_seconds": self.lateness_seconds,
             "calibrated_score": self.calibrated_score,
+            "primary_model": self.primary_model,
             "error": self.error,
         }
 
@@ -197,13 +199,10 @@ class FraudScoringService:
         self._skew = max_clock_skew
         self._replay = replay
         self.metrics = Metrics()
-        bind = session_factory.kw.get("bind")
-        dialect = getattr(getattr(bind, "dialect", None), "name", "")
-        # SQLite has a single writer: serialise scoring there. PostgreSQL runs concurrently
-        # and relies on the unique constraints for idempotency.
-        self._write_lock: Any = (
-            threading.Lock() if dialect == "sqlite" else contextlib.nullcontext()
-        )
+        # SQLite has a single writer: serialise scoring there, on the engine's process-wide
+        # write lock (shared with every other writer on the engine). PostgreSQL runs
+        # concurrently and relies on the unique constraints for idempotency.
+        self._write_lock: Any = write_lock(session_factory.kw.get("bind"))
         # Model/calibration/rule references are verified once per deployment per process
         # (the policy hash itself is re-verified on every event).
         self._verified: dict[Any, str | None] = {}  # deployment id -> reference error
@@ -787,6 +786,7 @@ class FraudScoringService:
             lateness_seconds=round(lateness, 3),
             calibrated_score=decision.final_risk_score,
             shadow=shadow,
+            primary_model=policy.primary.ref if policy else None,
         )
 
     # ------------------------------------------------------------------ outcomes
@@ -947,4 +947,5 @@ def _outcome_from(
         persisted=True,
         lateness_seconds=row.lateness_seconds,
         calibrated_score=row.calibrated_score,
+        primary_model=row.primary_model,
     )

@@ -30,6 +30,20 @@ model scores (evidence)   +   rules (evidence)   +   risk policy (versioned)   =
 
 There is no permanent ban. The Stage 1 `BLOCK` value was removed by migration 0006.
 
+**Stage 9: the step-up follow-up policy (`step-up-followup-1.0.0`).** When a
+`STEP_UP_AUTHENTICATION` is executed ([AUTHENTICATION.md](AUTHENTICATION.md)), a separate,
+versioned follow-up policy maps the authentication result to a **new** assessment version:
+
+* `SUCCESS` gives `ALLOW_WITH_MONITORING`. The risk evidence stands, so the case is
+  monitored rather than fully allowed.
+* `CANCELLED`, and `FAILED`, `EXPIRED` or `UNAVAILABLE` once attempts are exhausted, give
+  `MANUAL_REVIEW` with a review item.
+
+The follow-up copies the model scores and rule results unchanged. It never outputs
+`ALLOW`, and it does not alter this policy's definition or hash. The follow-up policy is
+deliberately *not* a field of `RiskPolicyDefinition`, so existing policy hashes stay
+valid.
+
 ## 2. Policy definition (`risk-policy-schema-1.0.0`)
 
 A policy (`fraud_ai/risk/policy.py:RiskPolicyDefinition`) is complete and immutable:
@@ -225,3 +239,6 @@ is a consequence of the assumptions, which is exactly why these are experiments.
   signal can raise a decision to monitoring or corroborate a block. They never create a
   review or a block on their own.
 * **Rules are few and hand-written.** Their thresholds are conventions, not tuned values.
+* **The follow-up mapping is a fixed convention.** Its value (for example whether
+  `SUCCESS` should be `ALLOW` for low bands) is unmeasured; only real outcomes could tune
+  it.

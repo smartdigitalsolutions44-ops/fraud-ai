@@ -206,3 +206,37 @@ class ReviewResolution(StrEnum):
     LEGITIMATE = "legitimate"
     FRAUD = "fraud"
     NEEDS_MORE_INFORMATION = "needs_more_information"
+
+
+class AuthenticationMethod(StrEnum):
+    WEBAUTHN = "webauthn"
+    PAYMENT_AUTHENTICATION = "payment_authentication"
+
+
+class AuthenticationResult(StrEnum):
+    """A requested control's outcome. SUCCESS is evidence, never proof of legitimacy."""
+
+    SUCCESS = "SUCCESS"
+    FAILED = "FAILED"
+    EXPIRED = "EXPIRED"
+    CANCELLED = "CANCELLED"
+    UNAVAILABLE = "UNAVAILABLE"
+
+
+class ChallengePurpose(StrEnum):
+    REGISTRATION = "registration"
+    AUTHENTICATION = "authentication"
+
+
+class CredentialStatus(StrEnum):
+    ACTIVE = "active"
+    REVOKED = "revoked"
+
+
+class PaymentAuthStatus(StrEnum):
+    PENDING = "pending"
+    AUTHENTICATED = "authenticated"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    TIMEOUT = "timeout"
+    UNAVAILABLE = "unavailable"

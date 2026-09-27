@@ -19,9 +19,9 @@ It is deliberately *not* a website, dashboard, or browser application:
   external services.
 * **Integration shape.** In production the platform receives events from other systems
   (apps, payment gateways) and returns decisions. The natural interfaces are a library API,
-  a CLI and, later, a scoring service - not HTML.
+  a CLI and a machine-to-machine scoring service (Stage 9) - not HTML.
 
-If an analyst UI is ever required it is Stage 9, and it will be a *client* of this core.
+If an analyst UI is ever required (Stage 10 at the earliest), it will be a *client* of this core.
 
 ## 2. Event flow
 
@@ -157,13 +157,20 @@ fraud_ai/
                gate, versioned prompt, output schema + faithfulness validator, local
                runtimes (Ollama, llama.cpp server/process, reference template), the
                investigation service (append-only storage) and the explanation benchmark
+  service/     Stage 9 HTTP boundary (FastAPI): app factory, ASGI middleware, /v1 routes,
+               API keys, HMAC signatures + replay tokens, idempotency, rate limiting,
+               network-signal integrity, metrics, sanitised errors, health/readiness
+  stepup/      Stage 9 step-up execution: follow-up policy and immutable follow-ups,
+               WebAuthn (py_webauthn), external payment-authentication adapter (+ dev fake)
   security/    keyed pseudonymisation, sensitive-data detection/redaction, key handling
   data/        deterministic synthetic scenario generator and seeding
   cli/         the `fraud-ai` command
   utils/       logging (with redaction), money, time
 migrations/    Alembic environment and versions
 tests/         pytest suite (SQLite always; PostgreSQL when TEST_POSTGRES_URL is set)
-scripts/       developer scripts and a sample event file
+scripts/       developer scripts, benchmarks and a sample event file
+Dockerfile, docker-compose.yml
+               Stage 9 container image (non-root, read-only compatible) and local stack
 data/, models/, evaluation/
                local runtime data, model artefacts and evaluation reports (git-ignored)
 ```
@@ -447,7 +454,41 @@ Summary (details in [REALTIME_SCORING.md](REALTIME_SCORING.md) and
 * **Operations.** A review queue, offline simulation and comparison, monitoring with
   drift warnings, and structured logs. The LLM stays post-decision.
 
-## 15. Extending the platform
+## 15. Service boundary and step-up (Stage 9)
+
+Summary (details in [API.md](API.md), [SERVICE_SECURITY.md](SERVICE_SECURITY.md),
+[AUTHENTICATION.md](AUTHENTICATION.md) and [DEPLOYMENT.md](DEPLOYMENT.md)):
+
+```
+merchant backend ─TLS─► proxy ─► ServiceMiddleware (correlation id, size limit, headers, metrics)
+  ─► /v1 route: API key → rate limit → signature → scope → strict contract
+  ─► FraudScoringService (Stage 8, unchanged, no LLM) ─► immutable assessment
+  ─► STEP_UP? ─► WebAuthn (py_webauthn) | PaymentAuthenticationProvider (external; fake in dev)
+  ─► authentication_attempts ─► NEW follow-up assessment (scores copied, original untouched)
+```
+
+* **Packages.**
+  * `fraud_ai/service/` holds the transport and security: app, middleware, routes,
+    dependencies, keys, signatures, idempotency, rate limit, network, metrics, errors
+    and health.
+  * `fraud_ai/stepup/` holds the domain: outcomes (the follow-up policy
+    `step-up-followup-1.0.0`), WebAuthn and payment.
+  * Both are FastAPI-free where possible. Routes only adapt: no business logic is
+    copied into handlers.
+* **Tables (migration `0007`):**
+  * `service_api_keys`, `request_idempotency`, `request_replay_tokens`;
+  * `webauthn_credentials`, `authentication_challenges`, `authentication_attempts`;
+  * `payment_auth_requests`.
+* **Invariants:**
+  * scores are never changed by an adapter;
+  * assessments are never mutated;
+  * no step-up path returns `ALLOW`;
+  * the LLM is reachable only from its own analyst endpoint;
+  * the platform never authenticates cardholders or touches card data.
+* **SQLite write lock.** SQLite writers share one process-wide lock per engine
+  (`database.engine.write_lock`); PostgreSQL relies on the unique constraints.
+
+## 16. Extending the platform
 
 * **New model:** add a `ModelSpec`, or a new `FraudModel` implementation registered in
   `fraud_ai/models/factory.py`. Train it on the same prepared split as the baselines, then

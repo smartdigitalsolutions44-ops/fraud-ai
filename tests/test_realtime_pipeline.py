@@ -60,14 +60,14 @@ from fraud_ai.risk.registry import (
     load_policy,
 )
 from fraud_ai.utils.time import ensure_utc
-from tests.realtime_world import GB, GRU, LR, P1, P2, PSEUDO, World, build_world, open_world
+from tests.realtime_world import GB, GRU, LR, P1, P2, PSEUDO, World, open_world
 
 UNSAFE = {Decision.ALLOW, Decision.ALLOW_WITH_MONITORING}
 
 
-@pytest.fixture(scope="module")
-def world_dir(migrated_template: Path, tmp_path_factory: pytest.TempPathFactory) -> Path:
-    return build_world(tmp_path_factory.mktemp("realtime_world"), migrated_template)
+@pytest.fixture
+def world_dir(realtime_world_dir: Path) -> Path:
+    return realtime_world_dir
 
 
 @pytest.fixture

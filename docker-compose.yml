@@ -1,0 +1,74 @@
+# Local/staging-style stack: fraud-ai + PostgreSQL. Not a production deployment.
+#
+# No secret has a default here. Export them (or use a .env file that is never
+# committed) before `docker compose up`:
+#
+#   export POSTGRES_PASSWORD=$(python -c "import secrets; print(secrets.token_urlsafe(24))")
+#   export PSEUDONYMISATION_KEY=$(python -c "import secrets; print(secrets.token_hex(32))")
+#   export SERVICE_SIGNING_MASTER_KEY=$(python -c "import secrets; print(secrets.token_hex(32))")
+#
+# The service listens on 127.0.0.1:8080 over plain HTTP, for local use only. In any shared
+# environment, put a TLS-terminating reverse proxy in front and set TRUSTED_PROXIES to it
+# (see DEPLOYMENT.md). No LLM runs in this stack: scoring never needs one.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: fraud_ai
+      POSTGRES_USER: fraud_ai
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fraud_ai -d fraud_ai"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [backend]
+
+  migrate:
+    build: .
+    image: fraud-ai:local
+    command: ["db", "migrate"]
+    environment: &fraud_env
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      DATABASE_URL: postgresql+psycopg://fraud_ai:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/fraud_ai
+      PSEUDONYMISATION_KEY: ${PSEUDONYMISATION_KEY:?set PSEUDONYMISATION_KEY}
+      SERVICE_SIGNING_MASTER_KEY: ${SERVICE_SIGNING_MASTER_KEY:?set SERVICE_SIGNING_MASTER_KEY}
+      SERVICE_REQUIRE_SIGNATURES: ${SERVICE_REQUIRE_SIGNATURES:-true}
+      WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:-localhost}
+      WEBAUTHN_ORIGIN: ${WEBAUTHN_ORIGIN:-http://localhost:8080}
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    networks: [backend]
+
+  fraud-ai:
+    image: fraud-ai:local
+    environment: *fraud_env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      # Trained model artefacts (never baked into the image), mounted read-only.
+      - ./models:/models:ro
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    networks: [backend]
+
+volumes:
+  pgdata:
+
+networks:
+  backend:

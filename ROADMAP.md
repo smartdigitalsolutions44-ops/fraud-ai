@@ -241,41 +241,93 @@ Details are in [SEQUENCE_MODELS.md](SEQUENCE_MODELS.md). All evidence is synthet
   * review outcomes feeding labels;
   * profiling-driven caching.
 
-## Stage 9: External authentication and payment integration (next; not started)
+## Stage 9: Secure service and authentication integration ✅
 
-Recommended design, built on the Stage 8 action requests:
+* **A versioned machine-to-machine API** (`fraud-api-1.0.0`, FastAPI and uvicorn) over the
+  unchanged Stage 8 engine. The routes cover:
+  * `POST /v1/score`;
+  * assessments, with review and authentication status;
+  * reviews (list, get, resolve);
+  * policy;
+  * WebAuthn and payment step-up;
+  * signed provider callbacks;
+  * passkey registration;
+  * an analyst-triggered investigation;
+  * health and readiness;
+  * Prometheus metrics.
 
-* **Adapters behind interfaces, not in the hot path.**
-  * A `StepUpProvider` (WebAuthn/passkeys, OTP via an authentication service, 3-D Secure
-    for payments).
-  * A `PaymentGatewayAdapter` (authorise / hold / release).
-  * Both consume the stored `action` request asynchronously through an **outbox** table
-    written in the same transaction as the assessment. This gives exactly-once delivery
-    and no dual writes.
-* **Outcomes are new events.** A step-up passed or failed, or a gateway result, comes
-  back as a new typed event (for example `STEP_UP_COMPLETED`). It is ingested like any
-  other event and may lead to a reassessment (a new version). An issued decision is never
-  mutated.
-* **Safety.**
-  * A temporary block becomes a gateway *hold* with an expiry. It is never a permanent
-    refusal.
-  * Idempotency keys are passed to providers.
-  * Timeouts map to explicit, conservative outcomes.
-  * Provider failures are recorded like Stage 8 failures.
-* **Security.**
-  * Provider credentials come only from a secrets manager, never from code or `.env`
-    in production.
-  * Webhooks are signature-verified with replay protection.
-  * No card data enters the platform: provider tokens only, as today.
-* **Testing.**
-  * Contract tests against provider sandboxes or recorded fixtures.
-  * The Stage 8 failure matrix is extended to provider failures.
-  * Shadow mode for new providers: requests are logged, not sent.
-* **Still no real-world claims.** The strength of authentication and the fraud reduction
-  have to be measured with real traffic and real labels, which the synthetic platform
-  cannot do.
+  Direct library and CLI use is unchanged.
+* **Service authentication.**
+  * API keys (`fak_<id>.<secret>`) are stored only as salted SHA-256, verified in
+    constant time, scoped and revocable;
+  * `fraud-ai service-key create | list | revoke | scopes`;
+  * identical 401s for every failure, and throttling of repeated failures.
+* **Request integrity:**
+  * HMAC-SHA256 signatures over `timestamp.body`, with per-key secrets derived from a
+    master key;
+  * a timestamp window and persisted replay tokens (concurrent replays tested on SQLite
+    and PostgreSQL);
+  * `Idempotency-Key` (same body replays; a different body gets 409 and is not
+    processed).
+* **Abuse and leakage controls:**
+  * token-bucket limits per key and route, behind a `RateLimiter` interface;
+  * size limits, including streamed bodies;
+  * the strict event contract;
+  * `arrival_time` gated by `score:replay`;
+  * network intelligence gated by `signals:trusted`;
+  * forwarding headers only from `TRUSTED_PROXIES`;
+  * sanitised structured errors, correlation ids and security headers;
+  * CORS off and OpenAPI hidden by default;
+  * no ids in metric labels.
+* **Step-up execution:**
+  * WebAuthn via py_webauthn: public keys only; hashed, single-use, TTL- and
+    session-bound challenges; user verification and sign counters enforced;
+  * a `PaymentAuthenticationProvider` adapter with a deterministic **development fake**
+    (not 3-D Secure). It has a hard timeout; an outage is `UNAVAILABLE`, never allow.
+    Callbacks are signed, replay-protected and restricted to pending → terminal.
+  * Results are append-only attempts. A terminal result creates a **new**
+    `step_up_followup` assessment under `step-up-followup-1.0.0`:
+    * `SUCCESS` gives `ALLOW_WITH_MONITORING`;
+    * the other results give `MANUAL_REVIEW` with a review item.
 
-## Stage 10: Analyst desktop interface (only if required)
+    Scores are copied verbatim and the original is never changed.
+* **Operations:**
+  * readiness covers the database, migrations, the active policy and the verified primary
+    artefact, never the LLM;
+  * `fraud-ai service run | status | openapi`;
+  * a Dockerfile (non-root, read-only compatible, no secrets, models or LLM) and
+    docker-compose with PostgreSQL;
+  * `scripts/service_benchmark.py`.
+* **Migration `0007`.** A shared SQLite write lock prevents SQLite write deadlocks.
+* **Results:** synthetic; see [REALTIME_SCORING.md](REALTIME_SCORING.md) §14. The single
+  worker HTTP overhead is about 3 ms p50.
+* **Deferred:**
+  * a shared (Redis) rate limiter;
+  * mTLS;
+  * key expiry and rotation;
+  * a real payment-processor adapter (sandbox contract tests);
+  * an outbox for asynchronous provider calls;
+  * retention jobs;
+  * passkey management endpoints (list and revoke).
+
+## Stage 10: Recommendation (not started)
+
+Stage 10 should build on the service boundary rather than add surface:
+
+* **Analyst desktop interface (only if required).** A client of `/v1/reviews`,
+  `/v1/assessments` and `/v1/assessments/{id}/investigate`, using a dedicated analyst key
+  with `review:*` and `investigation:write`. Review outcomes should feed `fraud_labels`
+  as delayed, audited labels.
+* **Before any UI**, close the operational gaps that a real integration would hit first:
+  * a real payment-processor adapter behind the existing protocol, contract-tested
+    against a sandbox;
+  * a shared rate limiter and replay store (Redis) for multiple replicas;
+  * key expiry, rotation and last-used tracking;
+  * retention jobs for idempotency rows, replay tokens and step-up records.
+* **Measure, don't claim.** Step-up and review effects can only be quantified with real
+  traffic and labels. Until then, only synthetic results are reported.
+
+## Stage 10 (candidate): Analyst desktop interface (only if required)
 
 * A client of the core platform for case review and labelling, which feeds `fraud_labels`.
 

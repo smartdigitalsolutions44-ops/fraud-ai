@@ -28,12 +28,12 @@ from fraud_ai.risk.policy import Band, CalibrationSpec, ModelSlot, RiskPolicyDef
 from fraud_ai.risk.registry import activate, create_policy
 from fraud_ai.rules.ruleset import RULES_VERSION, get_rule_set
 from tests.conftest import fast_training_config
-from tests.realtime_world import P1, P2, PSEUDO, REF, World, build_world, open_world
+from tests.realtime_world import P1, P2, PSEUDO, REF, World, open_world
 
 
-@pytest.fixture(scope="module")
-def world_dir(migrated_template: Path, tmp_path_factory: pytest.TempPathFactory) -> Path:
-    return build_world(tmp_path_factory.mktemp("realtime_cli_world"), migrated_template)
+@pytest.fixture
+def world_dir(realtime_world_dir: Path) -> Path:
+    return realtime_world_dir
 
 
 @pytest.fixture

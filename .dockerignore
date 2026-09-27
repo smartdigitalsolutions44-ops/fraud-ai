@@ -1,0 +1,18 @@
+# Build context allow-list: only what the image needs.
+*
+!pyproject.toml
+!README.md
+!fraud_ai/
+!migrations/
+
+# Never, even inside allowed directories:
+**/__pycache__
+**/*.py[cod]
+**/*.db
+**/*.sqlite*
+**/.env*
+**/*.key
+**/*.pem
+**/*.gguf
+**/*.joblib
+**/*.pt

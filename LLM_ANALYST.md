@@ -501,3 +501,23 @@ assessment exists (Stage 8)  ->  analyst requests an investigation  ->  Stage 7 
 * `fraud-ai review show <id>` prints the `fraud-ai investigate <event-id>` command for
   analysts. Review outcomes are recorded by the analyst, not by the LLM.
 
+
+## 16. The HTTP endpoint (Stage 9)
+
+`POST /v1/assessments/{id}/investigate` (scope `investigation:write`) is the only HTTP
+route that touches this package. It:
+
+* is **analyst-triggered**. Nothing calls it automatically, and `/v1/score` never imports
+  or waits on the LLM (tested with every runtime unavailable);
+* imports `fraud_ai.llm` lazily and runs in its **own** thread pool with its **own**
+  timeout (`LOCAL_LLM_TIMEOUT` + 10 s), separate from the scoring pool and its
+  `SERVICE_REQUEST_TIMEOUT`;
+* **fails independently**:
+  * no runtime configured or reachable gives 503 `LLM_UNAVAILABLE` ("scoring and
+    decisions are unaffected");
+  * invalid output gives 502 `INVESTIGATION_FAILED`, and nothing is stored;
+  * a timeout gives 504 `LLM_TIMEOUT`;
+* is **not** a readiness dependency: `/v1/ready` reports `llm: not_required`;
+* returns the validated explanation, its id and version, and the runtime and model. It
+  never rescores or changes the assessment. The container image ships no LLM runtime or
+  weights.

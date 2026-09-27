@@ -1,9 +1,9 @@
 # fraud-ai
 
 A locally runnable fraud-prevention software platform written in Python. It is not a web
-application.
+application: Stage 9 adds a machine-to-machine HTTP API, not a website.
 
-The current release covers **Stages 1 to 8**:
+The current release covers **Stages 1 to 9**:
 
 * **Stage 1:** the software core, the event architecture, the fraud database (PostgreSQL in
   production, SQLite for local use), migrations, synthetic data and the CLI.
@@ -46,16 +46,35 @@ The current release covers **Stages 1 to 8**:
     warnings;
   * the LLM stays outside the decision path.
 
+* **Stage 9:** a secure service and authentication integration layer:
+  * a versioned machine-to-machine API (`fraud-api-1.0.0`, FastAPI) over the unchanged
+    Stage 8 engine;
+  * API keys (hashed, scoped, revocable), HMAC request signatures with persisted replay
+    protection, `Idempotency-Key`, per-key rate limits, size limits and strict
+    validation;
+  * sanitised errors, security headers, CORS off by default, and Prometheus metrics;
+  * step-up execution with standard WebAuthn passkeys (py_webauthn) or an *external*
+    payment-authentication provider adapter (a development fake only, not 3-D Secure).
+    Every result creates a new, immutable follow-up assessment; scores are never changed;
+  * Docker and docker-compose files.
+
 Decisions are **internal policy outputs** (`ALLOW`, `ALLOW_WITH_MONITORING`,
 `STEP_UP_AUTHENTICATION`, `MANUAL_REVIEW`, `TEMPORARY_BLOCK`). No payment or authentication
-system is called, and there are no permanent bans. Policy bands are synthetic-derived
+system is called by the engine itself, and there are no permanent bans. Step-up runs only
+through the Stage 9 adapters, and the platform never authenticates cardholders. Policy bands are synthetic-derived
 experimental defaults, and all bundled data is synthetic. Evaluation results
 describe synthetic data only; they are not real-world detection rates or savings. See
 [ARCHITECTURE.md](ARCHITECTURE.md), [FEATURES.md](FEATURES.md), [MODELS.md](MODELS.md),
 [EVALUATION.md](EVALUATION.md), [NEURAL_MODELS.md](NEURAL_MODELS.md),
 [SEQUENCE_MODELS.md](SEQUENCE_MODELS.md), [LLM_ANALYST.md](LLM_ANALYST.md),
-[REALTIME_SCORING.md](REALTIME_SCORING.md), [RISK_POLICY.md](RISK_POLICY.md) and
+[REALTIME_SCORING.md](REALTIME_SCORING.md), [RISK_POLICY.md](RISK_POLICY.md),
+[API.md](API.md), [SERVICE_SECURITY.md](SERVICE_SECURITY.md),
+[AUTHENTICATION.md](AUTHENTICATION.md), [DEPLOYMENT.md](DEPLOYMENT.md) and
 [ROADMAP.md](ROADMAP.md).
+
+> Not production-ready. No payment-security certification or PCI compliance is claimed,
+> and there are no real-world fraud-reduction figures: everything is measured on synthetic
+> data.
 
 ## Install
 
@@ -154,6 +173,15 @@ fraud-ai realtime score event.json                          # live: arrival = no
 fraud-ai review list ; fraud-ai review show <id> ; fraud-ai review resolve <id> --outcome fraud
 fraud-ai monitoring summary                                 # decisions, latency, drift warnings
 python scripts/realtime_benchmark.py --users 300            # full-path latency benchmark
+# Stage 9 - machine-to-machine service (TLS in front of it outside localhost)
+fraud-ai service-key create --name checkout --scope score:write --scope assessment:read \
+    --scope stepup:write                                    # the credential is shown ONCE
+fraud-ai service-key list ; fraud-ai service-key revoke <key-id> ; fraud-ai service-key scopes
+fraud-ai service status                                     # readiness + security config
+fraud-ai service run                                        # http://127.0.0.1:8080/v1/...
+fraud-ai service openapi --output openapi.json
+python scripts/service_benchmark.py                         # HTTP vs direct, 1/4/8/16 workers
+docker compose up --build                                   # fraud-ai + PostgreSQL (see DEPLOYMENT.md)
 python -m fraud_ai --help        # equivalent entry point
 ```
 
@@ -183,6 +211,14 @@ fraud-ai db init
 | `LOCAL_LLM_BINARY`, `LOCAL_LLM_MODEL_PATH` | `llama-cli`, unset | llama.cpp process mode |
 | `LOCAL_LLM_TEMPERATURE`, `LOCAL_LLM_TOP_P`, `LOCAL_LLM_SEED` | `0`, `1`, `0` | Deterministic by default |
 | `LOCAL_LLM_CONTEXT_WINDOW`, `LOCAL_LLM_MAX_TOKENS` | `8192`, `1200` | |
+| `SERVICE_HOST`, `SERVICE_PORT` | `127.0.0.1`, `8080` | Stage 9 service; put TLS in front outside localhost |
+| `TRUSTED_PROXIES` | empty | Only these IPs/CIDRs may set forwarding headers |
+| `REQUEST_SIZE_LIMIT`, `RATE_LIMIT`, `RATE_LIMIT_BURST` | `65536`, `120/minute`, `30` | Per API key and route |
+| `SERVICE_SIGNING_MASTER_KEY`, `SERVICE_REQUIRE_SIGNATURES`, `SIGNATURE_MAX_AGE` | unset, `false`, `300` | HMAC request signing |
+| `WEBAUTHN_RP_ID`, `WEBAUTHN_RP_NAME`, `WEBAUTHN_ORIGIN` | `localhost`, dev name, `http://localhost:8080` | https is required outside dev/test |
+| `PAYMENT_AUTH_PROVIDER`, `PAYMENT_AUTH_WEBHOOK_SECRET`, `PAYMENT_AUTH_TIMEOUT` | unset, unset, `5` | `fake` = development fake only |
+
+All Stage 9 settings are listed in [DEPLOYMENT.md](DEPLOYMENT.md) §4.
 
 ## Develop
 

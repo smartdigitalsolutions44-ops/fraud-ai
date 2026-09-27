@@ -421,8 +421,9 @@ python scripts/realtime_benchmark.py --users 300
 
 ## 13. Limitations
 
-* **Single process.** The service is an in-process library. There is no queue consumer,
-  network API or backpressure yet, and on SQLite scoring is serialised.
+* **Single process.** The scoring service is an in-process library. Stage 9 adds an HTTP
+  boundary (§14), but there is still no queue consumer or backpressure, and on SQLite
+  scoring is serialised.
 * **Late information is excluded, not corrected.** An event is decided with what has
   arrived. A late event arriving afterwards is not folded into earlier decisions; a
   reassessment is explicit.
@@ -434,5 +435,76 @@ python scripts/realtime_benchmark.py --users 300
 * **Drift baselines come from one training window.** Synthetic drift between the
   training period and the live week is expected, so warnings on this data are
   informative, not alarms.
-* **No real authentication or payment integration.** Step-up and temporary block are
-  requests for a future stage.
+* **Step-up is executed by Stage 9 (§14); temporary blocks are not.** There is still no
+  payment-gateway hold or release.
+
+## 14. The HTTP service boundary (Stage 9)
+
+`fraud_ai.service` wraps this engine, unchanged, in a versioned API (`fraud-api-1.0.0`,
+see [API.md](API.md)). `POST /v1/score` takes exactly the `realtime-event-1` contract and
+calls `FraudScoringService.score_event` in a bounded worker pool with a timeout
+(`SERVICE_REQUEST_TIMEOUT`). A timeout or a database failure answers 503 with
+`fallback_decision: MANUAL_REVIEW`.
+
+What the boundary adds:
+
+* API keys, scopes, rate limits and HMAC signatures ([SERVICE_SECURITY.md](SERVICE_SECURITY.md));
+* `Idempotency-Key` on top of `event_id` idempotency;
+* a safe response view: decision, risk level, reason codes, policy and model versions, and
+  `step_up_required` / `review_required`. There are no scores, features or latencies;
+* `arrival_time` in a request needs the `score:replay` scope. The live path stamps the
+  arrival with the service clock, as in §3;
+* network-intelligence fields need `signals:trusted`;
+* step-up execution ([AUTHENTICATION.md](AUTHENTICATION.md)). The result is a new
+  `step_up_followup` assessment version that copies this path's scores verbatim, so the
+  original assessment is untouched (§4).
+
+**SQLite concurrency.** SQLite is a single writer. The scorer's write lock is now the
+engine's process-wide lock (`fraud_ai.database.engine.write_lock`), shared with the
+service's own writes: replay tokens, idempotency and step-up. Without it, two deferred
+transactions can deadlock and SQLite fails one at once with "database is locked". The
+lock is a no-op on PostgreSQL.
+
+### HTTP benchmark (SYNTHETIC, this machine)
+
+`python scripts/service_benchmark.py`:
+
+* **Setup:** the Stage 8 test world (80 users, 576 live events, 125 of them decision
+  points; gradient boosting primary, GRU sequence, logistic shadow), on SQLite.
+* **Modes:** each run replays the stream on a fresh copy three ways:
+  * `direct` calls the library in-process;
+  * `http` is `POST /v1/score` over a loopback socket to uvicorn (keep-alive, one client
+    per worker);
+  * `http_signed` is `http` with HMAC signatures and persisted replay tokens.
+* **Workers** take whole users, so per-user order is preserved.
+
+Latency is per request in milliseconds, with p50/p95/p99 over all 576 requests.
+
+| Workers | Mode | req/s | p50 | p95 | p99 | decisions p50 / p99 |
+|---|---|---:|---:|---:|---:|---:|
+| 1 | direct | 48.0 | 9.0 | 47.7 | 56.9 | 43.7 / 77.4 |
+| 1 | http | 50.1 | 12.2 | 51.2 | 62.5 | 46.3 / 87.3 |
+| 1 | http_signed | 42.6 | 15.8 | 55.9 | 66.5 | 51.1 / 75.3 |
+| 4 | direct | 53.7 | 70.4 | 140.8 | 203.8 | 98.5 / 213.4 |
+| 4 | http | 42.3 | 87.7 | 157.9 | 195.8 | 118.7 / 335.2 |
+| 4 | http_signed | 37.6 | 98.8 | 165.6 | 197.6 | 128.7 / 206.4 |
+| 8 | direct | 54.7 | 128.7 | 232.7 | 284.5 | 162.1 / 307.3 |
+| 8 | http | 39.6 | 169.2 | 285.0 | 359.5 | 198.4 / 353.4 |
+| 8 | http_signed | 38.4 | 177.0 | 282.9 | 454.2 | 206.8 / 431.9 |
+| 16 | direct | 53.5 | 241.4 | 370.6 | 561.6 | 276.1 / 562.2 |
+| 16 | http | 38.7 | 309.4 | 483.3 | 650.1 | 354.1 / 653.4 |
+| 16 | http_signed | 34.6 | 358.2 | 557.1 | 761.3 | 398.9 / 800.0 |
+
+Reading it:
+
+* **Single worker.** The HTTP boundary adds about **3 ms at p50** (framing, auth lookup,
+  validation, JSON). Signing adds about **3.6 ms** (HMAC plus a committed replay-token
+  write).
+* **More workers.** Throughput stays flat, at about 50 req/s direct and 35-50 req/s over
+  HTTP. SQLite serialises every write, so extra workers only queue, and latency grows
+  with the queue. The apparent HTTP "overhead" at 16 workers (68 ms) is mostly that
+  queueing plus the extra key-lookup and replay-token work under the lock, not
+  per-request framing cost.
+* **Caveats.** Concurrent throughput needs PostgreSQL (the constraints and the service are
+  tested there), which this benchmark does not measure. These are local, synthetic
+  numbers, not an SLA.

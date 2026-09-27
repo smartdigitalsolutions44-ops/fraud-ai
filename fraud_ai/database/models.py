@@ -33,6 +33,7 @@ from sqlalchemy import (
     ForeignKeyConstraint,
     Index,
     Integer,
+    LargeBinary,
     SmallInteger,
     String,
     Text,
@@ -45,8 +46,12 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from fraud_ai.core.enums import (
     AddressType,
+    AuthenticationMethod,
+    AuthenticationResult,
     AuthMethod,
     CardFunding,
+    ChallengePurpose,
+    CredentialStatus,
     Decision,
     DeviceType,
     EventSource,
@@ -56,6 +61,7 @@ from fraud_ai.core.enums import (
     LabelValue,
     LoginOutcome,
     NetworkType,
+    PaymentAuthStatus,
     PaymentMethodType,
     ReviewResolution,
     ReviewStatus,
@@ -831,6 +837,169 @@ class Investigation(Base):
     latency_seconds: Mapped[float] = mapped_column(Float)
     prompt_tokens: Mapped[int | None] = mapped_column(Integer)
     completion_tokens: Mapped[int | None] = mapped_column(Integer)
+
+
+class ServiceApiKey(Base):
+    """A service-to-service API key (Stage 9). Only a salted SHA-256 of the 256-bit
+    random secret is stored; the secret is shown once at creation."""
+
+    __tablename__ = "service_api_keys"
+    __table_args__ = (
+        UniqueConstraint("key_id"),
+        CheckConstraint("length(secret_sha256) = 64", name="secret_sha256_length"),
+    )
+
+    api_key_pk: Mapped[uuid.UUID] = _uuid_pk()
+    key_id: Mapped[str] = mapped_column(String(40))
+    name: Mapped[str] = mapped_column(String(100))
+    secret_salt: Mapped[str] = mapped_column(String(64))
+    secret_sha256: Mapped[str] = mapped_column(String(64))
+    scopes: Mapped[list[Any]] = mapped_column(JSONType, default=list)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+    revoked_at: Mapped[datetime | None]
+
+
+class RequestIdempotency(Base):
+    """Idempotency-Key records: the first response for (key, route, Idempotency-Key)."""
+
+    __tablename__ = "request_idempotency"
+    __table_args__ = (
+        UniqueConstraint("api_key_id", "route", "idempotency_key"),
+        Index("ix_request_idempotency_created_at", "created_at"),
+    )
+
+    record_id: Mapped[uuid.UUID] = _uuid_pk()
+    api_key_id: Mapped[str] = mapped_column(String(40))
+    route: Mapped[str] = mapped_column(String(100))
+    idempotency_key: Mapped[str] = mapped_column(String(100))
+    request_sha256: Mapped[str] = mapped_column(String(64))
+    state: Mapped[str] = mapped_column(String(16), default="in_progress")
+    status_code: Mapped[int | None] = mapped_column(Integer)
+    response_body: Mapped[dict[str, Any] | None] = mapped_column(JSONType)
+    policy_version: Mapped[str | None] = mapped_column(String(32))
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
+class RequestReplayToken(Base):
+    """Signatures already accepted (replay protection); kept until they expire."""
+
+    __tablename__ = "request_replay_tokens"
+    __table_args__ = (
+        UniqueConstraint("signature_sha256"),
+        Index("ix_request_replay_tokens_expires_at", "expires_at"),
+    )
+
+    token_id: Mapped[uuid.UUID] = _uuid_pk()
+    signer: Mapped[str] = mapped_column(String(64))
+    signature_sha256: Mapped[str] = mapped_column(String(64))
+    signed_at: Mapped[datetime]
+    expires_at: Mapped[datetime]
+    received_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
+class WebAuthnCredential(Base):
+    """A registered passkey: public key material only. The private key never leaves the
+    user's authenticator."""
+
+    __tablename__ = "webauthn_credentials"
+    __table_args__ = (
+        UniqueConstraint("credential_id"),
+        Index("ix_webauthn_credentials_user_id", "user_id"),
+        CheckConstraint("sign_count >= 0", name="sign_count_non_negative"),
+    )
+
+    credential_pk: Mapped[uuid.UUID] = _uuid_pk()
+    credential_id: Mapped[str] = mapped_column(String(1400))  # base64url
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.user_id"))
+    public_key: Mapped[bytes] = mapped_column(LargeBinary)  # COSE public key
+    sign_count: Mapped[int] = mapped_column(BigInteger, default=0)
+    transports: Mapped[list[Any]] = mapped_column(JSONType, default=list)
+    status: Mapped[CredentialStatus] = mapped_column(
+        enum_type(CredentialStatus, "credential_status"), default=CredentialStatus.ACTIVE
+    )
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+    last_used_at: Mapped[datetime | None]
+
+
+class AuthenticationChallenge(Base):
+    """A single-use, short-lived WebAuthn challenge. Only its SHA-256 is stored."""
+
+    __tablename__ = "authentication_challenges"
+    __table_args__ = (
+        UniqueConstraint("challenge_sha256"),
+        Index("ix_authentication_challenges_assessment_id", "assessment_id"),
+    )
+
+    challenge_id: Mapped[uuid.UUID] = _uuid_pk()
+    purpose: Mapped[ChallengePurpose] = mapped_column(
+        enum_type(ChallengePurpose, "challenge_purpose")
+    )
+    challenge_sha256: Mapped[str] = mapped_column(String(64))
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.user_id"))
+    session_id: Mapped[str | None] = mapped_column(String(128))
+    assessment_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("risk_assessments.assessment_id")
+    )
+    api_key_id: Mapped[str | None] = mapped_column(String(40))
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+    expires_at: Mapped[datetime]
+    consumed_at: Mapped[datetime | None]
+
+
+class AuthenticationAttempt(Base):
+    """Append-only outcome of one step-up attempt for an assessment."""
+
+    __tablename__ = "authentication_attempts"
+    __table_args__ = (
+        UniqueConstraint("assessment_id", "attempt_number"),
+        CheckConstraint("attempt_number >= 1", name="attempt_number_positive"),
+    )
+
+    attempt_id: Mapped[uuid.UUID] = _uuid_pk()
+    assessment_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("risk_assessments.assessment_id"))
+    method: Mapped[AuthenticationMethod] = mapped_column(
+        enum_type(AuthenticationMethod, "authentication_method")
+    )
+    attempt_number: Mapped[int] = mapped_column(Integer)
+    result: Mapped[AuthenticationResult] = mapped_column(
+        enum_type(AuthenticationResult, "authentication_result")
+    )
+    failure_reason: Mapped[str | None] = mapped_column(String(64))
+    credential_ref: Mapped[str | None] = mapped_column(String(100))
+    challenge_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("authentication_challenges.challenge_id")
+    )
+    payment_request_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("payment_auth_requests.request_id")
+    )
+    followup_assessment_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("risk_assessments.assessment_id")
+    )
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
+class PaymentAuthRequest(Base):
+    """A request to an EXTERNAL payment-authentication provider (e.g. a processor's
+    3-D Secure service). Only the processor's token reference is used, stored as a keyed
+    hash. No PAN, CVV, PIN or track data exists anywhere."""
+
+    __tablename__ = "payment_auth_requests"
+    __table_args__ = (
+        UniqueConstraint("provider", "provider_reference"),
+        Index("ix_payment_auth_requests_assessment_id", "assessment_id"),
+    )
+
+    request_id: Mapped[uuid.UUID] = _uuid_pk()
+    assessment_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("risk_assessments.assessment_id"))
+    provider: Mapped[str] = mapped_column(String(32))
+    provider_reference: Mapped[str] = mapped_column(String(100))
+    token_ref_hash: Mapped[str] = mapped_column(String(64))
+    status: Mapped[PaymentAuthStatus] = mapped_column(
+        enum_type(PaymentAuthStatus, "payment_auth_status")
+    )
+    attempt_number: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+    completed_at: Mapped[datetime | None]
 
 
 ALL_TABLES = sorted(Base.metadata.tables)
