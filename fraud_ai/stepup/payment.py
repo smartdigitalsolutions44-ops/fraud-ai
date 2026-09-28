@@ -77,6 +77,11 @@ class ProviderUnavailableError(FraudAIError):
     pass
 
 
+class CallbackIgnoredError(FraudAIError):
+    """A validly signed provider event that does not change state (e.g. an event type the
+    adapter does not act on). Acknowledged so the provider stops retrying."""
+
+
 @dataclass(frozen=True)
 class ProviderResponse:
     provider_reference: str
@@ -264,7 +269,22 @@ def request_payment_authentication(
     )
     session.add(row)
     session.flush()
-    return PaymentStepUp(row, PaymentAuthStatus.PENDING, response.next_action, None, None)
+    if response.status is PaymentAuthStatus.PENDING:
+        return PaymentStepUp(row, PaymentAuthStatus.PENDING, response.next_action, None, None)
+    # The provider answered with a terminal result straight away (e.g. a decline).
+    row.status = response.status
+    result = RESULTS[response.status]
+    _, followup = record_attempt(
+        session,
+        assessment,
+        AuthenticationMethod.PAYMENT_AUTHENTICATION,
+        result,
+        max_attempts=max_attempts,
+        failure_reason=None if result is AuthenticationResult.SUCCESS else response.status.value,
+        credential_ref=row.provider_reference,
+        payment_request_id=row.request_id,
+    )
+    return PaymentStepUp(row, response.status, response.next_action, result, followup)
 
 
 def handle_callback(

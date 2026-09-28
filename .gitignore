@@ -24,3 +24,8 @@ models/*
 /evaluation/
 /evaluation-benchmark/
 /neural-benchmark/
+
+# Stage 10 staging secrets and local benchmark output
+deploy/staging/secrets/
+/pg-benchmark/
+/service-benchmark/

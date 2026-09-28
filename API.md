@@ -29,7 +29,7 @@ recorded attempt → NEW immutable follow-up assessment (the original is never c
 |---|---|
 | Base path | `/v1` (the major version is in the path; `api_version` is in every body) |
 | Auth | `Authorization: Bearer <key_id>.<secret>`; see [SERVICE_SECURITY.md](SERVICE_SECURITY.md) §2 |
-| Signing | `X-Fraud-Timestamp` + `X-Fraud-Signature: v1=<hex>` (§3) |
+| Signing | `X-Fraud-Timestamp` + `X-Fraud-Signature: v1=<hex>`, optional `X-Fraud-Key-Version` (§3) |
 | Idempotency | `Idempotency-Key` on `POST /v1/score` (§4) |
 | Correlation | `X-Correlation-ID` (8-64 characters of `[A-Za-z0-9._-]`), echoed; otherwise generated |
 | Content type | `application/json` for request bodies; other types get 415 |
@@ -173,7 +173,19 @@ A GET is signed over an empty body. Requests are rejected with 401 when the sign
 * missing, when `SERVICE_REQUIRE_SIGNATURES=true`: `MISSING_SIGNATURE`;
 * wrong: `INVALID_SIGNATURE`;
 * older or newer than `SIGNATURE_MAX_AGE` (default 300 s): `EXPIRED_SIGNATURE`;
-* already used: `REPLAYED_SIGNATURE`. Replay tokens are persisted.
+* already used: `REPLAYED_SIGNATURE`. Replay tokens are persisted (one process), or
+  claimed atomically in Redis across all workers and instances when
+  `STATE_BACKEND=redis` (Stage 10).
+
+**Signing-key versions (Stage 10).** During a master-key rotation, signatures from both the
+current and the previous master key verify until the previous key's expiry. A client may
+send `X-Fraud-Key-Version: <version>` to name the key it signed with. Without the header,
+every allowed key is tried. `fraud-ai service-key signing-secret <key-id> [--previous]`
+prints the secret for either version.
+
+If signatures are required but the server has no signing key, every request gets
+**503 `SIGNING_UNAVAILABLE`**. That is a server misconfiguration; nothing is processed
+unsigned.
 
 A retry must be signed again with a new timestamp. Idempotency then returns the original
 result.
@@ -288,6 +300,14 @@ response looks like `{"accepted": true, "status": "authenticated", "result": "SU
   "unavailable"`** and `next_action.type = "authentication_unavailable"`. That is never an
   allow.
 * Without a configured provider, the request gets 503 `PAYMENT_AUTH_NOT_CONFIGURED`.
+* **Stage 10:** a correctly signed callback for an event type that does not change state
+  (for example Stripe `payment_intent.created`) gets **200
+  `{"accepted": false, "status": "ignored"}`**. Nothing is recorded, and it is never
+  treated as success.
+* **Stage 10:** `PAYMENT_AUTH_PROVIDER=stripe` selects the Stripe **test-mode** adapter
+  (`/v1/callbacks/payment/stripe`, `Stripe-Signature`). The response carries
+  `next_action.type = "stripe_authentication"` with the PaymentIntent client secret for the merchant's
+  front end. It has never been run against Stripe; see AUTHENTICATION.md §3.
 
 `token_reference` is the processor's token, which is stored only as a keyed hash. Never
 send card numbers, CVV or PINs: the event contract refuses them.
@@ -321,9 +341,14 @@ with its own timeout (`LOCAL_LLM_TIMEOUT` + 10 s). It is never part of scoring.
 ## 9. Operations
 
 * `GET /v1/health` returns `{"status": "ok"}`.
-* `GET /v1/ready` returns 200 or 503 with checks: `database`, `migrations`,
-  `active_policy`, `primary_model` (the artefact loaded and SHA-256-verified) and `llm`
-  (always `not_required`).
+* `GET /v1/ready` returns 200 or 503 with these checks:
+  * `database` and `migrations`;
+  * `active_policy`;
+  * `primary_model`: the artefact loaded and SHA-256-verified, re-verified when it changes
+    and every `READINESS_REVERIFY_SECONDS`;
+  * `shared_state` (Stage 10; `not_required` with the memory backend);
+  * `signing_key` (Stage 10);
+  * `llm` (always `not_required`).
 * `GET /v1/metrics` exposes these series:
   * `fraud_api_requests_total{route,method,status}`;
   * `fraud_api_request_duration_seconds`;
@@ -333,7 +358,17 @@ with its own timeout (`LOCAL_LLM_TIMEOUT` + 10 s). It is never part of scoring.
   * `fraud_api_idempotent_replays_total`;
   * `fraud_api_stepup_results_total{method,result}`;
   * `fraud_api_investigations_total{outcome}`;
-  * `fraud_api_review_queue{status}`.
+  * `fraud_api_review_queue{status}`;
+  * Stage 10: `fraud_api_signature_failures_total{code}`,
+    `fraud_api_signatures_verified_total{key_version}`,
+    `fraud_api_state_unavailable_total{what}`, `fraud_state_operation_seconds{op}`,
+    `fraud_state_errors_total{op}`, `fraud_db_ping_seconds`, `fraud_db_query_seconds`,
+    `fraud_db_pool_checked_out`, `fraud_model_verification_seconds`,
+    `fraud_model_verification_failures_total`, `fraud_model_cache_loads`,
+    `fraud_model_cache_load_failures`, `fraud_api_fallbacks_total{category}` and
+    `fraud_api_policy_decisions_total{policy_version,decision}`.
+
+  Metrics are per worker process.
 
   Labels are route templates and enums: never ids, keys or addresses.
 
@@ -353,6 +388,10 @@ with its own timeout (`LOCAL_LLM_TIMEOUT` + 10 s). It is never part of scoring.
 | 429 | `RATE_LIMITED` (with `Retry-After`) |
 | 500 | `INTERNAL_ERROR` (generic; the correlation id finds the log line) |
 | 502 / 503 / 504 | `INVESTIGATION_FAILED`, `SCORING_UNAVAILABLE`, `SCORING_TIMEOUT`, `POLICY_UNAVAILABLE`, `PAYMENT_AUTH_NOT_CONFIGURED`, `LLM_UNAVAILABLE`, `LLM_TIMEOUT` |
+| 503 (Stage 10) | `DATABASE_UNAVAILABLE` (database or pool unavailable; `Retry-After`), `STATE_UNAVAILABLE` (Redis unavailable), `SIGNING_UNAVAILABLE` (signatures required, no key configured) |
+
+A 503 means **not decided**. Callers must take their own conservative path and never treat
+it as an allow.
 
 ## 11. Direct library use
 

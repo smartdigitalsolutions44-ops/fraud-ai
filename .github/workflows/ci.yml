@@ -1,0 +1,117 @@
+# fraud-ai CI (Stage 10). Benchmarks are NOT run here (they need a quiet, comparable
+# machine); see scripts/check_regression.py and HARDENING.md.
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PIP_EXTRA_INDEX_URL: https://download.pytorch.org/whl/cpu
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -e ".[dev,postgres,stripe]"
+      - run: python -m ruff check .
+      - run: python -m ruff format --check fraud_ai tests migrations
+      - run: python -m mypy
+
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: fraud_ai
+          POSTGRES_PASSWORD: fraud_ai_dev # CI-only throwaway database
+          POSTGRES_DB: fraud_ai_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U fraud_ai" --health-interval 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: System packages (redis-server for the shared-state tests, pg tools)
+        run: sudo apt-get update && sudo apt-get install -y redis-server postgresql-client
+      - run: pip install -e ".[dev,postgres,stripe]"
+      - name: Staging-profile database role (non-default password, for the staging E2E)
+        run: |
+          STAGING_PW="$(python -c 'import secrets; print(secrets.token_hex(16))')"
+          PGPASSWORD=fraud_ai_dev psql -h localhost -U fraud_ai -d fraud_ai_test \
+            -c "CREATE ROLE fraud_ai_staging LOGIN CREATEDB PASSWORD '${STAGING_PW}'" \
+            -c "CREATE DATABASE fraud_ai_staging OWNER fraud_ai_staging"
+          echo "::add-mask::${STAGING_PW}"
+          echo "TEST_STAGING_POSTGRES_URL=postgresql+psycopg://fraud_ai_staging:${STAGING_PW}@localhost:5432/fraud_ai_staging" >> "$GITHUB_ENV"
+      - name: Tests (SQLite + PostgreSQL + Redis), coverage gate 95%
+        env:
+          TEST_POSTGRES_URL: postgresql+psycopg://fraud_ai:fraud_ai_dev@localhost:5432/fraud_ai_test
+        run: python -m pytest -q --cov=fraud_ai --cov-report=term --cov-fail-under=95
+
+  security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history for the secret scan
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -e ".[postgres,stripe,security]"
+      - name: Dependency audit (known vulnerabilities; see security/pip-audit-ignore.txt)
+        run: python scripts/security_checks.py pip-audit
+      - name: Static analysis (bandit, config in pyproject.toml)
+        run: python scripts/security_checks.py bandit
+      - name: Secret scan (detect-secrets against the reviewed baseline)
+        run: python scripts/security_checks.py secrets
+      - name: Secret scan of the full git history (gitleaks, config .gitleaks.toml)
+        run: |
+          curl -sSL https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_linux_x64.tar.gz | tar xz gitleaks
+          ./gitleaks git --no-banner --redact -c .gitleaks.toml .
+      - name: SBOM (CycloneDX)
+        run: python scripts/security_checks.py sbom --output sbom.cdx.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom.cdx.json
+
+  container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    needs: [lint]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the service image
+        run: docker build -t fraud-ai:ci .
+      - name: Image checks (non-root, no secrets/.git/databases, read-only start)
+        run: bash scripts/container_checks.sh fraud-ai:ci
+      - name: Vulnerability scan (Trivy; HIGH/CRITICAL are reported, never hidden)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: fraud-ai:ci
+          severity: HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: "0" # reported for review in RELEASE_CHECKLIST.md; the release gate decides
+          format: table

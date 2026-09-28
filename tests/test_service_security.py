@@ -130,6 +130,8 @@ def test_readiness_without_policy_is_not_ready_and_never_needs_the_llm(h: Harnes
         "migrations": "ok",
         "active_policy": "missing",
         "primary_model": "missing",
+        "shared_state": "not_required",
+        "signing_key": "not_required",
         "llm": "not_required",
     }
 
@@ -318,7 +320,7 @@ def test_oversize_requests_are_refused(sqlite_url: str) -> None:
         ({"timestamp": "yesterday"}, "timestamp"),
         ({"timestamp": "2026-07-01T12:00:00"}, "timestamp"),  # naive
         ({"timestamp": (NOW + timedelta(hours=2)).isoformat()}, "future"),
-        ({"unexpected": "sk_live_SECRETVALUE"}, "unexpected"),
+        ({"unexpected": "not-a-key-SECRETVALUE"}, "unexpected"),
         ({"session_id": None}, "session_id"),
     ],
 )
@@ -563,9 +565,9 @@ def test_errors_are_structured_and_sanitised(h: Harness, monkeypatch: pytest.Mon
     extra = h.post(
         f"/v1/reviews/{uuid.uuid4()}/resolve",
         credential,
-        {"resolution": "fraud", "sneaky": "sk_live_zzz"},
+        {"resolution": "fraud", "sneaky": "sneaky-zzz-value"},
     )
-    assert extra.status_code == 422 and "sk_live_zzz" not in extra.text
+    assert extra.status_code == 422 and "sneaky-zzz-value" not in extra.text
     bad_id = h.get("/v1/assessments/not-a-uuid", credential)
     assert bad_id.status_code == 422 and "not-a-uuid" not in bad_id.text
 
@@ -668,13 +670,16 @@ def test_service_settings_validation(values: dict[str, Any], message: str) -> No
 
 
 def test_production_refuses_development_service_settings() -> None:
+    import secrets as pysecrets
+
+    strong = pysecrets.token_urlsafe(32)
     base: dict[str, Any] = {
         "environment": Environment.PRODUCTION,
-        "database_url": "postgresql+psycopg://u@db/x",
-        "pseudonymisation_key": "p" * 40,
+        "database_url": f"postgresql+psycopg://u:{pysecrets.token_urlsafe(16)}@db/x",
+        "pseudonymisation_key": strong,
     }
     http_origin = Settings(**base)  # batch/CLI jobs need no service configuration
-    assert http_origin.service_problems() == ["production requires an https WEBAUTHN_ORIGIN"]
+    assert "production requires an https WEBAUTHN_ORIGIN" in http_origin.service_problems()
     with pytest.raises(ServiceConfigurationError, match="https WEBAUTHN_ORIGIN"):
         build_container(http_origin)
     with pytest.raises(ValidationError, match="fake payment-auth"):
@@ -682,12 +687,64 @@ def test_production_refuses_development_service_settings() -> None:
             **base,
             webauthn_origin="https://pay.example",
             payment_auth_provider="fake",
-            payment_auth_webhook_secret="w" * 40,
+            payment_auth_webhook_secret=pysecrets.token_urlsafe(32),
         )
-    ok = Settings(**base, webauthn_origin="https://pay.example")
+    ok = Settings(
+        **base,
+        webauthn_origin="https://pay.example",
+        service_signing_master_key=pysecrets.token_urlsafe(32),
+        service_require_signatures=True,
+    )
     assert ok.service_problems() == []
     assert ok.cors_origins == [] and ok.trusted_proxy_networks == []
-    assert ok.service_host == "127.0.0.1" and ok.service_signing_master_key is None
+    assert ok.service_host == "127.0.0.1"
+    assert ok.requires_promotion and ok.effective_log_format == "json"
+
+
+@pytest.mark.parametrize(
+    ("overrides", "fragment"),
+    [
+        ({"pseudonymisation_key": "change_me_" + "x9" * 12}, "PSEUDONYMISATION_KEY looks like"),
+        ({"pseudonymisation_key": "a" * 40}, "PSEUDONYMISATION_KEY looks like"),
+        ({"database_url": "postgresql+psycopg://fraud_ai:fraud_ai_dev@db/x"}, "DATABASE_URL"),
+        ({"service_cors_origins": "*"}, "CORS"),
+        ({"service_cors_origins": "http://ops.example"}, "CORS"),
+        ({"local_llm_runtime": "reference"}, "reference LLM"),
+        ({"service_require_signatures": False}, "SERVICE_REQUIRE_SIGNATURES"),
+        ({"redis_url": "redis://:password123@r:6379/0", "state_backend": "redis"}, "REDIS_URL"),
+    ],
+)
+def test_production_profile_rejections(overrides: dict[str, Any], fragment: str) -> None:
+    import secrets as pysecrets
+
+    values: dict[str, Any] = {
+        "environment": Environment.PRODUCTION,
+        "database_url": f"postgresql+psycopg://u:{pysecrets.token_urlsafe(16)}@db/x",
+        "pseudonymisation_key": pysecrets.token_urlsafe(32),
+        "webauthn_origin": "https://pay.example",
+        "service_signing_master_key": pysecrets.token_urlsafe(32),
+        "service_require_signatures": True,
+    }
+    values.update(overrides)
+    problems = Settings(**values).service_problems()
+    assert any(fragment in p for p in problems), problems
+
+
+def test_staging_may_opt_into_the_fake_provider_but_production_never() -> None:
+    import secrets as pysecrets
+
+    base: dict[str, Any] = {
+        "database_url": f"postgresql+psycopg://u:{pysecrets.token_urlsafe(16)}@db/x",
+        "pseudonymisation_key": pysecrets.token_urlsafe(32),
+        "payment_auth_provider": "fake",
+        "payment_auth_webhook_secret": pysecrets.token_urlsafe(32),
+        "payment_auth_allow_fake_in_staging": True,
+    }
+    assert Settings(environment=Environment.STAGING, **base).payment_auth_provider == "fake"
+    with pytest.raises(ValidationError, match="production never"):
+        Settings(environment=Environment.PRODUCTION, **base)
+    with pytest.raises(ValidationError, match="STRIPE_API_KEY"):
+        Settings(payment_auth_provider="stripe", payment_auth_webhook_secret="w" * 40)
 
 
 def test_fake_provider_callback_validation() -> None:

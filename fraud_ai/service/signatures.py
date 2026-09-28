@@ -32,6 +32,7 @@ from sqlalchemy.orm import Session
 
 from fraud_ai.core.exceptions import FraudAIError
 from fraud_ai.database.models import RequestReplayToken
+from fraud_ai.state.base import SharedState
 
 SIGNATURE_VERSION = "v1"
 
@@ -105,3 +106,24 @@ def remember(
     except IntegrityError:
         savepoint.rollback()
         raise SignatureError("REPLAYED_SIGNATURE", "this signed request was already used") from None
+
+
+def remember_shared(
+    state: SharedState,
+    signer: str,
+    signature: str,
+    signed_at: datetime,
+    *,
+    max_age: int,
+    now: datetime,
+) -> None:
+    """The distributed variant of :func:`remember` (``STATE_BACKEND=redis``).
+
+    One atomic ``SET NX`` per signature, kept until the signature would be rejected as
+    expired anyway. A signature accepted by one worker is refused by every other worker.
+    Backend errors raise ``StateUnavailableError`` (the caller fails closed).
+    """
+    token = hashlib.sha256(f"{signer}|{signature}".encode()).hexdigest()
+    ttl = (signed_at + timedelta(seconds=max_age) - now).total_seconds() + 1.0
+    if not state.claim("replay:" + token, max(ttl, 1.0)):
+        raise SignatureError("REPLAYED_SIGNATURE", "this signed request was already used")

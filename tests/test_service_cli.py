@@ -37,8 +37,16 @@ def test_service_key_lifecycle(
     run: Runner, sqlite_url: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level(logging.DEBUG)
-    created = run("service-key", "create", "--name", "checkout", "--scope", "score:write",
-                  "--scope", "assessment:read")  # fmt: skip
+    created = run(
+        "service-key",
+        "create",
+        "--name",
+        "checkout",
+        "--scope",
+        "score:write",
+        "--scope",
+        "assessment:read",
+    )
     assert created.exit_code == 0, created.output
     credential = next(
         line.split()[1] for line in created.output.splitlines() if line.startswith("credential")
@@ -59,12 +67,14 @@ def test_service_key_lifecycle(
     assert run("service-key", "revoke", "fak_0000000000000000").exit_code != 0
     bad = run("service-key", "create", "--name", "x", "--scope", "root")
     assert bad.exit_code != 0 and "unknown scope" in bad.output
-    no_master = run("service-key", "create", "--name", "x", "--scope", "score:write",
-                    "--show-signing-secret")  # fmt: skip
+    no_master = run(
+        "service-key", "create", "--name", "x", "--scope", "score:write", "--show-signing-secret"
+    )
     assert no_master.exit_code != 0
     monkeypatch.setenv("SERVICE_SIGNING_MASTER_KEY", MASTER_KEY)
-    signed = run("service-key", "create", "--name", "x", "--scope", "score:write",
-                 "--show-signing-secret")  # fmt: skip
+    signed = run(
+        "service-key", "create", "--name", "x", "--scope", "score:write", "--show-signing-secret"
+    )
     assert signed.exit_code == 0 and "signing" in signed.output
     assert MASTER_KEY not in signed.output
     scopes = run("service-key", "scopes")
@@ -117,7 +127,7 @@ def test_service_run_uses_safe_uvicorn_options(
     monkeypatch.setattr(uvicorn, "run", lambda app, **kw: seen.update(kw, app=app))
     result = run("service", "run", "--port", "9999")
     assert result.exit_code == 0, result.output
-    assert seen["app"] == "fraud_ai.service.app:create_app" and seen["factory"] is True
+    assert seen["app"] == "fraud_ai.service.startup:serve_app" and seen["factory"] is True
     assert seen["proxy_headers"] is False and seen["server_header"] is False
     assert seen["host"] == "127.0.0.1" and seen["port"] == 9999
     public = run("service", "run", "--host", "0.0.0.0")  # noqa: S104 - the warning is tested

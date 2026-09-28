@@ -1,0 +1,3 @@
+# Advisories deliberately ignored by `scripts/security_checks.py pip-audit`.
+# Format: <advisory id> <reason>. Every entry needs a reason and an owner/review date.
+# Empty on purpose: no advisory is currently ignored (see HARDENING.md, "Dependency audit").

@@ -12,7 +12,7 @@ class EventType(StrEnum):
     LOGIN_ATTEMPT = "LOGIN_ATTEMPT"
     LOGIN_SUCCESS = "LOGIN_SUCCESS"
     LOGIN_FAILURE = "LOGIN_FAILURE"
-    PASSWORD_RESET = "PASSWORD_RESET"
+    PASSWORD_RESET = "PASSWORD_RESET"  # nosec B105 - an event name
     NEW_DEVICE = "NEW_DEVICE"
     ADDRESS_ADDED = "ADDRESS_ADDED"
     ADDRESS_CHANGED = "ADDRESS_CHANGED"
@@ -61,7 +61,7 @@ class DeviceType(StrEnum):
 
 
 class AuthMethod(StrEnum):
-    PASSWORD = "password"
+    PASSWORD = "password"  # nosec B105 - an auth-method label
     PASSKEY = "passkey"
     SSO = "sso"
     MAGIC_LINK = "magic_link"
@@ -133,7 +133,7 @@ class FraudType(StrEnum):
 
 
 class SecurityEventType(StrEnum):
-    PASSWORD_RESET = "PASSWORD_RESET"
+    PASSWORD_RESET = "PASSWORD_RESET"  # nosec B105 - an event name
     NEW_DEVICE = "NEW_DEVICE"
     ADDRESS_CHANGED = "ADDRESS_CHANGED"
     PAYMENT_METHOD_ADDED = "PAYMENT_METHOD_ADDED"

@@ -250,7 +250,7 @@ class SyntheticDataGenerator:
     ) -> None:
         if activity_days < 30:
             raise ValueError("activity_days must be at least 30")
-        self.rng = random.Random(seed)
+        self.rng = random.Random(seed)  # nosec B311 - seeded PRNG for SYNTHETIC data
         self.end = reference_time
         self.start = reference_time - timedelta(days=activity_days)
         self.activity_days = activity_days

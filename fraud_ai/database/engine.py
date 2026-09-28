@@ -23,7 +23,7 @@ def _enable_sqlite_foreign_keys(dbapi_connection: Any, _record: Any) -> None:
     cursor.close()
 
 
-def create_db_engine(url: str, *, echo: bool = False) -> Engine:
+def create_db_engine(url: str, *, echo: bool = False, pool: dict[str, Any] | None = None) -> Engine:
     sa_url = make_url(url)
     if sa_url.get_backend_name() == "sqlite":
         database = sa_url.database
@@ -35,11 +35,21 @@ def create_db_engine(url: str, *, echo: bool = False) -> Engine:
         # SQLite does not enforce foreign keys unless asked to, per connection.
         event.listen(engine, "connect", _enable_sqlite_foreign_keys)
         return engine
-    return create_engine(sa_url, echo=echo, pool_pre_ping=True)
+    # PostgreSQL: QueuePool sized by DB_POOL_* (see DEPLOYMENT.md for the benchmark).
+    return create_engine(sa_url, echo=echo, pool_pre_ping=True, **(pool or {}))
 
 
 def engine_from_settings(settings: Settings) -> Engine:
-    return create_db_engine(settings.resolved_database_url, echo=settings.database_echo)
+    return create_db_engine(
+        settings.resolved_database_url,
+        echo=settings.database_echo,
+        pool={
+            "pool_size": settings.db_pool_size,
+            "max_overflow": settings.db_max_overflow,
+            "pool_timeout": settings.db_pool_timeout,
+            "pool_recycle": settings.db_pool_recycle,
+        },
+    )
 
 
 _WRITE_LOCKS: weakref.WeakKeyDictionary[Engine, threading.RLock] = weakref.WeakKeyDictionary()

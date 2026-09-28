@@ -72,7 +72,7 @@ def cli(ctx: click.Context) -> None:
         settings = get_settings()
     except ValidationError as exc:
         raise click.ClickException(f"invalid configuration:\n{exc}") from None
-    configure_logging(settings.log_level)
+    configure_logging(settings.log_level, settings.effective_log_format)
     log.debug("starting fraud-ai %s (environment=%s)", __version__, settings.environment)
     ctx.obj = AppContext(settings)
     ctx.call_on_close(lambda: ctx.obj._engine.dispose() if ctx.obj._engine else None)
@@ -3221,6 +3221,86 @@ def policy_simulate(app: AppContext, /, version: str, split: str, **opts: Any) -
     click.echo(f"written {_write_policy_report(app, f'{version}_simulation_{split}', report)}")
 
 
+@policy.command("promote")
+@click.argument("version")
+@click.option(
+    "--to",
+    "stage",
+    type=click.Choice(["shadow", "evaluation", "candidate", "rejected"]),
+    required=True,
+)
+@click.option("--note", default=None)
+@click.option("--approve", is_flag=True, help="Required for --to candidate.")
+@pass_app
+def policy_promote(
+    app: AppContext, version: str, stage: str, note: str | None, approve: bool
+) -> None:
+    """Move a policy one explicit step: shadow → evaluation → candidate (or rejected).
+    Never automatic; activation stays a separate `deployment activate`."""
+    app.require_migrated()
+    from fraud_ai import audit as audit_log
+    from fraud_ai.realtime.monitoring import shadow_report
+    from fraud_ai.risk.offline import simulate
+    from fraud_ai.risk.promotion import check_transition, promote
+    from fraud_ai.risk.registry import load_policy
+
+    with session_scope(make_session_factory(app.engine)) as session:
+        evidence: dict[str, Any] = {}
+        try:
+            check_transition(session, version, stage)  # before any (slow) simulation
+            if stage == "evaluation":
+                report = simulate(session, load_policy(session, version), split="test")
+                evidence["simulation"] = {
+                    k: report[k]
+                    for k in (
+                        "events",
+                        "fraud_events",
+                        "decision_distribution",
+                        "fraud_caught",
+                        "fraud_missed",
+                        "false_positive_volume",
+                        "estimated_cost",
+                    )
+                    if k in report
+                }
+                shadow = shadow_report(session).get("policies", {}).get(version)
+                if shadow is not None:
+                    evidence["live_shadow_agreement"] = shadow.get("agreement_rate")
+                evidence["note"] = "SYNTHETIC evidence; not a real-world validation"
+            row = promote(
+                session,
+                version,
+                stage,
+                actor=audit_log.cli_actor(),
+                note=note,
+                evidence=evidence,
+                approved=approve,
+            )
+        except FraudAIError as exc:
+            raise click.ClickException(str(exc)) from None
+        click.echo(f"{version} is now at stage {row.stage}")
+        if evidence.get("simulation"):
+            click.echo(f"  evidence: {json.dumps(evidence['simulation'], sort_keys=True)}")
+
+
+@policy.command("history")
+@click.argument("version")
+@pass_app
+def policy_history(app: AppContext, version: str) -> None:
+    """The promotion history of a policy."""
+    app.require_migrated()
+    from fraud_ai.risk.promotion import history
+
+    with session_scope(make_session_factory(app.engine)) as session:
+        rows = history(session, version)
+        if not rows:
+            click.echo(f"{version} has no promotion history")
+        for row in rows:
+            click.echo(
+                f"{row.created_at:%Y-%m-%d %H:%M}  {row.stage:<10} by {row.actor}  {row.note or ''}"
+            )
+
+
 @policy.command("compare")
 @click.argument("version_a")
 @click.argument("version_b")
@@ -3336,6 +3416,9 @@ def deployment_activate(
             "policies are experimental)",
             abort=True,
         )
+    from fraud_ai import audit as audit_log
+
+    actor = audit_log.cli_actor()
     with session_scope(make_session_factory(app.engine)) as session:
         try:
             row = activate(
@@ -3344,9 +3427,24 @@ def deployment_activate(
                 shadow_models=list(shadow_models),
                 shadow_policies=list(shadow_policies),
                 note=note,
+                activated_by=actor,
+                require_promotion=app.settings.requires_promotion,
             )
         except FraudAIError as exc:
             raise click.ClickException(str(exc)) from None
+        audit_log.record(
+            session,
+            "policy.activated",
+            actor=actor,
+            target_type="policy",
+            target_id=policy_version,
+            details={
+                "deployment": row.sequence,
+                "shadow_models": list(row.shadow_models),
+                "shadow_policies": list(row.shadow_policies),
+                "promotion_required": app.settings.requires_promotion,
+            },
+        )
         click.echo(f"deployment #{row.sequence}: {policy_version} is active")
 
 
@@ -3441,6 +3539,16 @@ def review_resolve(app: AppContext, review_id: str, outcome: str, note: str | No
             row = resolve(session, _parse_uuid(review_id), ReviewResolution(outcome), note=note)
         except FraudAIError as exc:
             raise click.ClickException(str(exc)) from None
+        from fraud_ai import audit as audit_log
+
+        audit_log.record(
+            session,
+            "review.resolved",
+            actor=audit_log.cli_actor(),
+            target_type="review",
+            target_id=review_id,
+            details={"resolution": row.resolution.value, "via": "cli"},
+        )
         click.echo(f"recorded outcome {row.resolution.value} for review {review_id}")
 
 
@@ -3545,28 +3653,52 @@ def service_key() -> None:
     help="Grant a scope (repeatable). See `fraud-ai service-key scopes`.",
 )
 @click.option(
+    "--expires-in-days",
+    type=click.FloatRange(min=0, min_open=True),
+    default=None,
+    help="Expire the key automatically (recommended; rotate before it lapses).",
+)
+@click.option(
     "--show-signing-secret",
     is_flag=True,
     help="Also print the key's request-signing secret (needs SERVICE_SIGNING_MASTER_KEY).",
 )
 @pass_app
 def service_key_create(
-    app: AppContext, name: str, scopes: tuple[str, ...], show_signing_secret: bool
+    app: AppContext,
+    name: str,
+    scopes: tuple[str, ...],
+    expires_in_days: float | None,
+    show_signing_secret: bool,
 ) -> None:
     """Create a key. The credential is printed ONCE; only its salted hash is stored."""
     app.require_migrated()
+    from datetime import timedelta
+
+    from fraud_ai import audit
     from fraud_ai.service.keys import ServiceKeyError, create_key, signing_secret
 
     master = app.settings.service_signing_master_key
     if show_signing_secret and master is None:
         raise click.ClickException("--show-signing-secret needs SERVICE_SIGNING_MASTER_KEY")
+    now = datetime.now(UTC)
+    expires = now + timedelta(days=expires_in_days) if expires_in_days else None
     with session_scope(make_session_factory(app.engine)) as session:
         try:
-            issued = create_key(session, name, list(scopes))
+            issued = create_key(session, name, list(scopes), expires_at=expires, now=now)
         except ServiceKeyError as exc:
             raise click.ClickException(str(exc)) from None
+        audit.record(
+            session,
+            "service_key.created",
+            actor=audit.cli_actor(),
+            target_type="service_key",
+            target_id=issued.key_id,
+            details={"name": name, "scopes": list(issued.scopes), "expires_at": str(expires)},
+        )
     click.echo(f"key id      {issued.key_id}")
     click.echo(f"scopes      {', '.join(issued.scopes)}")
+    click.echo(f"expires     {expires.isoformat() if expires else 'never'}")
     click.echo(f"credential  {issued.credential}")
     if show_signing_secret and master is not None:
         click.echo(f"signing     {signing_secret(master.get_secret_value(), issued.key_id)}")
@@ -3580,19 +3712,25 @@ def service_key_create(
 @service_key.command("list")
 @pass_app
 def service_key_list(app: AppContext) -> None:
-    """List keys (ids, names, scopes, status; never secrets)."""
+    """List keys (ids, names, scopes, status, expiry, last use; never secrets)."""
     app.require_migrated()
     from fraud_ai.service.keys import list_keys
+
+    now = datetime.now(UTC)
+
+    def _t(value: datetime | None) -> str:
+        return f"{value:%Y-%m-%d %H:%M}" if value else "-"
 
     with session_scope(make_session_factory(app.engine)) as session:
         rows = list_keys(session)
         if not rows:
             click.echo("no service keys")
         for row in rows:
-            state = f"revoked {row.revoked_at:%Y-%m-%d %H:%M}" if row.revoked_at else "active"
+            parent = f"  rotated from {row.rotated_from_key_id}" if row.rotated_from_key_id else ""
             click.echo(
-                f"{row.key_id}  {state:<24} {row.created_at:%Y-%m-%d %H:%M}  "
-                f"{row.name}  [{', '.join(row.scopes)}]"
+                f"{row.key_id}  {row.status_at(now):<8} created {_t(row.created_at)}  "
+                f"expires {_t(row.expires_at)}  last used {_t(row.last_used_at)}  "
+                f"{row.name}  [{', '.join(row.scopes)}]{parent}"
             )
 
 
@@ -3602,6 +3740,7 @@ def service_key_list(app: AppContext) -> None:
 def service_key_revoke(app: AppContext, key_id: str) -> None:
     """Revoke a key immediately (the next request with it is refused)."""
     app.require_migrated()
+    from fraud_ai import audit
     from fraud_ai.service.keys import ServiceKeyError, revoke_key
 
     with session_scope(make_session_factory(app.engine)) as session:
@@ -3609,7 +3748,100 @@ def service_key_revoke(app: AppContext, key_id: str) -> None:
             row = revoke_key(session, key_id)
         except ServiceKeyError as exc:
             raise click.ClickException(str(exc)) from None
+        audit.record(
+            session,
+            "service_key.revoked",
+            actor=audit.cli_actor(),
+            target_type="service_key",
+            target_id=row.key_id,
+        )
         click.echo(f"revoked {row.key_id} at {row.revoked_at}")
+
+
+@service_key.command("rotate")
+@click.argument("key_id")
+@click.option(
+    "--grace-hours",
+    type=click.FloatRange(min=0),
+    default=None,
+    help="How long the old key stays valid (default SERVICE_KEY_ROTATION_GRACE_HOURS).",
+)
+@click.option("--expires-in-days", type=click.FloatRange(min=0, min_open=True), default=None)
+@click.option("--show-signing-secret", is_flag=True)
+@pass_app
+def service_key_rotate(
+    app: AppContext,
+    key_id: str,
+    grace_hours: float | None,
+    expires_in_days: float | None,
+    show_signing_secret: bool,
+) -> None:
+    """Issue a successor key (shown ONCE); the old key expires after the grace period.
+    The old secret is never shown again (it cannot be: only its hash exists)."""
+    app.require_migrated()
+    from datetime import timedelta
+
+    from fraud_ai import audit
+    from fraud_ai.service.keys import ServiceKeyError, rotate_key, signing_secret
+
+    master = app.settings.service_signing_master_key
+    if show_signing_secret and master is None:
+        raise click.ClickException("--show-signing-secret needs SERVICE_SIGNING_MASTER_KEY")
+    grace = timedelta(
+        hours=app.settings.service_key_rotation_grace_hours if grace_hours is None else grace_hours
+    )
+    now = datetime.now(UTC)
+    new_expiry = now + timedelta(days=expires_in_days) if expires_in_days else None
+    with session_scope(make_session_factory(app.engine)) as session:
+        try:
+            issued, old = rotate_key(
+                session, key_id, grace=grace, new_expires_at=new_expiry, now=now
+            )
+        except ServiceKeyError as exc:
+            raise click.ClickException(str(exc)) from None
+        audit.record(
+            session,
+            "service_key.rotated",
+            actor=audit.cli_actor(),
+            target_type="service_key",
+            target_id=old.key_id,
+            details={
+                "successor": issued.key_id,
+                "old_key_expires_at": str(old.expires_at),
+                "grace_hours": grace.total_seconds() / 3600,
+            },
+        )
+        old_expiry = old.expires_at
+    click.echo(f"old key     {key_id} stays valid until {old_expiry}")
+    click.echo(f"new key id  {issued.key_id}")
+    click.echo(f"credential  {issued.credential}")
+    if show_signing_secret and master is not None:
+        click.echo(f"signing     {signing_secret(master.get_secret_value(), issued.key_id)}")
+    click.echo("Deploy the new credential before the grace period ends.", err=True)
+
+
+@service_key.command("signing-secret")
+@click.argument("key_id")
+@click.option(
+    "--previous",
+    is_flag=True,
+    help="Derive from SERVICE_SIGNING_PREVIOUS_KEY instead of the current master key.",
+)
+@pass_app
+def service_key_signing_secret(app: AppContext, key_id: str, previous: bool) -> None:
+    """Print a key's request-signing secret for the current (or previous) master-key
+    version, e.g. to hand integrators the new secret during a master-key rotation."""
+    from fraud_ai.service.keys import KEY_ID_PATTERN, signing_secret
+
+    if not KEY_ID_PATTERN.match(key_id):
+        raise click.BadParameter("not a key id", param_hint="KEY_ID")
+    s = app.settings
+    master = s.service_signing_previous_key if previous else s.service_signing_master_key
+    version = s.service_signing_previous_key_version if previous else s.service_signing_key_version
+    if master is None:
+        raise click.ClickException("that signing master key is not configured")
+    click.echo(f"version     {version}")
+    click.echo(f"signing     {signing_secret(master.get_secret_value(), key_id)}")
 
 
 @service_key.command("scopes")
@@ -3646,8 +3878,11 @@ def service_run(app: AppContext, host: str | None, port: int | None, workers: in
             "reverse proxy and set TRUSTED_PROXIES to that proxy only",
             err=True,
         )
+    import os
+
+    os.environ["FRAUD_AI_SERVICE_WORKERS"] = str(workers)
     uvicorn.run(
-        "fraud_ai.service.app:create_app",
+        "fraud_ai.service.startup:serve_app",
         factory=True,
         host=host,
         port=port or s.service_port,
@@ -3715,6 +3950,150 @@ def service_openapi(output: Path | None) -> None:
     else:
         output.write_text(text + "\n")
         click.echo(f"written {output}")
+
+
+# --------------------------------------------------------------------------- audit (Stage 10)
+@cli.group()
+def audit() -> None:
+    """The append-only, hash-chained administrative audit log."""
+
+
+@audit.command("list")
+@click.option("--action", default=None, help="e.g. service_key.rotated, policy.activated")
+@click.option("--limit", type=click.IntRange(1, 1000), default=50, show_default=True)
+@pass_app
+def audit_list(app: AppContext, action: str | None, limit: int) -> None:
+    app.require_migrated()
+    from fraud_ai import audit as audit_log
+
+    with session_scope(make_session_factory(app.engine)) as session:
+        for e in audit_log.list_events(session, action=action, limit=limit):
+            click.echo(
+                f"#{e.sequence:<5} {e.occurred_at:%Y-%m-%d %H:%M:%S}  {e.action:<22} "
+                f"{e.target_type}:{e.target_id or '-'}  by {e.actor}  "
+                f"{json.dumps(e.details, sort_keys=True)}"
+            )
+
+
+@audit.command("verify")
+@pass_app
+def audit_verify(app: AppContext) -> None:
+    """Check the hash chain (edits, deletions and reordering are detected)."""
+    app.require_migrated()
+    from fraud_ai import audit as audit_log
+
+    with session_scope(make_session_factory(app.engine)) as session:
+        report = audit_log.verify_chain(session)
+    if report.ok:
+        click.echo(f"audit chain OK ({report.events} events)")
+        return
+    click.echo(f"audit chain BROKEN at #{report.first_bad_sequence}: {report.reason}", err=True)
+    raise SystemExit(1)
+
+
+# --------------------------------------------------------------------------- retention
+@cli.group()
+def retention() -> None:
+    """Retention of short-lived operational records (never assessments, labels, reviews,
+    policies, models or audit events)."""
+
+
+def _print_plan(items: list[Any]) -> None:
+    for item in items:
+        state = "enabled " if item.enabled else "disabled"
+        days = "expired" if item.days is None else f"{item.days:g} d"
+        click.echo(
+            f"  {item.name:<20} {state} {days:>8}  {item.action:<8} {item.rows:>7} rows  "
+            f"{item.description}"
+        )
+
+
+@retention.command("plan")
+@pass_app
+def retention_plan(app: AppContext) -> None:
+    """Show what a run would clean (changes nothing)."""
+    app.require_migrated()
+    from fraud_ai.retention import plan
+
+    with session_scope(make_session_factory(app.engine)) as session:
+        items = plan(session, app.settings)
+    click.echo("retention plan (dry run; nothing is changed)")
+    _print_plan(items)
+
+
+@retention.command("run")
+@click.option("--execute", is_flag=True, help="Actually delete/nullify (default: dry run).")
+@click.option("--yes", is_flag=True, help="Confirm a destructive run non-interactively.")
+@pass_app
+def retention_run(app: AppContext, execute: bool, yes: bool) -> None:
+    """Run retention. Dry run unless --execute; destructive runs need
+    RETENTION_ALLOW_DELETE=true or confirmation. Every run is audited."""
+    app.require_migrated()
+    from fraud_ai import audit as audit_log
+    from fraud_ai.retention import RetentionError, run
+
+    confirmed = yes
+    if execute and not (yes or app.settings.retention_allow_delete):
+        confirmed = click.confirm("Delete the planned rows permanently?", default=False)
+        if not confirmed:
+            raise click.ClickException("aborted; nothing was deleted")
+    with session_scope(make_session_factory(app.engine)) as session:
+        try:
+            report = run(
+                session,
+                app.settings,
+                execute=execute,
+                confirmed=confirmed,
+                actor=audit_log.cli_actor(),
+            )
+        except RetentionError as exc:
+            raise click.ClickException(str(exc)) from None
+    mode = "DRY RUN" if report["dry_run"] else "EXECUTED"
+    click.echo(f"retention {mode}")
+    for item in report["categories"]:
+        applied = report["applied"].get(item["name"])
+        suffix = f"  applied {applied}" if applied is not None else ""
+        click.echo(f"  {item['name']:<20} planned {item['rows']:>7}{suffix}")
+
+
+@retention.command("status")
+@pass_app
+def retention_status(app: AppContext) -> None:
+    """The most recent retention runs (from the audit log)."""
+    app.require_migrated()
+    from fraud_ai.retention import last_runs
+
+    with session_scope(make_session_factory(app.engine)) as session:
+        runs = last_runs(session)
+    if not runs:
+        click.echo("no retention runs recorded")
+    for r in runs:
+        mode = "dry-run" if r.get("dry_run") else "executed"
+        click.echo(f"#{r['sequence']} {r['at']} {mode} by {r['actor']} applied={r.get('applied')}")
+
+
+# --------------------------------------------------------------------------- config profile
+@cli.group("config")
+def config_group() -> None:
+    """Configuration profile checks."""
+
+
+@config_group.command("check")
+@pass_app
+def config_check(app: AppContext) -> None:
+    """Report whether the current settings are acceptable for serving in this profile."""
+    s = app.settings
+    click.echo(f"profile         {s.environment.value}")
+    click.echo(f"database        {s.safe_database_url}")
+    click.echo(f"state backend   {s.state_backend}")
+    click.echo(f"log format      {s.effective_log_format}")
+    click.echo(f"promotion gate  {'required' if s.requires_promotion else 'optional'}")
+    problems = s.service_problems()
+    for problem in problems:
+        click.echo(f"PROBLEM         {problem}", err=True)
+    if problems:
+        raise SystemExit(1)
+    click.echo("OK: no profile problems found")
 
 
 def main() -> None:  # pragma: no cover

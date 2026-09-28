@@ -224,6 +224,8 @@ def settings_for(url: str, **overrides: Any) -> Settings:
         "database_url": url,
         "service_signing_master_key": MASTER_KEY,
         "rate_limit": "100000/minute",
+        # Generous: a cold first scoring (model loads) on a busy CI machine must not flake.
+        "service_request_timeout": 60,
         "rate_limit_burst": 10_000,
         "payment_auth_provider": "fake",
         "payment_auth_webhook_secret": WEBHOOK_SECRET,
@@ -238,7 +240,9 @@ def make_harness(
     url: str, *, engine: Engine | None = None, clock: Clock | None = None, **kwargs: Any
 ) -> Harness:
     container_kwargs = {
-        k: kwargs.pop(k) for k in ("payment_provider", "llm_client", "limiter") if k in kwargs
+        k: kwargs.pop(k)
+        for k in ("payment_provider", "llm_client", "limiter", "shared_state")
+        if k in kwargs
     }
     settings = settings_for(url, **kwargs)
     clock = clock or Clock()

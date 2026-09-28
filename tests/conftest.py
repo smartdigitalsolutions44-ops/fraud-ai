@@ -40,6 +40,12 @@ _ENV_VARS = (
     "TRUSTED_PROXIES",
     "RATE_LIMIT",
     "SERVICE_CORS_ORIGINS",
+    "STATE_BACKEND",
+    "REDIS_URL",
+    "SERVICE_SIGNING_PREVIOUS_KEY",
+    "SERVICE_SIGNING_PREVIOUS_KEY_VERSION",
+    "SERVICE_SIGNING_PREVIOUS_KEY_EXPIRES_AT",
+    "SERVICE_SIGNING_KEY_VERSION",
 )
 POSTGRES_URL = os.environ.get("TEST_POSTGRES_URL")
 
@@ -223,6 +229,79 @@ def seeded_model_world(migrated_template: Path, tmp_path_factory: pytest.TempPat
         )
     eng.dispose()
     return path
+
+
+@pytest.fixture(scope="session")
+def pg_world(tmp_path_factory: pytest.TempPathFactory) -> Iterator[tuple[str, Path]]:
+    """The Stage 8 world on PostgreSQL in its own schema (survives other tests' resets)."""
+    if not POSTGRES_URL:
+        pytest.skip("TEST_POSTGRES_URL not set")
+    from tests.realtime_world import build_pg_world
+
+    root = tmp_path_factory.mktemp("pg_world")
+    url = build_pg_world(POSTGRES_URL, "stage10_world", root)
+    yield url, root
+    eng = create_db_engine(POSTGRES_URL)
+    with eng.begin() as conn:
+        conn.execute(text('DROP SCHEMA IF EXISTS "stage10_world" CASCADE'))
+    eng.dispose()
+
+
+@pytest.fixture(scope="session")
+def redis_url(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
+    """A throwaway local redis-server (no persistence) for the Stage 10 state tests."""
+    import socket
+    import subprocess
+    import time
+
+    binary = shutil.which("redis-server")
+    if binary is None:
+        pytest.skip("redis-server is not installed")
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    workdir = tmp_path_factory.mktemp("redis")
+    proc = subprocess.Popen(  # noqa: S603 - fixed local binary, fixed arguments
+        [
+            binary,
+            "--port",
+            str(port),
+            "--bind",
+            "127.0.0.1",
+            "--save",
+            "",
+            "--appendonly",
+            "no",
+            "--dir",
+            str(workdir),
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    url = f"redis://127.0.0.1:{port}/0"
+    import redis
+
+    client = redis.Redis.from_url(url)
+    for _ in range(100):
+        try:
+            client.ping()
+            break
+        except redis.RedisError:
+            time.sleep(0.05)
+    client.close()
+    yield url
+    proc.terminate()
+    proc.wait(timeout=10)
+
+
+@pytest.fixture
+def flushed_redis(redis_url: str) -> str:
+    import redis
+
+    client = redis.Redis.from_url(redis_url)
+    client.flushdb()
+    client.close()
+    return redis_url
 
 
 @pytest.fixture(scope="session")

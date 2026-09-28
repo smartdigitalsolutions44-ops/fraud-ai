@@ -30,10 +30,18 @@ dependencies = [
     "webauthn>=2.2",
     "prometheus-client>=0.20",
     "cryptography>=43",
+    # Stage 10 shared state (distributed rate limits and replay claims).
+    "redis>=5",
+    # Security floors for transitive dependencies (pip-audit, see HARDENING.md).
+    "idna>=3.15",
 ]
 
 [project.optional-dependencies]
 postgres = ["psycopg[binary]>=3.1"]
+# Stage 10: the Stripe (test-mode) payment-authentication adapter, official SDK only.
+stripe = ["stripe>=10", "urllib3>=2.7.0"]
+# Stage 10 security tooling (run in CI; see HARDENING.md).
+security = ["pip-audit>=2.7", "bandit>=1.7", "detect-secrets>=1.5", "cyclonedx-bom>=4"]
 dev = [
     "pytest>=8",
     "pytest-cov>=5",
@@ -70,10 +78,18 @@ select = ["E", "F", "W", "I", "B", "UP", "S", "SIM", "RUF"]
 ignore = ["S101", "S105"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S105", "S106", "S311"]
+"tests/**" = ["S105", "S106", "S107", "S311"]
 "fraud_ai/data/synthetic.py" = ["S311"]  # synthetic data uses a seeded PRNG by design
 "scripts/**" = ["S311"]
 "migrations/**" = ["E501"]
+
+[tool.bandit]
+# Only justified, narrow exclusions (see HARDENING.md, "Static analysis"). Individual
+# findings that are false positives are marked inline with `# nosec <id>` and a reason.
+exclude_dirs = ["tests", "migrations", "scripts"]
+skips = [
+    "B101", # assert: used for internal invariants; never for input validation or auth
+]
 
 [tool.mypy]
 python_version = "3.11"

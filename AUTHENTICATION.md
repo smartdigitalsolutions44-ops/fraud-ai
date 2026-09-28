@@ -1,4 +1,4 @@
-# Step-up authentication (Stage 9)
+# Step-up authentication (Stages 9-10)
 
 Stage 8 decides *whether* extra authentication is needed: a `STEP_UP_AUTHENTICATION`
 assessment. Stage 9 *executes* the step-up through one of two standard mechanisms, records
@@ -9,7 +9,9 @@ the result and issues a **new, immutable follow-up assessment**.
 >   implement 3-D Secure, and it never sees, stores or asks for a PAN, CVV, PIN or track
 >   data.
 > * Payment authentication is **requested from an external provider** through an
->   adapter. The only bundled provider is a clearly labelled **development fake**.
+>   adapter. Two providers are bundled: a clearly labelled **development fake**, and
+>   (Stage 10) a **Stripe test-mode adapter** that has **never been run against Stripe**
+>   (§3).
 > * No custom cryptography: WebAuthn is verified by the maintained
 >   [py_webauthn](https://github.com/duo-labs/py_webauthn) library.
 > * Successful authentication is **additional evidence, not proof** that a transaction
@@ -159,8 +161,55 @@ It is deterministic, and the token-reference suffix chooses the outcome:
 | `-unavailable` | the provider errors |
 
 Every response carries `"note": "DEVELOPMENT FAKE - not 3-D Secure"`. Settings **refuse**
-the fake in staging and production. `simulate_callback()` produces the signed callback a
+the fake in production. Since Stage 10, staging accepts it only with
+`PAYMENT_AUTH_ALLOW_FAKE_IN_STAGING=true`; the staging stack sets that, and its
+documentation marks the provider as a fake. `simulate_callback()` produces the signed callback a
 provider would send, for tests and demos.
+
+### `StripePaymentAuthProvider`: Stripe TEST MODE (Stage 10)
+
+**Status: implemented, not exercised against Stripe.** The code targets the official
+`stripe` Python SDK (15.x) and Stripe's documented PaymentIntents and webhook APIs.
+
+* **Why untested:** no Stripe test-mode credentials were available.
+* **What is tested:** a stub client stands in for the API calls, and callback signatures
+  are generated and verified by the SDK's own `WebhookSignature`.
+* **What was not done:** no undocumented API was guessed, and no external call was faked
+  as a success.
+
+Enable it with:
+
+* `PAYMENT_AUTH_PROVIDER=stripe`;
+* `STRIPE_API_KEY` (`sk_test_`/`rk_test_` only; live keys are refused);
+* `PAYMENT_AUTH_WEBHOOK_SECRET`: the endpoint's `whsec_…` signing secret;
+* optionally, `STRIPE_RETURN_URL`.
+
+Install the extra with `pip install -e ".[stripe]"`.
+
+| Step | Behaviour |
+|---|---|
+| request | `PaymentIntent.create(amount, currency, payment_method=<pm_… token reference>, confirm=True, capture_method="manual", payment_method_options.card.request_three_d_secure="any")` with an idempotency key derived from the step-up reference. Nothing is captured. |
+| `requires_action` | `pending`; `next_action = {"type": "stripe_authentication", "payment_intent", "client_secret"}` for Stripe.js `handleNextAction`. The client secret is returned once, never stored or logged (log redaction masks `pi_…_secret_…`). |
+| `requires_capture` / `succeeded` (frictionless) or any other status | `pending` with `{"type": "wait", "stripe_status": …}`: only the signed webhook changes state |
+| `CardError` (decline) | `failed` |
+| network, API, rate-limit or other Stripe errors | provider **unavailable**, never an allow |
+| webhook | `Stripe-Signature` verified by the SDK (tolerance `SIGNATURE_MAX_AGE`). Terminal events: `payment_intent.amount_capturable_updated` and `.succeeded` authenticate; `.payment_failed` fails; `.canceled` cancels. Other events get 200 `{"accepted": false, "status": "ignored"}`, and nothing changes. |
+
+`tests/test_stripe_provider.py` covers:
+
+* the valid flow;
+* bad signature, expired, replayed and duplicate callbacks;
+* an unknown reference;
+* timeout and outage;
+* declines;
+* test-key enforcement.
+
+**Before relying on it:**
+
+1. Run it against a Stripe test account with Stripe's test cards (3DS-required,
+   frictionless, declined).
+2. Configure the webhook endpoint `/v1/callbacks/payment/stripe`.
+3. Repeat the callback tests with real deliveries.
 
 ### Timeouts and failures
 
@@ -174,13 +223,17 @@ provider would send, for tests and demos.
 
 In order:
 
+The steps below describe the HMAC scheme of the fake provider. The Stripe adapter uses
+`Stripe-Signature` through the SDK, then follows the same replay, reference and
+state-transition rules.
+
 1. `x-provider-id` must match the configured provider (`UNKNOWN_PROVIDER`).
 2. The HMAC-SHA256 signature (`x-provider-signature`, keyed by
    `PAYMENT_AUTH_WEBHOOK_SECRET`) must match, and the timestamp must be within
    `SIGNATURE_MAX_AGE` (`INVALID_SIGNATURE` / `EXPIRED_SIGNATURE`).
 3. The body must be well formed with a terminal status (`INVALID_CALLBACK`).
-4. **Replay.** The signature is stored, so the same callback again gets 401
-   `REPLAYED_SIGNATURE`.
+4. **Replay.** The signature is stored (or claimed in Redis with `STATE_BACKEND=redis`,
+   Stage 10), so the same callback again gets 401 `REPLAYED_SIGNATURE`.
 5. The provider reference must exist (404).
 6. **State transition.** Only `pending` → terminal is allowed. A second, newly signed
    callback for a completed request gets 409 `DUPLICATE_CALLBACK`.

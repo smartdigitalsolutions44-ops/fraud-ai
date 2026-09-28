@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import sys
+from datetime import UTC, datetime
 from typing import Any
 
-from fraud_ai.security.redaction import redact_text, redact_value
+from fraud_ai.security.redaction import redact_log_text, redact_value
 
 LOGGER_NAME = "fraud_ai"
 
@@ -29,7 +31,7 @@ class RedactingFilter(logging.Filter):
             record.args = tuple(_redact_arg(a) for a in _as_tuple(record.args))
             with contextlib.suppress(TypeError, ValueError):
                 message = str(record.msg) % record.args
-        record.msg = redact_text(message)
+        record.msg = redact_log_text(message)
         record.args = None
         return True
 
@@ -42,19 +44,51 @@ def _as_tuple(args: Any) -> tuple[Any, ...]:
 
 def _redact_arg(arg: Any) -> Any:
     if isinstance(arg, str):
-        return redact_text(arg)
+        return redact_log_text(arg)
     if isinstance(arg, dict):
         return {k: redact_value(str(k), v) for k, v in arg.items()}
     return arg
 
 
-def configure_logging(level: str = "INFO") -> logging.Logger:
+class JsonFormatter(logging.Formatter):
+    """One JSON object per line: time, level, logger and the (already redacted) message.
+    Messages that are themselves JSON (the Stage 8 decision logs) are embedded as objects."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        message = record.getMessage()
+        payload: dict[str, Any] = {
+            "ts": datetime.fromtimestamp(record.created, UTC).isoformat(timespec="milliseconds"),
+            "level": record.levelname,
+            "logger": record.name,
+        }
+        try:
+            parsed = json.loads(message) if message.startswith("{") else None
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, dict):
+            payload["event"] = parsed
+        else:
+            payload["message"] = message
+        if record.exc_info:
+            payload["exception"] = record.exc_info[0].__name__ if record.exc_info[0] else None
+        return json.dumps(payload, sort_keys=True, default=str)
+
+
+def configure_logging(level: str = "INFO", fmt: str = "text") -> logging.Logger:
     logger = logging.getLogger(LOGGER_NAME)
     logger.setLevel(level)
-    if not any(getattr(h, "_fraud_ai", False) for h in logger.handlers):
+    formatter: logging.Formatter = (
+        JsonFormatter()
+        if fmt == "json"
+        else logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    )
+    existing = [h for h in logger.handlers if getattr(h, "_fraud_ai", False)]
+    for handler in existing:
+        handler.setFormatter(formatter)
+    if not existing:
         handler = logging.StreamHandler(sys.stderr)
         handler._fraud_ai = True  # type: ignore[attr-defined]
-        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+        handler.setFormatter(formatter)
         handler.addFilter(RedactingFilter())
         logger.addHandler(handler)
     logger.propagate = True

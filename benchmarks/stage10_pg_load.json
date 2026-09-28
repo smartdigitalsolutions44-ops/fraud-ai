@@ -1,0 +1,491 @@
+{
+  "events_per_run": 576,
+  "kind": "pg_load_benchmark",
+  "note": "SYNTHETIC data, local 4-CPU machine, loopback; not an SLA",
+  "pool_sweep": [
+    {
+      "clients": 16,
+      "db_stage_ms_per_decision": {
+        "p50": 77.33,
+        "p95": 174.45,
+        "p99": 289.5
+      },
+      "error_rate": 0.0347,
+      "errors": [
+        "http_422",
+        "http_503"
+      ],
+      "label": "pool1_0",
+      "latency_ms_all": {
+        "p50": 105.01,
+        "p95": 1945.9,
+        "p99": 2457.66
+      },
+      "latency_ms_decisions": {
+        "p50": 199.8,
+        "p95": 2375.53,
+        "p99": 4098.65
+      },
+      "max_overflow": 0,
+      "peak_db_connections": 10,
+      "peak_lock_waits": 0,
+      "pool_ceiling": 8,
+      "pool_saturation": 1.25,
+      "pool_size": 1,
+      "pool_timeout": 2,
+      "redis_connected_clients": 9,
+      "requests": 576,
+      "requests_per_second": 49.2,
+      "seconds": 11.71,
+      "server_workers": 8,
+      "startup_seconds": 9.38,
+      "worker_cpu_seconds": [
+        3.43,
+        4.35,
+        3.77,
+        3.71,
+        3.68,
+        3.47,
+        3.67,
+        3.74
+      ],
+      "worker_rss_mb": [
+        853.2,
+        854.2,
+        852.6,
+        854.1,
+        852.3,
+        852.9,
+        852.2,
+        852.3
+      ]
+    },
+    {
+      "clients": 16,
+      "db_stage_ms_per_decision": {
+        "p50": 111.07,
+        "p95": 257.65,
+        "p99": 340.33
+      },
+      "error_rate": 0.0174,
+      "errors": [
+        "http_422",
+        "http_503"
+      ],
+      "label": "pool2_0",
+      "latency_ms_all": {
+        "p50": 87.41,
+        "p95": 545.86,
+        "p99": 2936.76
+      },
+      "latency_ms_decisions": {
+        "p50": 259.63,
+        "p95": 2889.65,
+        "p99": 4198.63
+      },
+      "max_overflow": 0,
+      "peak_db_connections": 10,
+      "peak_lock_waits": 1,
+      "pool_ceiling": 16,
+      "pool_saturation": 0.62,
+      "pool_size": 2,
+      "pool_timeout": 2,
+      "redis_connected_clients": 9,
+      "requests": 576,
+      "requests_per_second": 54.2,
+      "seconds": 10.62,
+      "server_workers": 8,
+      "startup_seconds": 9.4,
+      "worker_cpu_seconds": [
+        4.47,
+        2.94,
+        3.95,
+        3.64,
+        4.2,
+        2.86,
+        4.06,
+        3.83
+      ],
+      "worker_rss_mb": [
+        854.0,
+        853.2,
+        852.9,
+        853.5,
+        853.0,
+        853.6,
+        853.3,
+        853.6
+      ]
+    },
+    {
+      "clients": 16,
+      "db_stage_ms_per_decision": {
+        "p50": 163.04,
+        "p95": 393.02,
+        "p99": 585.65
+      },
+      "error_rate": 0.0,
+      "errors": [],
+      "label": "pool5_0",
+      "latency_ms_all": {
+        "p50": 107.13,
+        "p95": 530.87,
+        "p99": 3394.99
+      },
+      "latency_ms_decisions": {
+        "p50": 327.95,
+        "p95": 3367.03,
+        "p99": 4050.29
+      },
+      "max_overflow": 0,
+      "peak_db_connections": 10,
+      "peak_lock_waits": 0,
+      "pool_ceiling": 40,
+      "pool_saturation": 0.25,
+      "pool_size": 5,
+      "pool_timeout": 2,
+      "redis_connected_clients": 9,
+      "requests": 576,
+      "requests_per_second": 51.6,
+      "seconds": 11.16,
+      "server_workers": 8,
+      "startup_seconds": 9.0,
+      "worker_cpu_seconds": [
+        4.12,
+        3.8,
+        3.19,
+        4.01,
+        3.49,
+        3.55,
+        3.84,
+        3.67
+      ],
+      "worker_rss_mb": [
+        854.5,
+        853.3,
+        852.5,
+        854.3,
+        854.4,
+        854.6,
+        854.3,
+        854.1
+      ]
+    },
+    {
+      "clients": 16,
+      "db_stage_ms_per_decision": {
+        "p50": 160.23,
+        "p95": 365.34,
+        "p99": 492.85
+      },
+      "error_rate": 0.0,
+      "errors": [],
+      "label": "pool5_10",
+      "latency_ms_all": {
+        "p50": 104.98,
+        "p95": 578.36,
+        "p99": 3454.97
+      },
+      "latency_ms_decisions": {
+        "p50": 355.84,
+        "p95": 3423.95,
+        "p99": 3793.35
+      },
+      "max_overflow": 10,
+      "peak_db_connections": 10,
+      "peak_lock_waits": 1,
+      "pool_ceiling": 120,
+      "pool_saturation": 0.08,
+      "pool_size": 5,
+      "pool_timeout": 2,
+      "redis_connected_clients": 9,
+      "requests": 576,
+      "requests_per_second": 49.4,
+      "seconds": 11.66,
+      "server_workers": 8,
+      "startup_seconds": 9.12,
+      "worker_cpu_seconds": [
+        3.58,
+        3.95,
+        3.57,
+        3.65,
+        3.72,
+        3.68,
+        4.41,
+        4.15
+      ],
+      "worker_rss_mb": [
+        853.2,
+        854.7,
+        852.1,
+        853.2,
+        856.5,
+        851.5,
+        853.8,
+        855.2
+      ]
+    },
+    {
+      "clients": 16,
+      "db_stage_ms_per_decision": {
+        "p50": 153.89,
+        "p95": 423.52,
+        "p99": 573.01
+      },
+      "error_rate": 0.0,
+      "errors": [],
+      "label": "pool10_10",
+      "latency_ms_all": {
+        "p50": 107.04,
+        "p95": 507.64,
+        "p99": 3613.41
+      },
+      "latency_ms_decisions": {
+        "p50": 322.66,
+        "p95": 3608.64,
+        "p99": 3757.42
+      },
+      "max_overflow": 10,
+      "peak_db_connections": 10,
+      "peak_lock_waits": 0,
+      "pool_ceiling": 160,
+      "pool_saturation": 0.06,
+      "pool_size": 10,
+      "pool_timeout": 2,
+      "redis_connected_clients": 9,
+      "requests": 576,
+      "requests_per_second": 50.9,
+      "seconds": 11.32,
+      "server_workers": 8,
+      "startup_seconds": 10.23,
+      "worker_cpu_seconds": [
+        3.96,
+        3.77,
+        3.55,
+        3.65,
+        3.82,
+        3.78,
+        3.59,
+        3.95
+      ],
+      "worker_rss_mb": [
+        851.6,
+        853.1,
+        854.6,
+        854.4,
+        853.3,
+        852.5,
+        853.8,
+        853.3
+      ]
+    }
+  ],
+  "scaling": [
+    {
+      "clients": 1,
+      "db_stage_ms_per_decision": {
+        "p50": 52.73,
+        "p95": 62.35,
+        "p99": 72.37
+      },
+      "error_rate": 0.0,
+      "errors": [],
+      "label": "w1",
+      "latency_ms_all": {
+        "p50": 31.13,
+        "p95": 120.17,
+        "p99": 134.07
+      },
+      "latency_ms_decisions": {
+        "p50": 109.72,
+        "p95": 133.52,
+        "p99": 140.92
+      },
+      "max_overflow": 10,
+      "peak_db_connections": 3,
+      "peak_lock_waits": 0,
+      "pool_ceiling": 15,
+      "pool_saturation": 0.2,
+      "pool_size": 5,
+      "pool_timeout": 30,
+      "redis_connected_clients": 2,
+      "requests": 576,
+      "requests_per_second": 20.4,
+      "seconds": 28.3,
+      "server_workers": 1,
+      "startup_seconds": 4.71,
+      "worker_cpu_seconds": [],
+      "worker_rss_mb": []
+    },
+    {
+      "clients": 4,
+      "db_stage_ms_per_decision": {
+        "p50": 69.05,
+        "p95": 109.75,
+        "p99": 165.8
+      },
+      "error_rate": 0.0,
+      "errors": [],
+      "label": "w4",
+      "latency_ms_all": {
+        "p50": 42.39,
+        "p95": 164.19,
+        "p99": 227.57
+      },
+      "latency_ms_decisions": {
+        "p50": 142.41,
+        "p95": 202.82,
+        "p99": 1641.05
+      },
+      "max_overflow": 10,
+      "peak_db_connections": 6,
+      "peak_lock_waits": 0,
+      "pool_ceiling": 60,
+      "pool_saturation": 0.1,
+      "pool_size": 5,
+      "pool_timeout": 30,
+      "redis_connected_clients": 5,
+      "requests": 576,
+      "requests_per_second": 45.5,
+      "seconds": 12.65,
+      "server_workers": 4,
+      "startup_seconds": 5.66,
+      "worker_cpu_seconds": [
+        5.89,
+        6.18,
+        5.71,
+        6.49
+      ],
+      "worker_rss_mb": [
+        853.3,
+        852.9,
+        852.3,
+        853.5
+      ]
+    },
+    {
+      "clients": 8,
+      "db_stage_ms_per_decision": {
+        "p50": 92.7,
+        "p95": 270.73,
+        "p99": 349.54
+      },
+      "error_rate": 0.0,
+      "errors": [],
+      "label": "w8",
+      "latency_ms_all": {
+        "p50": 63.86,
+        "p95": 262.07,
+        "p99": 2875.94
+      },
+      "latency_ms_decisions": {
+        "p50": 181.76,
+        "p95": 2863.56,
+        "p99": 3399.81
+      },
+      "max_overflow": 10,
+      "peak_db_connections": 10,
+      "peak_lock_waits": 0,
+      "pool_ceiling": 120,
+      "pool_saturation": 0.08,
+      "pool_size": 5,
+      "pool_timeout": 30,
+      "redis_connected_clients": 9,
+      "requests": 576,
+      "requests_per_second": 42.8,
+      "seconds": 13.46,
+      "server_workers": 8,
+      "startup_seconds": 10.71,
+      "worker_cpu_seconds": [
+        4.64,
+        4.51,
+        4.54,
+        4.09,
+        4.36,
+        5.17,
+        4.76,
+        3.92
+      ],
+      "worker_rss_mb": [
+        852.1,
+        852.7,
+        853.6,
+        852.1,
+        852.5,
+        855.4,
+        852.5,
+        851.2
+      ]
+    },
+    {
+      "clients": 16,
+      "db_stage_ms_per_decision": {
+        "p50": 120.29,
+        "p95": 520.63,
+        "p99": 707.7
+      },
+      "error_rate": 0.0,
+      "errors": [],
+      "label": "w16",
+      "latency_ms_all": {
+        "p50": 93.92,
+        "p95": 828.66,
+        "p99": 7175.33
+      },
+      "latency_ms_decisions": {
+        "p50": 262.21,
+        "p95": 7117.9,
+        "p99": 7733.18
+      },
+      "max_overflow": 10,
+      "peak_db_connections": 18,
+      "peak_lock_waits": 1,
+      "pool_ceiling": 240,
+      "pool_saturation": 0.07,
+      "pool_size": 5,
+      "pool_timeout": 30,
+      "redis_connected_clients": 17,
+      "requests": 576,
+      "requests_per_second": 33.9,
+      "seconds": 17.02,
+      "server_workers": 16,
+      "startup_seconds": 20.61,
+      "worker_cpu_seconds": [
+        3.19,
+        2.9,
+        3.43,
+        3.64,
+        3.74,
+        2.68,
+        3.45,
+        3.43,
+        3.55,
+        3.06,
+        3.53,
+        3.06,
+        2.92,
+        3.45,
+        3.42,
+        3.01
+      ],
+      "worker_rss_mb": [
+        852.4,
+        851.5,
+        851.9,
+        853.3,
+        851.0,
+        851.3,
+        852.3,
+        852.4,
+        851.2,
+        851.9,
+        852.2,
+        851.4,
+        850.4,
+        852.1,
+        852.4,
+        852.4
+      ]
+    }
+  ]
+}

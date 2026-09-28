@@ -26,7 +26,7 @@ RISK_FLAGS = {
     "new_device": "The event came from a device new to this account",
     "new_address": "The shipping address is new to this account",
     "new_payment_method": "The payment method is new to this account",
-    "recent_password_reset": "A password reset happened shortly before",
+    "recent_password_reset": "A password reset happened shortly before",  # nosec B105
     "recent_email_change": "The account email was changed recently",
     "recent_phone_change": "The account phone number was changed recently",
     "recent_mfa_removed": "Multi-factor authentication was removed recently",
@@ -48,7 +48,7 @@ QUESTIONS = {
     "new_device": "Was this device previously verified by the customer?",
     "new_address": "Was the address change expected by the customer?",
     "address_changed_recently": "Was the address change expected by the customer?",
-    "recent_password_reset": "Was the password reset initiated by the customer?",
+    "recent_password_reset": "Was the password reset initiated by the customer?",  # nosec B105
     "recent_email_change": "Did the customer request the email change?",
     "vpn_detected": "Is VPN use usual for this customer?",
     "transaction_vs_median_ratio": "Does the transaction amount fit the customer's prior "

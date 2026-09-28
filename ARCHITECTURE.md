@@ -488,7 +488,48 @@ merchant backend ─TLS─► proxy ─► ServiceMiddleware (correlation id, si
 * **SQLite write lock.** SQLite writers share one process-wide lock per engine
   (`database.engine.write_lock`); PostgreSQL relies on the unique constraints.
 
-## 16. Extending the platform
+## 16. Deployment hardening (Stage 10)
+
+Summary; the details and measurements are in [HARDENING.md](HARDENING.md).
+
+```
+worker 1..N ─┬─► PostgreSQL  durable: events, assessments, reviews, labels, policies,
+             │               deployments, lifecycle events, model registry, API keys,
+             │               audit_events (hash chain, UPDATE/DELETE refused by triggers)
+             ├─► Redis        short-lived only: rate-limit buckets (Lua token bucket),
+             │               replay claims (SET NX PX), locks; errors → 503 (fail closed)
+             └─► models (ro)  SHA-256-verified before load; per-worker cache
+```
+
+**Packages:**
+
+* `fraud_ai/state/`: `SharedState` with `MemoryState` and `RedisState`.
+* `fraud_ai/audit.py`: the hash-chained audit log.
+* `fraud_ai/retention.py`: retention jobs over short-lived records only.
+* `fraud_ai/risk/promotion.py`: shadow → evaluation → candidate, with activation gated in
+  staging and production.
+* `fraud_ai/config/secrets.py`: `*_FILE` secrets.
+* `fraud_ai/service/startup.py`: fail-closed start-up in every worker, model warm-up, and
+  the configuration audit.
+* `fraud_ai/stepup/stripe_provider.py`: the Stripe test-mode adapter (not exercised
+  against Stripe).
+
+**Migration `0008`:**
+
+* API-key `expires_at`, `last_used_at` and `rotated_from_key_id`;
+* `policy_deployments.activated_by`;
+* the `audit_events` table, with its immutability triggers;
+* the `policy_lifecycle_events` table.
+
+**Invariants added:**
+
+* Durable history never lives in Redis.
+* No failure mode allows. The matrix is in HARDENING.md §8.
+* The active and shadow models of a deployment share one feature version.
+* Retention never touches assessments, labels, reviews, model or policy history, or the
+  audit log.
+
+## 17. Extending the platform
 
 * **New model:** add a `ModelSpec`, or a new `FraudModel` implementation registered in
   `fraud_ai/models/factory.py`. Train it on the same prepared split as the baselines, then

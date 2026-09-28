@@ -1,9 +1,9 @@
 """Rate limiting per API key and route group (never per client IP as an identity).
 
 :class:`RateLimiter` is the interface. :class:`InMemoryRateLimiter` is a thread-safe token
-bucket for a single process. A multi-instance deployment would supply a shared
-implementation, for example Redis ``INCR``/Lua over the same interface. Nothing else in
-the service changes.
+bucket for a single process. :class:`SharedStateRateLimiter` keeps the bucket in the
+shared state (Stage 10): with ``STATE_BACKEND=redis`` the limit is global across uvicorn
+workers and instances.
 
 A bucket holds ``burst`` tokens and refills at ``count / period`` tokens per second. For
 example, ``RATE_LIMIT=120/minute`` with ``RATE_LIMIT_BURST=30`` gives a sustained 2
@@ -16,15 +16,9 @@ import math
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
 from typing import Protocol
 
-
-@dataclass(frozen=True)
-class RateDecision:
-    allowed: bool
-    retry_after: int  # seconds; 0 when allowed
-    remaining: int
+from fraud_ai.state.base import RateDecision, SharedState
 
 
 class RateLimiter(Protocol):
@@ -68,3 +62,25 @@ class InMemoryRateLimiter:
             for key in full or list(self._buckets)[: max(1, self.MAX_BUCKETS // 10)]:
                 del self._buckets[key]
         self._buckets[bucket] = (tokens, now)
+
+
+class SharedStateRateLimiter:
+    """A token bucket held in :class:`~fraud_ai.state.base.SharedState`.
+
+    With the Redis backend, one atomic script per request makes the limit global across
+    workers and instances. Backend errors propagate as ``StateUnavailableError`` and the
+    caller refuses the request (fail closed).
+    """
+
+    def __init__(
+        self, state: SharedState, count: int, period: float, burst: int, *, prefix: str
+    ) -> None:
+        self.state = state
+        self.rate = count / period
+        self.capacity = float(max(1, burst))
+        self.prefix = prefix
+
+    def hit(self, bucket: str) -> RateDecision:
+        return self.state.token_bucket(
+            f"{self.prefix}:{bucket}", rate=self.rate, capacity=self.capacity
+        )

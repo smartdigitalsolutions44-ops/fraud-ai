@@ -43,6 +43,14 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 
+def _sqlite_manual_transactions(dbapi_connection: Any, _record: Any) -> None:
+    dbapi_connection.isolation_level = None
+
+
+def _sqlite_begin(connection: Any) -> None:
+    connection.exec_driver_sql("BEGIN")
+
+
 def run_migrations_online() -> None:
     url = config.get_main_option("sqlalchemy.url")
     assert url is not None
@@ -59,6 +67,11 @@ def run_migrations_online() -> None:
         # dropping a table other tables reference would fail, so it is disabled for the
         # migration and integrity is verified explicitly afterwards.
         event.listen(connectable, "connect", _disable_sqlite_foreign_keys)
+        # pysqlite autocommits DDL, so a failing revision would leave a half-applied
+        # schema. SQLAlchemy's documented recipe: let SQLAlchemy emit BEGIN itself, so the
+        # whole upgrade (DDL included) is one real transaction that rolls back on error.
+        event.listen(connectable, "connect", _sqlite_manual_transactions)
+        event.listen(connectable, "begin", _sqlite_begin)
     with connectable.connect() as connection:
         context.configure(
             connection=connection,

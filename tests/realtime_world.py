@@ -34,6 +34,33 @@ PSEUDO = Pseudonymiser(TEST_KEY.encode())
 def build_world(root: Path, template: Path) -> Path:
     shutil.copy(template, root / "w.db")
     engine = create_db_engine(f"sqlite:///{root / 'w.db'}")
+    _populate(engine, root)
+    return root
+
+
+def schema_url(base_url: str, schema: str) -> str:
+    """A PostgreSQL URL whose connections use ``schema`` (isolated from other tests)."""
+    sep = "&" if "?" in base_url else "?"
+    return f"{base_url}{sep}options=-csearch_path%3D{schema}"
+
+
+def build_pg_world(base_url: str, schema: str, root: Path) -> str:
+    """The same world on PostgreSQL, in its own schema. Returns the schema URL."""
+    from fraud_ai.database.migrations import upgrade
+
+    admin = create_db_engine(base_url)
+    with admin.begin() as conn:
+        conn.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+        conn.execute(text(f'CREATE SCHEMA "{schema}"'))
+    admin.dispose()
+    url = schema_url(base_url, schema)
+    upgrade(url)
+    engine = create_db_engine(url)
+    _populate(engine, root)
+    return url
+
+
+def _populate(engine: Engine, root: Path) -> None:
     factory = make_session_factory(engine)
     with session_scope(factory) as s:
         holdout = seed_with_live_holdout(
@@ -59,7 +86,6 @@ def build_world(root: Path, template: Path) -> Path:
         create_policy(s, second.definition, derivation=second.derivation)
         activate(s, P1, shadow_models=[LR], shadow_policies=[P2], note="test world")
     engine.dispose()
-    return root
 
 
 @dataclass

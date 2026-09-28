@@ -27,6 +27,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
+from fraud_ai import audit
 from fraud_ai.core.enums import AuthenticationMethod, Decision, ReviewStatus
 from fraud_ai.core.exceptions import FraudAIError
 from fraud_ai.database.engine import session_scope, write_scope
@@ -76,6 +77,7 @@ from fraud_ai.service.schemas import (
     WebAuthnVerifyRequest,
 )
 from fraud_ai.service.signatures import SignatureError
+from fraud_ai.state.base import StateUnavailableError
 from fraud_ai.stepup import payment as payment_ops
 from fraud_ai.stepup import webauthn as webauthn_ops
 from fraud_ai.stepup.outcomes import (
@@ -318,6 +320,13 @@ async def score(
         )
     if outcome.decision is not None:
         c.metrics.decisions.labels(outcome.decision.value).inc()
+        if outcome.status == "decided":
+            c.metrics.policy_decisions.labels(
+                outcome.policy_version or "none", outcome.decision.value
+            ).inc()
+    if outcome.fallback_used and outcome.status == "decided":
+        first = outcome.failures[0]["category"] if outcome.failures else "fallback"
+        c.metrics.fallbacks.labels(first).inc()
     return JSONResponse(body, status)
 
 
@@ -467,6 +476,14 @@ def resolve_review(
     with write_scope(c.factory) as session:
         try:
             review_ops.resolve(session, review_id, body.resolution, note=body.note, now=c.clock())
+            audit.record(
+                session,
+                "review.resolved",
+                actor=audit.api_actor(caller.key_id),
+                target_type="review",
+                target_id=str(review_id),
+                details={"resolution": body.resolution.value, "via": "api"},
+            )
         except review_ops.ReviewError as exc:
             message = str(exc)
             if message.startswith("no review item"):
@@ -695,7 +712,12 @@ async def payment_callback(provider_name: str, request: Request) -> CallbackAck:
     c = container_of(request)
     if c.payment is None or provider_name != c.payment.name:
         raise ApiError(404, "NOT_FOUND", "no such provider")
-    decision = c.limiter.hit(f"callback|{provider_name}")
+    try:
+        decision = c.limiter.hit(f"callback|{provider_name}")
+    except StateUnavailableError:
+        raise ApiError(
+            503, "STATE_UNAVAILABLE", "rate limiter unavailable", headers={"Retry-After": "1"}
+        ) from None
     if not decision.allowed:
         raise ApiError(
             429, "RATE_LIMITED", "rate limited", headers={"Retry-After": str(decision.retry_after)}
@@ -721,6 +743,8 @@ async def payment_callback(provider_name: str, request: Request) -> CallbackAck:
                 raise ApiError(401, exc.code, str(exc)) from None
             except StepUpError as exc:
                 raise _stepup_error(exc) from None
+            except payment_ops.CallbackIgnoredError:
+                return CallbackAck(accepted=False, status="ignored", result=None)
             if outcome.result is not None:
                 c.metrics.stepup.labels("payment_authentication", outcome.result.value).inc()
             return CallbackAck(
@@ -805,6 +829,13 @@ def metrics(
     request: Request, caller: Annotated[Caller, Depends(require("metrics:read"))]
 ) -> Response:
     c = container_of(request)
+    stats = c.scoring.cache.stats
+    c.metrics.model_loads.set(stats.loads)
+    c.metrics.model_load_failures.set(stats.load_failures)
+    pool = c.engine.pool
+    checked_out = getattr(pool, "checkedout", None)
+    if callable(checked_out):
+        c.metrics.db_pool_checked_out.set(checked_out())
     try:
         with c.factory() as session:
             for status, count in review_ops.queue_size(session).items():

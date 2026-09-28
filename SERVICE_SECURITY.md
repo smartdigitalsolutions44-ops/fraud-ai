@@ -1,8 +1,11 @@
-# Service security (Stage 9)
+# Service security (Stages 9-10)
 
 This document describes how the HTTP boundary protects the fraud engine and what it
 deliberately does **not** claim. It is a research system on synthetic data. It is not
 production-ready, not penetration-tested, not certified and not PCI-assessed.
+
+Stage 10 additions are summarised here. The details, measurements and remaining risks are
+in [HARDENING.md](HARDENING.md) and [THREAT_MODEL.md](THREAT_MODEL.md).
 
 ## 1. Threat model (summary)
 
@@ -37,10 +40,17 @@ production-ready, not penetration-tested, not certified and not PCI-assessed.
     not reveal which ids exist;
   * missing, malformed, unknown, wrong and revoked keys all get the identical 401
     `UNAUTHENTICATED` with `WWW-Authenticate: Bearer`.
-* **Lifecycle:** `fraud-ai service-key create --name N --scope S …` prints the credential
-  **once**. `service-key list` shows ids, scopes and status, never secrets.
-  `service-key revoke <key-id>` takes effect on the next request (keys are checked
-  against the database on every request).
+* **Lifecycle:** `fraud-ai service-key create --name N --scope S … [--expires-in-days D]`
+  prints the credential **once**.
+  * `service-key list` shows ids, scopes, status (`active`/`expired`/`revoked`), expiry,
+    last use and rotation parent, never secrets.
+  * `service-key revoke <key-id>` takes effect on the next request (keys are checked
+    against the database on every request).
+  * `service-key rotate <key-id>` (Stage 10) issues a successor and expires the old key
+    after `SERVICE_KEY_ROTATION_GRACE_HOURS`. The old secret is never shown again.
+  * Create, revoke and rotate are written to the audit log.
+* **Expiry (Stage 10):** an expired key gets exactly the same 401 as an unknown or revoked
+  one; the reason is never disclosed. `last_used_at` is updated at most once a minute.
 * **Logging:** the credential and the signing secret never appear in logs, errors or
   metrics. This is tested with `caplog` over key creation, valid, invalid and replayed
   requests.
@@ -69,6 +79,13 @@ Give a checkout backend `score:write assessment:read stepup:write` and nothing m
 * **Per-key signing secret:** `HMAC-SHA256(SERVICE_SIGNING_MASTER_KEY, "fraud-ai-signing:"
   + key_id)`. It is recomputable by the server and never stored. Rotating the master key
   rotates every signing secret.
+* **Key versions (Stage 10):**
+  * `SERVICE_SIGNING_KEY_VERSION` names the current master key;
+  * `SERVICE_SIGNING_PREVIOUS_KEY` (with its version and expiry) stays valid during a
+    rotation grace period;
+  * clients may send `X-Fraud-Key-Version`;
+  * `fraud_api_signatures_verified_total{key_version}` shows when old-key traffic stops;
+  * signatures required but no key configured gives 503 `SIGNING_UNAVAILABLE`.
 * **Enforcement:**
   * `SERVICE_REQUIRE_SIGNATURES=true` makes signatures mandatory;
   * otherwise they are verified whenever the headers are present, so a bad signature is
@@ -83,6 +100,11 @@ Give a checkout backend `score:write assessment:read stepup:write` and nothing m
   * a replay fails even if the first request later errored;
   * two concurrent replays cannot both pass (tested on SQLite and PostgreSQL);
   * expired tokens are pruned on insert.
+  * **Stage 10:** with `STATE_BACKEND=redis`, the claim is an atomic Redis `SET NX` shared
+    by every worker and instance, so exactly one accepts a signature. A Redis failure
+    gives 503 `STATE_UNAVAILABLE`, never acceptance.
+* **Known gap:** v1 does not sign the method or path. Reuse on another route is prevented
+  by the single-use claim; a v2 scheme is planned (THREAT_MODEL.md T3).
 
 ## 4. Rate limiting and request limits
 
@@ -93,8 +115,9 @@ Give a checkout backend `score:write assessment:read stepup:write` and nothing m
   throttles repeated authentication *failures* (abuse control).
 * **Deployment scope:**
   * `InMemoryRateLimiter` is per process;
-  * the `RateLimiter` protocol takes a shared implementation (for example Redis) for
-    multi-instance deployments without code changes elsewhere.
+  * **Stage 10:** `SharedStateRateLimiter` over Redis (an atomic Lua token bucket using
+    the server clock) shares buckets across workers and instances;
+  * staging and production refuse several workers without it.
 * **Request limits:**
   * `REQUEST_SIZE_LIMIT` (default 64 KiB). A `Content-Length` over it is refused before
     reading. Streamed or chunked bodies are counted and cut off. Both give 413.
@@ -168,6 +191,12 @@ Give a checkout backend `score:write assessment:read stepup:write` and nothing m
 | payment provider down or timeout (`PAYMENT_AUTH_TIMEOUT`) | an `UNAVAILABLE` attempt; `authentication_unavailable`; review once attempts are exhausted |
 | WebAuthn verification error | a `FAILED` attempt (never silent success) |
 | LLM missing, down or slow | 503 `LLM_UNAVAILABLE` / 504 on the investigate endpoint only |
+| database down before scoring (auth, idempotency) or pool exhausted (Stage 10) | 503 `DATABASE_UNAVAILABLE`, sanitised, with `Retry-After` |
+| Redis down with `STATE_BACKEND=redis` (Stage 10) | 503 `STATE_UNAVAILABLE` |
+| signatures required, no signing key (Stage 10) | 503 `SIGNING_UNAVAILABLE` |
+| invalid configuration or failed readiness at start-up (Stage 10) | the worker refuses to start |
+
+The full fail-closed matrix is in [HARDENING.md](HARDENING.md) §8.
 
 **SQLite concurrency.** SQLite has one writer. The service serialises every write on the
 engine's process-wide write lock, shared with the Stage 8 scorer, which avoids SQLite's
@@ -177,20 +206,31 @@ decide races.
 
 ## 9. Secrets and configuration
 
-Production secrets come only from the environment or a secret manager. No secret has a
-default.
+Production secrets come only from the environment, from files (`NAME_FILE`, Stage 10),
+or from a secret manager. No secret has a default.
 
 | Secret | Notes |
 |---|---|
 | `PSEUDONYMISATION_KEY` | required outside development/test |
 | `SERVICE_SIGNING_MASTER_KEY` | at least 32 characters |
 | `PAYMENT_AUTH_WEBHOOK_SECRET` | at least 32 characters; required with a provider |
+| `SERVICE_SIGNING_PREVIOUS_KEY` | rotation only; needs a version and an expiry |
+| `STRIPE_API_KEY` | test-mode keys only (`sk_test_`/`rk_test_`) |
+| `REDIS_URL`, `DATABASE_URL` | treated as secrets (they carry passwords) |
 
 Staging and production refuse:
 
-* the fake payment provider;
+* the fake payment provider (staging may opt in with
+  `PAYMENT_AUTH_ALLOW_FAKE_IN_STAGING=true`; production never);
 * a non-https `WEBAUTHN_ORIGIN` (the service refuses to start; batch and CLI jobs are unaffected);
-* SQLite.
+* SQLite;
+* **Stage 10:**
+  * default- or placeholder-looking secrets and database/Redis passwords;
+  * CORS `*` or non-https origins;
+  * several workers with per-process state.
+* **Stage 10, production only:**
+  * the reference LLM template (unless `ALLOW_REFERENCE_LLM`);
+  * unsigned requests.
 
 The Docker image contains no secrets, `.env` files, databases, models or LLM weights.
 
@@ -198,11 +238,10 @@ The Docker image contains no secrets, `.env` files, databases, models or LLM wei
 
 * **Not in scope yet:**
   * no mTLS between merchant and service;
-  * no key expiry dates or automatic rotation;
+  * no *automatic* key rotation (expiry and `rotate` exist since Stage 10);
   * no per-tenant data isolation (one tenant per deployment);
-  * in-memory rate limits are per process;
   * no WAF or bot protection.
-* **Records not yet pruned:** idempotency rows and step-up records have no retention job
-  yet (Stage 11).
+* **Retention:** short-lived records have opt-in retention jobs since Stage 10
+  (HARDENING.md §9). Core records have no retention policy.
 * **Assurance:** the security tests are unit and integration tests, not a penetration
   test. No compliance certification (PCI DSS, SOC 2, …) is claimed.

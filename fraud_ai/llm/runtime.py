@@ -26,7 +26,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import shutil
-import subprocess
+import subprocess  # nosec B404 - llama.cpp runtime; argv list, no shell
 import time
 import urllib.error
 import urllib.request
@@ -352,7 +352,7 @@ class LlamaCppProcessClient:
         ]
         started = time.perf_counter()
         try:
-            completed = subprocess.run(  # noqa: S603 - fixed argv, no shell
+            completed = subprocess.run(  # nosec B603 # noqa: S603 - fixed argv, no shell
                 command,
                 capture_output=True,
                 text=True,

@@ -1,0 +1,85 @@
+# EXAMPLE Prometheus alerting rules for fraud-ai (Stage 10). Thresholds are illustrative
+# starting points on SYNTHETIC traffic; tune them on real traffic before relying on them.
+# Metric names match fraud_ai/service/metrics.py (counters are exported with _total).
+groups:
+  - name: fraud-ai-availability
+    rules:
+      - alert: FraudAIReadinessFailing
+        # Blackbox/probe job scraping /v1/ready (probe_success from blackbox_exporter).
+        expr: probe_success{job="fraud-ai-ready"} == 0
+        for: 2m
+        labels: { severity: page }
+        annotations:
+          summary: "fraud-ai readiness failing (database, migrations, policy, model, Redis or signing key)"
+          runbook: "DISASTER_RECOVERY.md; check `fraud-ai service status`"
+
+      - alert: FraudAIDatabaseErrorSpike
+        expr: sum(rate(fraud_api_requests_total{status="503"}[5m])) / sum(rate(fraud_api_requests_total[5m])) > 0.02
+        for: 5m
+        labels: { severity: page }
+        annotations:
+          summary: "more than 2% of requests are 503 (database/pool/scoring unavailable)"
+
+      - alert: FraudAIRedisErrorSpike
+        expr: sum(rate(fraud_state_errors_total[5m])) > 0 or sum(rate(fraud_api_state_unavailable_total[5m])) > 0
+        for: 2m
+        labels: { severity: page }
+        annotations:
+          summary: "shared state (Redis) errors; requests are being refused (fail closed)"
+
+  - name: fraud-ai-decisions
+    rules:
+      - alert: FraudAIFallbackRateSpike
+        expr: sum(rate(fraud_api_fallbacks_total[15m])) / clamp_min(sum(rate(fraud_api_decisions_total[15m])), 1e-9) > 0.05
+        for: 15m
+        labels: { severity: ticket }
+        annotations:
+          summary: "more than 5% of decisions used a conservative fallback (model/feature/policy failure)"
+
+      - alert: FraudAIManualReviewBacklog
+        expr: max(fraud_api_review_queue{status="open"}) > 500
+        for: 30m
+        labels: { severity: ticket }
+        annotations:
+          summary: "open manual-review backlog above 500 items"
+
+      - alert: FraudAIUnexpectedDecisionRateChange
+        # Share of STEP_UP + MANUAL_REVIEW + TEMPORARY_BLOCK now vs the same hour last week.
+        expr: |
+          (
+            sum(rate(fraud_api_policy_decisions_total{decision=~"STEP_UP_AUTHENTICATION|MANUAL_REVIEW|TEMPORARY_BLOCK"}[1h]))
+            / clamp_min(sum(rate(fraud_api_policy_decisions_total[1h])), 1e-9)
+          )
+          /
+          clamp_min(
+            sum(rate(fraud_api_policy_decisions_total{decision=~"STEP_UP_AUTHENTICATION|MANUAL_REVIEW|TEMPORARY_BLOCK"}[1h] offset 1w))
+            / clamp_min(sum(rate(fraud_api_policy_decisions_total[1h] offset 1w)), 1e-9),
+            1e-9
+          ) > 2
+        for: 1h
+        labels: { severity: ticket }
+        annotations:
+          summary: "the intervention rate doubled versus last week (policy, model or traffic change)"
+
+  - name: fraud-ai-security
+    rules:
+      - alert: FraudAISignatureFailuresSpike
+        expr: sum(rate(fraud_api_signature_failures_total[5m])) > 1
+        for: 10m
+        labels: { severity: ticket }
+        annotations:
+          summary: "sustained signature failures (clock skew, a broken integration, or replay attempts)"
+
+      - alert: FraudAIAuthFailuresSpike
+        expr: sum(rate(fraud_api_auth_failures_total[5m])) > 5
+        for: 10m
+        labels: { severity: ticket }
+        annotations:
+          summary: "sustained authentication failures (a leaked or revoked key in use?)"
+
+      - alert: FraudAIModelArtifactVerificationFailure
+        expr: increase(fraud_model_verification_failures_total[10m]) > 0 or max(fraud_model_cache_load_failures) > 0
+        labels: { severity: page }
+        annotations:
+          summary: "a model artefact failed SHA-256 verification or loading (tampering or corruption)"
+          runbook: "DISASTER_RECOVERY.md, 'Model artefact loss'"

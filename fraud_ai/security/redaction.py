@@ -96,10 +96,44 @@ def _is_pan(candidate: str) -> bool:
     return 13 <= len(digits) <= 19 and luhn_valid(digits)
 
 
+# Stage 10 log hardening: credentials and references that must never reach a log line.
+_TEXT_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
+    # Service API credentials: keep the public key id, drop the secret.
+    (re.compile(r"\b(fak_[0-9a-f]{16})\.[A-Za-z0-9_-]{8,}"), rf"\1.{REDACTED}"),
+    (re.compile(r"(?i)\b(bearer)\s+[A-Za-z0-9._~+/=-]{8,}"), rf"\1 {REDACTED}"),
+    # Request/callback signatures.
+    (re.compile(r"\bv1=[0-9a-f]{64}\b"), f"v1={REDACTED}"),
+    # Provider secrets and client secrets (e.g. Stripe sk_/rk_/whsec_, *_secret_*).
+    (re.compile(r"\b(?:sk|rk|whsec)_(?:test_|live_)?[A-Za-z0-9]{8,}"), REDACTED),
+    (re.compile(r"\b(?:pi|seti)_[A-Za-z0-9]+_secret_[A-Za-z0-9]+"), REDACTED),
+    # Payment instrument tokens (references to cards held by the processor).
+    (re.compile(r"\b(?:tok|pm|src|card)_[A-Za-z0-9]{6,}"), REDACTED),
+    # Passwords embedded in URLs (database / redis).
+    (re.compile(r"(\b[a-z][a-z0-9+.-]*://[^:/@\s]*:)[^@\s]+@"), rf"\1{REDACTED}@"),
+    # Raw IPv4 addresses (personal data); IPv6 is not pattern-matched (too ambiguous).
+    (
+        re.compile(
+            r"(?<![\d.])(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)(?![\d.])"
+        ),
+        "[REDACTED-IP]",
+    ),
+)
+
+
 def redact_text(text: str) -> str:
-    """Redact card numbers and ``key=value`` secrets appearing in free text."""
+    """Redact card numbers and ``key=value`` secrets appearing in free text (also used on
+    stored metadata, so it deliberately stays narrow)."""
     text = _PAN_CANDIDATE.sub(lambda m: REDACTED if _is_pan(m.group(0)) else m.group(0), text)
     return _KV_SECRET.sub(lambda m: f"{m.group(1)}{m.group(2)}{REDACTED}", text)
+
+
+def redact_log_text(text: str) -> str:
+    """:func:`redact_text` plus the Stage 10 log rules: API credentials, bearer tokens,
+    signatures, provider secrets, payment tokens, URL passwords and raw IPv4 addresses.
+    Used for log lines and audit details, never on stored business data."""
+    for pattern, replacement in _TEXT_RULES:
+        text = pattern.sub(replacement, text)
+    return redact_text(text)
 
 
 def redact_value(key: str, value: Any) -> Any:

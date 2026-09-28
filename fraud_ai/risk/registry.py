@@ -198,10 +198,27 @@ def activate(
     shadow_models: list[str] | None = None,
     shadow_policies: list[str] | None = None,
     note: str | None = None,
+    activated_by: str | None = None,
+    require_promotion: bool = False,
 ) -> PolicyDeployment:
-    """Validate and append a deployment. It takes effect for events scored afterwards."""
+    """Validate and append a deployment. It takes effect for events scored afterwards.
+
+    Refused (Stage 10 safeguards included) when:
+
+    * a referenced model is missing, or its artefact fails verification;
+    * a model was trained on a different feature catalogue, or the models of the active
+      set disagree on the feature version (the service computes one vector per event);
+    * a calibration is missing, belongs to another model, or has other parameters;
+    * the rule set changed since the policy was created;
+    * ``require_promotion`` is set and the policy is not a promoted ``candidate``.
+    """
     definition = load_policy(session, version)
+    if require_promotion:
+        from fraud_ai.risk.promotion import ensure_activatable
+
+        ensure_activatable(session, version)
     validate_references(session, definition)
+    _check_feature_versions(session, definition, shadow_models or [])
     shadows = sorted(set(shadow_models or []))
     active_refs = {slot.ref for slot in definition.slots().values()}
     for ref in shadows:
@@ -230,10 +247,28 @@ def activate(
         shadow_policies=shadow_versions,
         config_sha256=_config_hash(version, shadows, shadow_versions),
         note=note,
+        activated_by=activated_by[:200] if activated_by else None,
     )
     session.add(row)
     session.flush()
     return row
+
+
+def _check_feature_versions(
+    session: Session, definition: RiskPolicyDefinition, shadow_models: list[str]
+) -> None:
+    primary = _record(session, definition.primary)
+    refs = [slot.ref for slot in definition.slots().values()] + list(shadow_models)
+    for ref in refs:
+        try:
+            record = resolve_model(session, ref)
+        except FraudAIError as exc:
+            raise PolicyError(str(exc)) from None
+        if record.feature_version != primary.feature_version:
+            raise PolicyError(
+                f"{ref} uses feature version {record.feature_version}, but the primary "
+                f"model uses {primary.feature_version}; the active set must share one"
+            )
 
 
 def active_deployment(session: Session) -> ActiveDeployment | None:

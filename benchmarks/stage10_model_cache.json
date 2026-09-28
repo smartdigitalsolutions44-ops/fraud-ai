@@ -1,0 +1,91 @@
+{
+  "cache_rss_mb_mean": 476.3,
+  "kind": "model_cache_benchmark",
+  "note": "fresh process per run; SYNTHETIC models; this machine",
+  "runs": [
+    {
+      "baseline_rss_mb": 172.9,
+      "cache_rss_mb": 476.3,
+      "loaded_rss_mb": 649.2,
+      "models": [
+        {
+          "artifact_bytes": 208752,
+          "model": "gradient-boosting-1.0.0",
+          "rss_delta_mb": 0.6,
+          "sha256_ms": 0.44,
+          "verified_load_ms": 18.31
+        },
+        {
+          "artifact_bytes": 40369,
+          "model": "gru-1.0.0",
+          "rss_delta_mb": 467.1,
+          "sha256_ms": 0.2,
+          "verified_load_ms": 1505.08
+        },
+        {
+          "artifact_bytes": 53558,
+          "model": "logistic-regression-1.0.0",
+          "rss_delta_mb": 0.2,
+          "sha256_ms": 0.18,
+          "verified_load_ms": 3.55
+        }
+      ]
+    },
+    {
+      "baseline_rss_mb": 172.9,
+      "cache_rss_mb": 476.3,
+      "loaded_rss_mb": 649.2,
+      "models": [
+        {
+          "artifact_bytes": 208752,
+          "model": "gradient-boosting-1.0.0",
+          "rss_delta_mb": 0.6,
+          "sha256_ms": 0.49,
+          "verified_load_ms": 13.87
+        },
+        {
+          "artifact_bytes": 40369,
+          "model": "gru-1.0.0",
+          "rss_delta_mb": 467.1,
+          "sha256_ms": 0.2,
+          "verified_load_ms": 1440.5
+        },
+        {
+          "artifact_bytes": 53558,
+          "model": "logistic-regression-1.0.0",
+          "rss_delta_mb": 0.3,
+          "sha256_ms": 0.21,
+          "verified_load_ms": 2.64
+        }
+      ]
+    },
+    {
+      "baseline_rss_mb": 172.9,
+      "cache_rss_mb": 476.4,
+      "loaded_rss_mb": 649.3,
+      "models": [
+        {
+          "artifact_bytes": 208752,
+          "model": "gradient-boosting-1.0.0",
+          "rss_delta_mb": 0.6,
+          "sha256_ms": 0.47,
+          "verified_load_ms": 14.0
+        },
+        {
+          "artifact_bytes": 40369,
+          "model": "gru-1.0.0",
+          "rss_delta_mb": 467.1,
+          "sha256_ms": 0.2,
+          "verified_load_ms": 1461.99
+        },
+        {
+          "artifact_bytes": 53558,
+          "model": "logistic-regression-1.0.0",
+          "rss_delta_mb": 0.2,
+          "sha256_ms": 0.19,
+          "verified_load_ms": 2.57
+        }
+      ]
+    }
+  ]
+}

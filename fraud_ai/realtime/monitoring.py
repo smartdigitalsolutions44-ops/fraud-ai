@@ -253,9 +253,16 @@ def shadow_report(session: Session, *, since: datetime | None = None) -> dict[st
         for item in r.shadow.get("models", []):
             m = models.setdefault(
                 item["model"],
-                {"compared": 0, "agree": 0, "errors": 0, "fraud_only_shadow": 0,
-                 "false_positives_only_shadow": 0, "fraud_only_active": 0, "latency": []},
-            )  # fmt: skip
+                {
+                    "compared": 0,
+                    "agree": 0,
+                    "errors": 0,
+                    "fraud_only_shadow": 0,
+                    "false_positives_only_shadow": 0,
+                    "fraud_only_active": 0,
+                    "latency": [],
+                },
+            )
             if "error" in item:
                 m["errors"] += 1
                 continue
@@ -272,10 +279,17 @@ def shadow_report(session: Session, *, since: datetime | None = None) -> dict[st
         for item in r.shadow.get("policies", []):
             p = policies.setdefault(
                 item["policy_version"],
-                {"compared": 0, "agree": 0, "errors": 0, "fraud_caught_only_shadow": 0,
-                 "false_positives_only_shadow": 0, "fraud_caught_only_active": 0,
-                 "crosstab": Counter(), "latency": []},
-            )  # fmt: skip
+                {
+                    "compared": 0,
+                    "agree": 0,
+                    "errors": 0,
+                    "fraud_caught_only_shadow": 0,
+                    "false_positives_only_shadow": 0,
+                    "fraud_caught_only_active": 0,
+                    "crosstab": Counter(),
+                    "latency": [],
+                },
+            )
             if "error" in item:
                 p["errors"] += 1
                 continue

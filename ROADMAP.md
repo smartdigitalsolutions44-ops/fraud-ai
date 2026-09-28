@@ -310,30 +310,83 @@ Details are in [SEQUENCE_MODELS.md](SEQUENCE_MODELS.md). All evidence is synthet
   * retention jobs;
   * passkey management endpoints (list and revoke).
 
-## Stage 10: Recommendation (not started)
+## Stage 10: Deployment hardening ✅
 
-Stage 10 should build on the service boundary rather than add surface:
+The result is a *deployment-hardened prototype* for real deployment **testing**. It is not
+production-ready, and makes no compliance, fraud-reduction or savings claims. Details are
+in [HARDENING.md](HARDENING.md).
 
-* **Analyst desktop interface (only if required).** A client of `/v1/reviews`,
-  `/v1/assessments` and `/v1/assessments/{id}/investigate`, using a dedicated analyst key
-  with `review:*` and `investigation:write`. Review outcomes should feed `fraud_labels`
-  as delayed, audited labels.
-* **Before any UI**, close the operational gaps that a real integration would hit first:
-  * a real payment-processor adapter behind the existing protocol, contract-tested
-    against a sandbox;
-  * a shared rate limiter and replay store (Redis) for multiple replicas;
-  * key expiry, rotation and last-used tracking;
-  * retention jobs for idempotency rows, replay tokens and step-up records.
-* **Measure, don't claim.** Step-up and review effects can only be quantified with real
-  traffic and labels. Until then, only synthetic results are reported.
+* **Shared state:**
+  * Redis shared state (atomic Lua token bucket, `SET NX` claims, compare-and-delete
+    locks), failing closed with 503;
+  * distributed rate limiting and replay protection, with race tests across OS processes
+    and a 3-worker service.
+* **Keys and secrets:**
+  * API-key expiry (identical 401), `last_used_at`, and `service-key rotate` with a grace
+    period;
+  * signing-key versions with a previous-key grace window;
+  * `*_FILE` secrets, with cloud integration points documented (no SDKs).
+* **Start-up and configuration:**
+  * fail-closed start-up in every worker;
+  * configuration profiles that refuse placeholder secrets, http origins, unsafe CORS,
+    the fake provider, unsigned production, the reference LLM in production, and
+    per-process state with several workers;
+  * readiness with Redis, the signing key and periodic artefact re-verification.
+* **Records and governance:**
+  * a hash-chained, trigger-protected audit log (`fraud-ai audit list|verify`);
+  * retention jobs (`retention plan|run|status`; dry run by default; core records
+    protected);
+  * explicit policy promotion (shadow → evaluation → candidate) and activation safety
+    (feature-version compatibility, `activated_by`);
+  * migration `0008`.
+* **Payment sandbox:** a Stripe test-mode adapter. It is **not exercised against Stripe**
+  (no credentials), and its callbacks are tested with SDK-generated signatures.
+* **Measurement:**
+  * PostgreSQL load at 1/4/8/16 workers: best about 45 req/s at 4 workers on 4 vCPUs;
+    CPU-bound;
+  * a pool sweep;
+  * model-cache cost;
+  * a regression baseline;
+  * multi-process invariants and chaos tests;
+  * verified backup/restore and migration recovery.
+* **Supply chain:**
+  * pip-audit (2 vulnerable packages upgraded; 0 findings);
+  * bandit (0 findings);
+  * detect-secrets baseline and gitleaks (history and tree clean);
+  * a CycloneDX SBOM.
+* **Container and deployment:**
+  * the container, verified as a torch-less variant: checks, size, Trivy (0 Python
+    findings; 8 unfixed Debian HIGH CVEs reported);
+  * a staging stack (PostgreSQL, Redis, TLS proxy, 2 workers), with the E2E passing
+    through TLS;
+  * CI workflow, example alerts, THREAT_MODEL.md, DISASTER_RECOVERY.md and
+    RELEASE_CHECKLIST.md.
 
-## Stage 10 (candidate): Analyst desktop interface (only if required)
+## Stage 11: Recommendation (not started)
 
-* A client of the core platform for case review and labelling, which feeds `fraud_labels`.
+Close the gaps that Stage 10 measured or could not verify before any analyst UI or wider
+rollout:
 
-## Stage 11: Deployment and security hardening
-
-* PostgreSQL roles and least privilege, encryption at rest, and key rotation for
-  pseudonymisation.
-* Data-retention policies (e.g. raw IP expiry), audit logging, and dependency scanning.
-* Container images and reproducible builds; a threat model and penetration test.
+1. **Verify what could not be verified here:**
+   * build and scan the real PyTorch image in CI;
+   * run the Stripe adapter against a Stripe test account;
+   * run the CI workflow on GitHub;
+   * repeat the load test with networked PostgreSQL and Redis.
+2. **Integrity:**
+   * anchor the audit chain externally;
+   * sign model artefacts (not only digests in the same database);
+   * a signature v2 covering method and path;
+   * a two-person rule for policy activation.
+3. **Platform:**
+   * a minimal or distroless base image, a seccomp profile and image signing;
+   * PostgreSQL roles and least privilege, encryption at rest, PITR;
+   * a cloud secret-manager integration.
+4. **Privacy:**
+   * a retention policy for core records;
+   * erasure and subject-access tooling;
+   * pseudonymisation-key rotation;
+   * a DPIA before any real data.
+5. **Performance:** a faster feature path, or a CPU-bound scoring budget per worker; the
+   crash-loop behaviour of the uvicorn supervisor on start-up refusal.
+6. **Only then**, and only if required, an analyst desktop interface as a client of
+   `/v1/reviews` and `/v1/assessments`.

@@ -7,13 +7,15 @@ supplied through the environment only.
 from __future__ import annotations
 
 import ipaddress
+from datetime import datetime
 from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 from pydantic import Field, SecretStr, field_validator, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 from sqlalchemy.engine import make_url
 
 
@@ -35,6 +37,32 @@ def _split(value: str) -> list[str]:
     return [p.strip() for p in value.split(",") if p.strip()]
 
 
+_PLACEHOLDER_WORDS = (
+    "changeme",
+    "change_me",
+    "change-me",
+    "example",
+    "placeholder",
+    "default",
+    "password",
+    "secret",
+    "dummy",
+    "sample",
+    "fraud_ai_dev",
+    "insecure",
+)
+
+
+def looks_default(value: str) -> bool:
+    """A heuristic for secrets that were never replaced: placeholder words, very low
+    variety (e.g. ``aaaa...``) or a trivially short value. It cannot prove a secret is
+    strong; it only refuses the obvious mistakes."""
+    lowered = value.lower()
+    if any(word in lowered for word in _PLACEHOLDER_WORDS):
+        return True
+    return len(value) < 12 or len(set(value)) < 8
+
+
 def parse_rate(value: str) -> tuple[int, float]:
     """``"120/minute"`` -> (120, 60.0 seconds)."""
     try:
@@ -50,6 +78,18 @@ def parse_rate(value: str) -> tuple[int, float]:
     return n, period
 
 
+class _FileSecretSource(PydanticBaseSettingsSource):
+    """``<NAME>_FILE`` secret references (see :mod:`fraud_ai.config.secrets`)."""
+
+    def get_field_value(self, field: Any, field_name: str) -> tuple[Any, str, bool]:
+        return None, field_name, False
+
+    def __call__(self) -> dict[str, Any]:
+        from fraud_ai.config.secrets import resolve_file_secrets
+
+        return dict(resolve_file_secrets())
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -57,6 +97,24 @@ class Settings(BaseSettings):
         extra="ignore",
         case_sensitive=False,
     )
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        # Precedence: explicit arguments, environment, *_FILE secret references, .env.
+        return (
+            init_settings,
+            env_settings,
+            _FileSecretSource(settings_cls),
+            dotenv_settings,
+            file_secret_settings,
+        )
 
     environment: Environment = Environment.DEVELOPMENT
     log_level: str = "INFO"
@@ -103,6 +161,14 @@ class Settings(BaseSettings):
     # Signed requests: HMAC-SHA256(timestamp + "." + body) with a per-key signing secret
     # derived from this master key (from the environment / a secret manager).
     service_signing_master_key: SecretStr | None = None
+    service_signing_key_version: str = Field(default="1", pattern=r"^[A-Za-z0-9._-]{1,16}$")
+    # Rotation (Stage 10): the previous master key stays valid for verification until
+    # SERVICE_SIGNING_PREVIOUS_KEY_EXPIRES_AT; new signatures use the current key.
+    service_signing_previous_key: SecretStr | None = None
+    service_signing_previous_key_version: str | None = Field(
+        default=None, pattern=r"^[A-Za-z0-9._-]{1,16}$"
+    )
+    service_signing_previous_key_expires_at: datetime | None = None
     service_require_signatures: bool = False
     signature_max_age: int = Field(default=300, ge=10, le=3600)
     # Comma-separated allowed CORS origins. Empty (default) disables CORS entirely.
@@ -119,6 +185,42 @@ class Settings(BaseSettings):
     payment_auth_provider: str | None = None
     payment_auth_webhook_secret: SecretStr | None = None
     payment_auth_timeout: float = Field(default=5.0, gt=0, le=60)
+
+    # Stage 10: shared coordination state. "memory" is one process only; "redis" shares
+    # rate limits and replay claims across every worker and instance.
+    state_backend: str = "memory"
+    redis_url: SecretStr | None = None
+    redis_key_prefix: str = Field(default="fraud-ai:", min_length=1, max_length=64)
+    redis_timeout: float = Field(default=0.5, gt=0, le=10)
+    # Staging may use the development fake provider only with this explicit opt-in;
+    # production never can.
+    payment_auth_allow_fake_in_staging: bool = False
+    # Stripe test-mode adapter (Stage 10): official SDK, processor token references only.
+    stripe_api_key: SecretStr | None = None
+    stripe_return_url: str | None = None
+    # Policy activation must follow shadow -> evaluation -> candidate. Default: required in
+    # staging/production, optional in development/test.
+    policy_require_promotion: bool | None = None
+    # The reference template "LLM" is refused in production unless explicitly allowed.
+    allow_reference_llm: bool = False
+    service_key_rotation_grace_hours: float = Field(default=24.0, ge=0, le=24 * 90)
+    # "text" or "json"; json is the default in staging/production.
+    log_format: str | None = None
+    # PostgreSQL connection pool (ignored for SQLite). Benchmark before changing.
+    db_pool_size: int = Field(default=5, ge=1, le=200)
+    db_max_overflow: int = Field(default=10, ge=0, le=200)
+    db_pool_timeout: float = Field(default=30.0, gt=0, le=600)
+    db_pool_recycle: int = Field(default=1800, ge=-1, le=86_400)
+    # Retention (days; 0 disables the category). Destructive runs also need
+    # RETENTION_ALLOW_DELETE=true or an explicit confirmation.
+    retention_allow_delete: bool = False
+    retention_idempotency_days: float = Field(default=7.0, ge=0)
+    retention_challenge_days: float = Field(default=7.0, ge=0)
+    retention_payment_request_days: float = Field(default=0.0, ge=0)
+    retention_failed_attempt_days: float = Field(default=0.0, ge=0)
+    retention_raw_ip_days: float = Field(default=30.0, ge=0)
+    # Readiness re-hashes the primary artefact at least this often (and on any change).
+    readiness_reverify_seconds: float = Field(default=300.0, ge=0, le=86_400)
 
     @field_validator("log_level")
     @classmethod
@@ -176,13 +278,20 @@ class Settings(BaseSettings):
                 raise ValueError(f"TRUSTED_PROXIES entry {part!r} is not an IP/CIDR") from exc
         return value
 
+    @field_validator("state_backend")
+    @classmethod
+    def _validate_state_backend(cls, value: str) -> str:
+        if value not in {"memory", "redis"}:
+            raise ValueError("STATE_BACKEND must be 'memory' or 'redis'")
+        return value
+
     @field_validator("payment_auth_provider")
     @classmethod
     def _validate_payment_provider(cls, value: str | None) -> str | None:
         if value in (None, ""):
             return None
-        if value not in {"fake"}:
-            raise ValueError("PAYMENT_AUTH_PROVIDER must be 'fake' or unset (no real adapter yet)")
+        if value not in {"fake", "stripe"}:
+            raise ValueError("PAYMENT_AUTH_PROVIDER must be 'fake', 'stripe' or unset")
         return value
 
     @model_validator(mode="after")
@@ -190,16 +299,50 @@ class Settings(BaseSettings):
         for secret, name in (
             (self.service_signing_master_key, "SERVICE_SIGNING_MASTER_KEY"),
             (self.payment_auth_webhook_secret, "PAYMENT_AUTH_WEBHOOK_SECRET"),
+            (self.service_signing_previous_key, "SERVICE_SIGNING_PREVIOUS_KEY"),
         ):
             if secret is not None and len(secret.get_secret_value()) < _MIN_KEY_LENGTH:
                 raise ValueError(f"{name} must be at least {_MIN_KEY_LENGTH} characters")
         if self.service_require_signatures and self.service_signing_master_key is None:
             raise ValueError("SERVICE_REQUIRE_SIGNATURES needs SERVICE_SIGNING_MASTER_KEY")
+        if self.service_signing_previous_key is not None:
+            if self.service_signing_master_key is None:
+                raise ValueError("SERVICE_SIGNING_PREVIOUS_KEY needs SERVICE_SIGNING_MASTER_KEY")
+            if (
+                self.service_signing_previous_key_version is None
+                or self.service_signing_previous_key_expires_at is None
+            ):
+                raise ValueError(
+                    "SERVICE_SIGNING_PREVIOUS_KEY needs SERVICE_SIGNING_PREVIOUS_KEY_VERSION "
+                    "and SERVICE_SIGNING_PREVIOUS_KEY_EXPIRES_AT (the end of the grace period)"
+                )
+            if self.service_signing_previous_key_version == self.service_signing_key_version:
+                raise ValueError("the previous signing key needs a different version")
+            if (
+                self.service_signing_previous_key.get_secret_value()
+                == self.service_signing_master_key.get_secret_value()
+            ):
+                raise ValueError("the previous signing key must differ from the current one")
+        if self.state_backend == "redis" and self.redis_url is None:
+            raise ValueError("STATE_BACKEND=redis needs REDIS_URL")
         if self.payment_auth_provider is not None and self.payment_auth_webhook_secret is None:
             raise ValueError("PAYMENT_AUTH_PROVIDER needs PAYMENT_AUTH_WEBHOOK_SECRET")
+        if self.log_format not in (None, "text", "json"):
+            raise ValueError("LOG_FORMAT must be 'text' or 'json'")
+        if self.payment_auth_provider == "stripe":
+            if self.stripe_api_key is None:
+                raise ValueError("PAYMENT_AUTH_PROVIDER=stripe needs STRIPE_API_KEY")
+            if not self.stripe_api_key.get_secret_value().startswith(("sk_test_", "rk_test_")):
+                raise ValueError("STRIPE_API_KEY must be a TEST-mode key (sk_test_/rk_test_)")
         if self.environment in {Environment.STAGING, Environment.PRODUCTION}:
-            if self.payment_auth_provider == "fake":
-                raise ValueError("the fake payment-auth provider is refused outside dev/test")
+            fake_ok = (
+                self.environment is Environment.STAGING and self.payment_auth_allow_fake_in_staging
+            )
+            if self.payment_auth_provider == "fake" and not fake_ok:
+                raise ValueError(
+                    "the fake payment-auth provider is refused outside dev/test (staging needs "
+                    "PAYMENT_AUTH_ALLOW_FAKE_IN_STAGING=true; production never allows it)"
+                )
             if self.database_url is None or not self.database_url.startswith("postgresql"):
                 raise ValueError(f"{self.environment} requires a PostgreSQL DATABASE_URL")
             if self.database_echo:
@@ -216,11 +359,58 @@ class Settings(BaseSettings):
     def service_problems(self) -> list[str]:
         """Settings the HTTP service refuses to start with (checked only when serving, so
         batch and CLI jobs need no service configuration)."""
-        problems = []
+        problems: list[str] = []
         hosted = self.environment in {Environment.STAGING, Environment.PRODUCTION}
-        if hosted and not self.webauthn_origin.startswith("https://"):
-            problems.append(f"{self.environment} requires an https WEBAUTHN_ORIGIN")
+        if not hosted:
+            return problems
+        env = self.environment.value
+        if not self.webauthn_origin.startswith("https://"):
+            problems.append(f"{env} requires an https WEBAUTHN_ORIGIN")
+        for name, secret in self._secret_values().items():
+            if looks_default(secret):
+                problems.append(f"{name} looks like a default/placeholder secret")
+        password = make_url(self.resolved_database_url).password
+        if password is not None and looks_default(str(password)):
+            problems.append("DATABASE_URL uses a default/placeholder password")
+        for origin in self.cors_origins:
+            if origin == "*" or not origin.startswith("https://"):
+                problems.append(f"{env} refuses the CORS origin {origin!r} (https only, no *)")
+        if self.environment is Environment.PRODUCTION:
+            if self.local_llm_runtime == "reference" and not self.allow_reference_llm:
+                problems.append(
+                    "production refuses the reference LLM template unless ALLOW_REFERENCE_LLM"
+                )
+            if not self.service_require_signatures:
+                problems.append("production requires SERVICE_REQUIRE_SIGNATURES=true")
         return problems
+
+    def _secret_values(self) -> dict[str, str]:
+        values = {
+            "PSEUDONYMISATION_KEY": self.pseudonymisation_key,
+            "SERVICE_SIGNING_MASTER_KEY": self.service_signing_master_key,
+            "SERVICE_SIGNING_PREVIOUS_KEY": self.service_signing_previous_key,
+            "PAYMENT_AUTH_WEBHOOK_SECRET": self.payment_auth_webhook_secret,
+            "STRIPE_API_KEY": self.stripe_api_key,
+        }
+        out = {k: v.get_secret_value() for k, v in values.items() if v is not None}
+        if self.redis_url is not None:
+            redis_password = urlparse(self.redis_url.get_secret_value()).password
+            if redis_password:
+                out["REDIS_URL password"] = redis_password
+        return out
+
+    @property
+    def requires_promotion(self) -> bool:
+        if self.policy_require_promotion is not None:
+            return self.policy_require_promotion
+        return self.environment in {Environment.STAGING, Environment.PRODUCTION}
+
+    @property
+    def effective_log_format(self) -> str:
+        if self.log_format:
+            return self.log_format
+        hosted = self.environment in {Environment.STAGING, Environment.PRODUCTION}
+        return "json" if hosted else "text"
 
     @property
     def trusted_proxy_networks(self) -> list[ipaddress.IPv4Network | ipaddress.IPv6Network]:

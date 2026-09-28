@@ -19,7 +19,7 @@ class HashNamespace(StrEnum):
     DEVICE = "device"
     ADDRESS = "address"
     PAYMENT_FINGERPRINT = "payment_fingerprint"
-    PAYMENT_TOKEN_REF = "payment_token_ref"
+    PAYMENT_TOKEN_REF = "payment_token_ref"  # nosec B105 - a hash namespace
 
 
 class Pseudonymiser:

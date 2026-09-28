@@ -75,5 +75,89 @@ class ServiceMetrics:
             registry=r,
         )
 
+        self.signature_failures = Counter(
+            "fraud_api_signature_failures",
+            "Rejected request signatures by reason.",
+            ["code"],
+            registry=r,
+        )
+        self.signatures_verified = Counter(
+            "fraud_api_signatures_verified",
+            "Accepted request signatures by signing-key version.",
+            ["key_version"],
+            registry=r,
+        )
+        self.state_unavailable = Counter(
+            "fraud_api_state_unavailable",
+            "Requests refused because shared state was unavailable (fail closed).",
+            ["what"],
+            registry=r,
+        )
+        self.state_latency = Histogram(
+            "fraud_state_operation_seconds",
+            "Shared-state (Redis) operation latency.",
+            ["op"],
+            buckets=(0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.5),
+            registry=r,
+        )
+        self.state_errors = Counter(
+            "fraud_state_errors", "Shared-state (Redis) operation errors.", ["op"], registry=r
+        )
+
+        self.db_ping = Histogram(
+            "fraud_db_ping_seconds",
+            "Database round trip measured by readiness probes.",
+            buckets=(0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.5, 1.0),
+            registry=r,
+        )
+        self.model_verification_seconds = Histogram(
+            "fraud_model_verification_seconds",
+            "Full SHA-256 re-verification time of the primary artefact.",
+            buckets=(0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0),
+            registry=r,
+        )
+        self.model_verification_failures = Counter(
+            "fraud_model_verification_failures",
+            "Primary artefact verification failures (missing, changed or corrupted).",
+            registry=r,
+        )
+
+        self.db_query = Histogram(
+            "fraud_db_query_seconds",
+            "Database statement latency (all statements issued by this process).",
+            buckets=(0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 1.0),
+            registry=r,
+        )
+        self.db_pool_checked_out = Gauge(
+            "fraud_db_pool_checked_out",
+            "Connections checked out of the pool (at scrape time).",
+            registry=r,
+        )
+        self.fallbacks = Counter(
+            "fraud_api_fallbacks",
+            "Decisions that used a conservative fallback, by first failure category.",
+            ["category"],
+            registry=r,
+        )
+        self.policy_decisions = Counter(
+            "fraud_api_policy_decisions",
+            "Decisions by policy version (for unexpected decision-rate changes).",
+            ["policy_version", "decision"],
+            registry=r,
+        )
+        self.model_loads = Gauge(
+            "fraud_model_cache_loads", "Verified model loads in this process.", registry=r
+        )
+        self.model_load_failures = Gauge(
+            "fraud_model_cache_load_failures",
+            "Model loads that failed verification in this process.",
+            registry=r,
+        )
+
+    def observe_state(self, op: str, seconds: float, ok: bool) -> None:
+        self.state_latency.labels(op).observe(seconds)
+        if not ok:
+            self.state_errors.labels(op).inc()
+
     def render(self) -> bytes:
         return generate_latest(self.registry)

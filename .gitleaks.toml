@@ -1,0 +1,19 @@
+# gitleaks configuration (Stage 10). The default rules stay on; the allowlist only names
+# reviewed, SYNTHETIC example/test values (see HARDENING.md, "Secret scanning").
+title = "fraud-ai"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "reviewed synthetic example and test values"
+paths = [
+  '''(^|/)__pycache__/''',
+  '''\.secrets\.baseline$''',
+]
+regexes = [
+  '''tok_(psp|e2e)_synthetic''',
+  '''tok_abcdefgh1234''',
+  '''test-pseudonymisation-key-0123456789abcdef''',
+  '''sk_live_SECRETVALUE''',
+]

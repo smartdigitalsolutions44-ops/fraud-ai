@@ -660,6 +660,7 @@ class PolicyDeployment(Base):
     config_sha256: Mapped[str] = mapped_column(String(64))
     note: Mapped[str | None] = mapped_column(String(500))
     activated_at: Mapped[datetime] = mapped_column(default=utcnow)
+    activated_by: Mapped[str | None] = mapped_column(String(200))  # Stage 10
 
 
 class ReviewItem(Base):
@@ -857,6 +858,21 @@ class ServiceApiKey(Base):
     scopes: Mapped[list[Any]] = mapped_column(JSONType, default=list)
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     revoked_at: Mapped[datetime | None]
+    # Stage 10: expiry, last use (throttled updates) and rotation lineage.
+    expires_at: Mapped[datetime | None]
+    last_used_at: Mapped[datetime | None]
+    rotated_from_key_id: Mapped[str | None] = mapped_column(String(40))
+
+    def status_at(self, now: datetime) -> str:
+        """``revoked``, ``expired`` or ``active`` (derived, never stored separately)."""
+        if self.revoked_at is not None:
+            return "revoked"
+        expires = self.expires_at
+        if expires is not None:
+            aware = expires if expires.tzinfo else expires.replace(tzinfo=now.tzinfo)
+            if aware <= now:
+                return "expired"
+        return "active"
 
 
 class RequestIdempotency(Base):
@@ -1003,3 +1019,52 @@ class PaymentAuthRequest(Base):
 
 
 ALL_TABLES = sorted(Base.metadata.tables)
+
+
+class AuditEvent(Base):
+    """An append-only, hash-chained record of an administrative action (Stage 10).
+
+    ``event_sha256`` covers the event's fields and ``previous_sha256``, so editing or
+    deleting any event breaks the chain (``fraud-ai audit verify``). Database triggers
+    refuse UPDATE and DELETE. Details never contain secrets.
+    """
+
+    __tablename__ = "audit_events"
+    __table_args__ = (
+        UniqueConstraint("sequence"),
+        Index("ix_audit_events_action", "action"),
+        CheckConstraint("length(event_sha256) = 64", name="event_sha256_length"),
+    )
+
+    event_id: Mapped[uuid.UUID] = _uuid_pk()
+    sequence: Mapped[int] = mapped_column(Integer)
+    occurred_at: Mapped[datetime] = mapped_column(default=utcnow)
+    actor: Mapped[str] = mapped_column(String(200))
+    action: Mapped[str] = mapped_column(String(64))
+    target_type: Mapped[str] = mapped_column(String(40))
+    target_id: Mapped[str | None] = mapped_column(String(120))
+    details: Mapped[dict[str, Any]] = mapped_column(default=dict)
+    previous_sha256: Mapped[str | None] = mapped_column(String(64))
+    event_sha256: Mapped[str] = mapped_column(String(64))
+
+
+class PolicyLifecycleEvent(Base):
+    """Append-only promotion history of a policy (Stage 10):
+    ``shadow`` → ``evaluation`` → ``candidate`` (or ``rejected``). Activation is separate
+    and explicit; nothing is promoted automatically."""
+
+    __tablename__ = "policy_lifecycle_events"
+    __table_args__ = (
+        CheckConstraint(
+            "stage IN ('shadow', 'evaluation', 'candidate', 'rejected')", name="stage_known"
+        ),
+        Index("ix_policy_lifecycle_policy", "policy_version"),
+    )
+
+    lifecycle_id: Mapped[uuid.UUID] = _uuid_pk()
+    policy_version: Mapped[str] = mapped_column(ForeignKey("risk_policies.policy_version"))
+    stage: Mapped[str] = mapped_column(String(16))
+    actor: Mapped[str] = mapped_column(String(200))
+    evidence: Mapped[dict[str, Any]] = mapped_column(default=dict)
+    note: Mapped[str | None] = mapped_column(String(500))
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)

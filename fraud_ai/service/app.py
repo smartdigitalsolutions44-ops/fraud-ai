@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import contextlib
+import time
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -39,13 +40,19 @@ from fraud_ai.core.exceptions import FraudAIError
 from fraud_ai.database import engine_from_settings, make_session_factory
 from fraud_ai.realtime.service import FraudScoringService
 from fraud_ai.security.keys import build_pseudonymiser
-from fraud_ai.service.dependencies import ServiceContainer
+from fraud_ai.service.dependencies import ServiceContainer, SigningKey
 from fraud_ai.service.errors import install_handlers
 from fraud_ai.service.metrics import ServiceMetrics
 from fraud_ai.service.middleware import ServiceMiddleware
-from fraud_ai.service.rate_limit import InMemoryRateLimiter, RateLimiter
+from fraud_ai.service.rate_limit import (
+    InMemoryRateLimiter,
+    RateLimiter,
+    SharedStateRateLimiter,
+)
 from fraud_ai.service.routes import router
 from fraud_ai.service.schemas import API_VERSION
+from fraud_ai.state.base import SharedState
+from fraud_ai.state.memory import MemoryState
 from fraud_ai.stepup.payment import FakePaymentAuthProvider, PaymentAuthenticationProvider
 from fraud_ai.stepup.webauthn import WebAuthnConfig
 
@@ -87,6 +94,16 @@ def default_payment_provider(settings: Settings) -> PaymentAuthenticationProvide
     if settings.payment_auth_provider == "fake":
         assert settings.payment_auth_webhook_secret is not None  # enforced by settings
         return FakePaymentAuthProvider(settings.payment_auth_webhook_secret.get_secret_value())
+    if settings.payment_auth_provider == "stripe":
+        from fraud_ai.stepup.stripe_provider import StripePaymentAuthProvider
+
+        assert settings.payment_auth_webhook_secret is not None  # enforced by settings
+        assert settings.stripe_api_key is not None  # enforced by settings
+        return StripePaymentAuthProvider(
+            settings.stripe_api_key.get_secret_value(),
+            settings.payment_auth_webhook_secret.get_secret_value(),
+            return_url=settings.stripe_return_url,
+        )
     return None
 
 
@@ -98,6 +115,7 @@ def build_container(
     payment_provider: PaymentAuthenticationProvider | str | None = "default",
     llm_client: Callable[[], Any] | None = None,
     limiter: RateLimiter | None = None,
+    shared_state: SharedState | None = None,
 ) -> ServiceContainer:
     problems = settings.service_problems()
     if problems:
@@ -112,7 +130,19 @@ def build_container(
         if isinstance(payment_provider, str)
         else payment_provider
     )
-    master = settings.service_signing_master_key
+    metrics = ServiceMetrics()
+    state = shared_state or build_state(settings, metrics)
+    if state.distributed:
+        rate_limiter: RateLimiter = SharedStateRateLimiter(
+            state, count, period, settings.rate_limit_burst, prefix="req"
+        )
+        auth_limiter: RateLimiter = SharedStateRateLimiter(
+            state, count, period, settings.rate_limit_burst, prefix="authfail"
+        )
+    else:
+        rate_limiter = InMemoryRateLimiter(count, period, settings.rate_limit_burst)
+        auth_limiter = InMemoryRateLimiter(count, period, settings.rate_limit_burst)
+    _instrument(engine, metrics)
     return ServiceContainer(
         settings=settings,
         engine=engine,
@@ -129,18 +159,87 @@ def build_container(
             max_attempts=settings.step_up_max_attempts,
         ),
         payment=provider,
-        limiter=limiter or InMemoryRateLimiter(count, period, settings.rate_limit_burst),
+        limiter=limiter or rate_limiter,
         # Throttles repeated *failed* authentication from one address (abuse control only).
-        auth_failure_limiter=InMemoryRateLimiter(count, period, settings.rate_limit_burst),
-        metrics=ServiceMetrics(),
+        auth_failure_limiter=auth_limiter,
+        metrics=metrics,
         clock=clock,
         llm_client=llm_client or default_llm_client(settings),
         scoring_pool=concurrent.futures.ThreadPoolExecutor(
             max_workers=16, thread_name_prefix="fraud-score"
         ),
         llm_pool=concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="llm"),
-        signing_master_key=master.get_secret_value() if master else None,
+        signing_keys=signing_keys(settings),
+        state=state,
     )
+
+
+def _instrument(engine: Engine, metrics: ServiceMetrics) -> None:
+    """Time every statement on this engine into ``fraud_db_query_seconds``."""
+    from sqlalchemy import event
+
+    def before(
+        conn: Any, cursor: Any, statement: Any, params: Any, context: Any, many: Any
+    ) -> None:
+        conn.info.setdefault("fraud_ai_query_start", []).append(time.perf_counter())
+
+    def after(conn: Any, *_: Any) -> None:
+        stack = conn.info.get("fraud_ai_query_start")
+        if stack:
+            metrics.db_query.observe(time.perf_counter() - stack.pop())
+
+    event.listen(engine, "before_cursor_execute", before)
+    event.listen(engine, "after_cursor_execute", after)
+    metrics.instrumented = (engine, before, after)  # type: ignore[attr-defined]
+
+
+def uninstrument(metrics: ServiceMetrics) -> None:
+    from sqlalchemy import event
+
+    registered = getattr(metrics, "instrumented", None)
+    if registered:
+        engine, before, after = registered
+        if event.contains(engine, "before_cursor_execute", before):
+            event.remove(engine, "before_cursor_execute", before)
+            event.remove(engine, "after_cursor_execute", after)
+        metrics.instrumented = None  # type: ignore[attr-defined]
+
+
+def signing_keys(settings: Settings) -> tuple[SigningKey, ...]:
+    """The current master key first, then the previous one (verification only, until its
+    grace period ends)."""
+    current = settings.service_signing_master_key
+    if current is None:
+        return ()
+    keys = [SigningKey(settings.service_signing_key_version, current.get_secret_value())]
+    previous = settings.service_signing_previous_key
+    if previous is not None:
+        assert settings.service_signing_previous_key_version is not None  # settings enforce
+        expires = settings.service_signing_previous_key_expires_at
+        if expires is not None and expires.tzinfo is None:
+            expires = expires.replace(tzinfo=UTC)
+        keys.append(
+            SigningKey(
+                settings.service_signing_previous_key_version,
+                previous.get_secret_value(),
+                expires,
+            )
+        )
+    return tuple(keys)
+
+
+def build_state(settings: Settings, metrics: ServiceMetrics | None = None) -> SharedState:
+    if settings.state_backend == "redis":
+        from fraud_ai.state.redis import RedisState
+
+        assert settings.redis_url is not None  # settings enforce
+        return RedisState(
+            settings.redis_url.get_secret_value(),
+            prefix=settings.redis_key_prefix,
+            timeout=settings.redis_timeout,
+            observe=metrics.observe_state if metrics else None,
+        )
+    return MemoryState()
 
 
 @contextlib.asynccontextmanager

@@ -3,7 +3,7 @@
 A locally runnable fraud-prevention software platform written in Python. It is not a web
 application: Stage 9 adds a machine-to-machine HTTP API, not a website.
 
-The current release covers **Stages 1 to 9**:
+The current release covers **Stages 1 to 10**:
 
 * **Stage 1:** the software core, the event architecture, the fraud database (PostgreSQL in
   production, SQLite for local use), migrations, synthetic data and the CLI.
@@ -58,6 +58,26 @@ The current release covers **Stages 1 to 9**:
     Every result creates a new, immutable follow-up assessment; scores are never changed;
   * Docker and docker-compose files.
 
+* **Stage 10:** deployment hardening for real deployment *testing*. The result is a
+  deployment-hardened prototype, not a production system. It adds:
+  * Redis shared state for distributed rate limiting and replay protection (atomic,
+    fail closed);
+  * API-key expiry and rotation, and signing-key versions with a grace period;
+  * `*_FILE` secrets;
+  * fail-closed start-up and configuration profiles, and stronger readiness;
+  * a hash-chained, immutable audit log;
+  * retention jobs and explicit policy promotion (shadow → evaluation → candidate);
+  * a Stripe **test-mode** adapter (never run against Stripe; no credentials);
+  * PostgreSQL load and pool benchmarks, multi-process and chaos tests, and a verified
+    backup/restore;
+  * dependency, static, secret and container scans, and an SBOM;
+  * CI, a staging stack, a threat model, disaster-recovery runbooks and a release
+    checklist.
+
+  See [HARDENING.md](HARDENING.md), [THREAT_MODEL.md](THREAT_MODEL.md),
+  [DISASTER_RECOVERY.md](DISASTER_RECOVERY.md) and
+  [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md).
+
 Decisions are **internal policy outputs** (`ALLOW`, `ALLOW_WITH_MONITORING`,
 `STEP_UP_AUTHENTICATION`, `MANUAL_REVIEW`, `TEMPORARY_BLOCK`). No payment or authentication
 system is called by the engine itself, and there are no permanent bans. Step-up runs only
@@ -72,9 +92,9 @@ describe synthetic data only; they are not real-world detection rates or savings
 [AUTHENTICATION.md](AUTHENTICATION.md), [DEPLOYMENT.md](DEPLOYMENT.md) and
 [ROADMAP.md](ROADMAP.md).
 
-> Not production-ready. No payment-security certification or PCI compliance is claimed,
-> and there are no real-world fraud-reduction figures: everything is measured on synthetic
-> data.
+> Not production-ready. No payment-security certification, PCI DSS, GDPR or SOC 2
+> compliance is claimed, and there are no real-world fraud-reduction or savings figures:
+> everything is measured on synthetic data.
 
 ## Install
 
@@ -182,6 +202,17 @@ fraud-ai service run                                        # http://127.0.0.1:8
 fraud-ai service openapi --output openapi.json
 python scripts/service_benchmark.py                         # HTTP vs direct, 1/4/8/16 workers
 docker compose up --build                                   # fraud-ai + PostgreSQL (see DEPLOYMENT.md)
+
+# Stage 10 - hardening (see HARDENING.md)
+fraud-ai config check                                       # would the service start with these settings?
+fraud-ai service-key create --name c --scope score:write --expires-in-days 90
+fraud-ai service-key rotate <key-id> --grace-hours 24       # successor shown ONCE; old key expires
+fraud-ai audit list ; fraud-ai audit verify                 # hash-chained admin audit log
+fraud-ai retention plan ; fraud-ai retention run            # dry run unless --execute --yes
+fraud-ai policy promote <version> --to shadow|evaluation|candidate [--approve] --note "..."
+python scripts/security_checks.py pip-audit|bandit|secrets|sbom
+python scripts/pg_load_benchmark.py --help                  # PostgreSQL + Redis load test
+docker compose -f deploy/staging/docker-compose.staging.yml up -d   # staging stack (DEPLOYMENT.md §2a)
 python -m fraud_ai --help        # equivalent entry point
 ```
 
@@ -216,9 +247,16 @@ fraud-ai db init
 | `REQUEST_SIZE_LIMIT`, `RATE_LIMIT`, `RATE_LIMIT_BURST` | `65536`, `120/minute`, `30` | Per API key and route |
 | `SERVICE_SIGNING_MASTER_KEY`, `SERVICE_REQUIRE_SIGNATURES`, `SIGNATURE_MAX_AGE` | unset, `false`, `300` | HMAC request signing |
 | `WEBAUTHN_RP_ID`, `WEBAUTHN_RP_NAME`, `WEBAUTHN_ORIGIN` | `localhost`, dev name, `http://localhost:8080` | https is required outside dev/test |
-| `PAYMENT_AUTH_PROVIDER`, `PAYMENT_AUTH_WEBHOOK_SECRET`, `PAYMENT_AUTH_TIMEOUT` | unset, unset, `5` | `fake` = development fake only |
+| `PAYMENT_AUTH_PROVIDER`, `PAYMENT_AUTH_WEBHOOK_SECRET`, `PAYMENT_AUTH_TIMEOUT` | unset, unset, `5` | `fake` = development fake; `stripe` = test-mode adapter |
+| `STATE_BACKEND`, `REDIS_URL` | `memory`, unset | Stage 10: `redis` for several workers/instances |
+| `SERVICE_SIGNING_KEY_VERSION`, `SERVICE_SIGNING_PREVIOUS_KEY*` | `1`, unset | Signing-key rotation |
+| `POLICY_REQUIRE_PROMOTION` | on in staging/production | Promotion before activation |
+| `LOG_FORMAT` | `json` in staging/production | |
+| `DB_POOL_SIZE`, `DB_MAX_OVERFLOW` | `5`, `10` | Per worker (PostgreSQL) |
+| `NAME_FILE` | – | Read any secret from a file |
 
-All Stage 9 settings are listed in [DEPLOYMENT.md](DEPLOYMENT.md) §4.
+All Stage 9 and 10 settings are listed in [DEPLOYMENT.md](DEPLOYMENT.md) §4 and
+`.env.example`.
 
 ## Develop
 

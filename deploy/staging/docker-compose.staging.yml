@@ -1,0 +1,138 @@
+# STAGING stack (Stage 10): TLS proxy -> fraud-ai (2 workers) -> PostgreSQL + Redis.
+# Test/synthetic data only. Never use production secrets here.
+#
+#   deploy/staging/generate-secrets.sh          # random secrets into deploy/staging/secrets/
+#   docker compose -f deploy/staging/docker-compose.staging.yml up --build
+#
+# Secrets are mounted as files (/run/secrets/*) and read through the *_FILE convention,
+# so they never appear in the environment, `docker inspect` or process listings.
+# The DEVELOPMENT FAKE payment provider is enabled explicitly
+# (PAYMENT_AUTH_ALLOW_FAKE_IN_STAGING=true); it is not 3-D Secure and production refuses it.
+# The optional local LLM runs as a separate service (profile "llm"); scoring never needs it.
+
+name: fraud-ai-staging
+
+x-fraud-env: &fraud_env
+  ENVIRONMENT: staging
+  LOG_FORMAT: json
+  DATABASE_URL_FILE: /run/secrets/database_url
+  PSEUDONYMISATION_KEY_FILE: /run/secrets/pseudonymisation_key
+  SERVICE_SIGNING_MASTER_KEY_FILE: /run/secrets/signing_master_key
+  PAYMENT_AUTH_WEBHOOK_SECRET_FILE: /run/secrets/payment_webhook_secret
+  REDIS_URL_FILE: /run/secrets/redis_url
+  STATE_BACKEND: redis
+  SERVICE_REQUIRE_SIGNATURES: "true"
+  SERVICE_HSTS: "true"
+  TRUSTED_PROXIES: 172.30.10.10/32 # the TLS proxy only
+  WEBAUTHN_RP_ID: staging.fraud-ai.test
+  WEBAUTHN_ORIGIN: https://staging.fraud-ai.test
+  PAYMENT_AUTH_PROVIDER: fake
+  PAYMENT_AUTH_ALLOW_FAKE_IN_STAGING: "true"
+  POLICY_REQUIRE_PROMOTION: "true"
+  DB_POOL_SIZE: "5"
+  DB_MAX_OVERFLOW: "5"
+  RETENTION_ALLOW_DELETE: "false"
+
+x-fraud-secrets: &fraud_secrets
+  - database_url
+  - pseudonymisation_key
+  - signing_master_key
+  - payment_webhook_secret
+  - redis_url
+
+x-hardening: &hardening
+  read_only: true
+  tmpfs: [/tmp]
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: fraud_ai
+      POSTGRES_USER: fraud_ai
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets: [postgres_password]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fraud_ai -d fraud_ai"]
+      interval: 5s
+      retries: 20
+    networks: [data]
+
+  redis:
+    image: redis:7-alpine
+    command: ["sh", "-c", "exec redis-server --requirepass \"$$(cat /run/secrets/redis_password)\" --save '' --appendonly no"]
+    secrets: [redis_password]
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$(cat /run/secrets/redis_password)\" ping | grep PONG"]
+      interval: 5s
+      retries: 20
+    networks: [data]
+
+  migrate:
+    build:
+      context: ../..
+      # WITH_TORCH=0 builds the torch-less VERIFICATION variant (scikit-learn models only).
+      args: { WITH_TORCH: "${WITH_TORCH:-1}" }
+    image: fraud-ai:staging
+    command: ["db", "migrate"]
+    environment: *fraud_env
+    secrets: *fraud_secrets
+    depends_on:
+      postgres: { condition: service_healthy }
+    <<: *hardening
+    networks: [data]
+
+  fraud-ai:
+    image: fraud-ai:staging
+    command: ["service", "run", "--workers", "2"]
+    environment: *fraud_env
+    secrets: *fraud_secrets
+    volumes: ["./models:/models:ro"]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+    <<: *hardening
+    networks:
+      data: {}
+      edge: { ipv4_address: 172.30.10.20 }
+
+  proxy:
+    image: caddy:2-alpine
+    # `tls internal`: a locally issued certificate for the staging hostname. Replace with a
+    # real certificate (ACME) for any shared staging environment.
+    command: ["caddy", "reverse-proxy", "--from", "https://staging.fraud-ai.test",
+              "--to", "http://172.30.10.20:8080", "--internal-certs"]
+    ports: ["127.0.0.1:8443:443"]
+    depends_on: [fraud-ai]
+    networks:
+      edge: { ipv4_address: 172.30.10.10 }
+
+  llm:
+    # Optional analyst assistant; not needed for scoring. Point LOCAL_LLM_ENDPOINT at it.
+    profiles: ["llm"]
+    image: ollama/ollama:latest
+    volumes: [ollama:/root/.ollama]
+    networks: [data]
+
+secrets:
+  database_url: { file: ./secrets/database_url }
+  postgres_password: { file: ./secrets/postgres_password }
+  pseudonymisation_key: { file: ./secrets/pseudonymisation_key }
+  signing_master_key: { file: ./secrets/signing_master_key }
+  payment_webhook_secret: { file: ./secrets/payment_webhook_secret }
+  redis_password: { file: ./secrets/redis_password }
+  redis_url: { file: ./secrets/redis_url }
+
+volumes:
+  pgdata:
+  ollama:
+
+networks:
+  data:
+    internal: true
+  edge:
+    ipam:
+      config: [{ subnet: 172.30.10.0/24 }]

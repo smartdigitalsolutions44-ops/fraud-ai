@@ -1,0 +1,25 @@
+{
+  "metrics": {
+    "model_cache.rss_mb": 476.3,
+    "pg.w1.latency_p50_ms": 31.13,
+    "pg.w1.latency_p95_ms": 120.17,
+    "pg.w1.latency_p99_ms": 134.07,
+    "pg.w1.rps": 20.4,
+    "pg.w16.latency_p50_ms": 93.92,
+    "pg.w16.latency_p95_ms": 828.66,
+    "pg.w16.latency_p99_ms": 7175.33,
+    "pg.w16.rps": 33.9,
+    "pg.w16.rss_mb_max": 853.3,
+    "pg.w4.latency_p50_ms": 42.39,
+    "pg.w4.latency_p95_ms": 164.19,
+    "pg.w4.latency_p99_ms": 227.57,
+    "pg.w4.rps": 45.5,
+    "pg.w4.rss_mb_max": 853.5,
+    "pg.w8.latency_p50_ms": 63.86,
+    "pg.w8.latency_p95_ms": 262.07,
+    "pg.w8.latency_p99_ms": 2875.94,
+    "pg.w8.rps": 42.8,
+    "pg.w8.rss_mb_max": 855.4
+  },
+  "note": "Stage 10 baseline on SYNTHETIC traffic: 4 vCPU / 15 GB cloud container, PostgreSQL 16 local, Redis 7 local, uvicorn workers 1/4/8/16, 16 clients, no keep-alive. Compare only on a comparable machine; see HARDENING.md."
+}

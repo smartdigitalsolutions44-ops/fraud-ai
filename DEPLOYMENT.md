@@ -1,8 +1,12 @@
-# Deployment (Stage 9)
+# Deployment (Stages 9-10)
 
-How to run the fraud service locally and in a staging-like container setup. This is
-**not** a production runbook. The platform is a research system on synthetic data, and
-production would at least need the Stage 11 hardening in [ROADMAP.md](ROADMAP.md).
+How to run the fraud service locally, in a container, and as the Stage 10 staging stack.
+This is **not** a production runbook. The platform is a *deployment-hardened prototype* on
+synthetic data. See:
+
+* [HARDENING.md](HARDENING.md): what was hardened and measured;
+* [DISASTER_RECOVERY.md](DISASTER_RECOVERY.md): backups and incidents;
+* [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md): what must be green before a release.
 
 ## 1. Local development (no container)
 
@@ -60,6 +64,16 @@ docker compose run --rm fraud-ai service-key create --name checkout --scope scor
 * **Behind a TLS-intercepting proxy:** pass its CA as a BuildKit secret, which is never
   stored in a layer:
   `docker build --secret id=ca_bundle,src=/path/ca.crt .`
+* **Build arguments (Stage 10):**
+  * `TORCH_INDEX_URL`: a CPU PyTorch mirror.
+  * `WITH_TORCH=0`: a torch-less **verification** variant. It serves scikit-learn models
+    only, and a neural active model fails start-up. Never deploy it as the real image.
+* **Stage 10 image changes:**
+  * wheels are bind-mounted, not copied, so no dead layer is left;
+  * `pip`, `setuptools` and `wheel` are removed from the runtime image;
+  * the `stripe` extra is included.
+* **Checks:** `scripts/container_checks.sh <image>` (non-root, no secrets or artefacts,
+  read-only start). Size and Trivy results are in [HARDENING.md](HARDENING.md) §16.
 
 ### Compose (`docker-compose.yml`)
 
@@ -77,6 +91,41 @@ docker compose run --rm fraud-ai service-key create --name checkout --scope scor
   `docker compose run --rm -v ./models:/models fraud-ai train gradient-boosting`), or keep
   the same absolute path. Artefacts are SHA-256-verified before use (readiness checks the
   primary one).
+
+## 2a. Staging stack (Stage 10)
+
+```bash
+sudo deploy/staging/generate-secrets.sh     # random secrets; 0400, owned by uid 10001
+docker compose -f deploy/staging/docker-compose.staging.yml up -d --build
+docker compose -f deploy/staging/docker-compose.staging.yml run --rm migrate \
+    service-key create --name staging-e2e --scope score:write ... --show-signing-secret
+python scripts/staging_e2e.py --base-url https://staging.fraud-ai.test:8443 ...
+```
+
+**Services:**
+
+* PostgreSQL 16;
+* Redis 7 (password, no persistence);
+* a migration job;
+* fraud-ai: 2 workers, `STATE_BACKEND=redis`, required signatures, JSON logs, promotion
+  required;
+* a Caddy TLS proxy on `127.0.0.1:8443`;
+* optionally, an LLM service (profile `llm`).
+
+**Configuration:**
+
+* **secrets** are files read through `*_FILE`;
+* **networks:** the data network is internal;
+* **fake provider:** the development fake payment provider is enabled explicitly
+  (`PAYMENT_AUTH_ALLOW_FAKE_IN_STAGING=true`).
+
+The service refuses to start until a policy and its models exist. Bootstrap one first:
+seed, train and create policies, activate the first deployment, then promote later
+policies through `policy promote`. Run the bootstrap on the `migrate` service, with the
+models directory mounted writable.
+
+The run on this machine is recorded in [HARDENING.md](HARDENING.md) §12. The E2E passed,
+promotion worked, and it failed closed with Redis or PostgreSQL stopped.
 
 ## 3. TLS and reverse proxies (required outside localhost)
 
@@ -119,36 +168,56 @@ WebAuthn needs a secure context:
 | `PAYMENT_AUTH_WEBHOOK_SECRET` | unset | at least 32 characters; required with a provider |
 | `PAYMENT_AUTH_TIMEOUT` | `5` | seconds |
 | `LOCAL_LLM_TIMEOUT` | `120` | the investigate endpoint's own timeout is this plus 10 s |
+| `STATE_BACKEND` / `REDIS_URL` | `memory` / unset | `redis` is required for more than one worker in staging/production; see HARDENING.md §1 |
+| `REDIS_KEY_PREFIX` / `REDIS_TIMEOUT` | `fraud-ai:` / `0.5` | a Redis error or timeout gives 503 (fail closed) |
+| `SERVICE_SIGNING_KEY_VERSION` | `1` | plus `SERVICE_SIGNING_PREVIOUS_KEY[_VERSION,_EXPIRES_AT]` during a rotation |
+| `SERVICE_KEY_ROTATION_GRACE_HOURS` | `24` | old API key lifetime after `service-key rotate` |
+| `READINESS_REVERIFY_SECONDS` | `300` | periodic full re-verification of the primary artefact |
+| `PAYMENT_AUTH_ALLOW_FAKE_IN_STAGING` | `false` | production never allows the fake |
+| `STRIPE_API_KEY` / `STRIPE_RETURN_URL` | unset | `PAYMENT_AUTH_PROVIDER=stripe`; test-mode keys only |
+| `POLICY_REQUIRE_PROMOTION` | on in staging/production | activation needs a promoted `candidate` |
+| `ALLOW_REFERENCE_LLM` | `false` | production refuses the reference template otherwise |
+| `LOG_FORMAT` | `json` in staging/production | `text` or `json` |
+| `DB_POOL_SIZE` / `DB_MAX_OVERFLOW` / `DB_POOL_TIMEOUT` / `DB_POOL_RECYCLE` | `5` / `10` / `30` / `1800` | per worker; measured in HARDENING.md §13 |
+| `RETENTION_*` | see HARDENING.md §9 | `RETENTION_ALLOW_DELETE=false` by default |
+| `NAME_FILE` | – | any secret from a file instead of the environment |
 
 Plus the Stage 1-8 settings in [README.md](README.md). `.env.example` lists all of them
 without values for secrets.
 
 ## 5. Operations
 
-* **Probes:** liveness is `/v1/health`. Readiness is `/v1/ready`, which reports the
-  database, migrations, the active policy and the primary model artefact, and never the
-  LLM.
+* **Probes:** liveness is `/v1/health`. Readiness is `/v1/ready`, which reports:
+  * the database and migrations;
+  * the active policy and the primary model artefact (re-verified);
+  * shared state (Redis) and the signing key;
+  * never the LLM.
+* **Start-up** fails closed on any configuration or readiness problem (HARDENING.md §6).
+  `fraud-ai config check` validates settings without starting anything.
 * **Metrics:** `/v1/metrics` (scope `metrics:read`), in Prometheus text format.
 * **Keys:**
-  * `fraud-ai service-key create | list | revoke | scopes`;
-  * rotate by creating a new key, deploying it, then revoking the old one;
-  * rotating `SERVICE_SIGNING_MASTER_KEY` changes every signing secret, so coordinate it
-    with the integrators.
+  * `fraud-ai service-key create [--expires-in-days N] | list | revoke | rotate | scopes | signing-secret`;
+  * `rotate` issues a successor and lets the old key expire after the grace period;
+  * the signing master key rotates through `SERVICE_SIGNING_PREVIOUS_KEY` (HARDENING.md §4).
+* **Audit and retention:** `fraud-ai audit list | verify`;
+  `fraud-ai retention plan | run | status`.
 * **Scaling:**
-  * PostgreSQL plus several uvicorn workers or replicas are supported by the unique
-    constraints;
-  * rate limits are per process until a shared `RateLimiter` (for example Redis) is
-    plugged in;
-  * the model cache is per process.
+  * PostgreSQL plus Redis support several workers or replicas (`tests/test_multiprocess.py`);
+  * about 4 workers per 4 CPUs was the measured optimum;
+  * the model cache is per process, about 850 MB per worker with PyTorch models.
 * **Benchmark:** `python scripts/service_benchmark.py` compares HTTP with direct scoring
   (synthetic; see [REALTIME_SCORING.md](REALTIME_SCORING.md) §14).
+* **Load (Stage 10):** `python scripts/pg_load_benchmark.py` (PostgreSQL + Redis,
+  1/4/8/16 workers, pool sweep) and `python scripts/model_cache_benchmark.py`. Compare
+  against `benchmarks/baseline.json` with `scripts/check_regression.py`.
 
 ## 6. Not covered (Stage 11 and beyond)
 
-* database roles and least privilege, encryption at rest, backups;
-* key expiry, automatic rotation and a secret-manager integration;
-* retention jobs (idempotency rows, replay tokens beyond their pruning, step-up records);
-* mTLS, a WAF, DDoS protection and a shared rate limiter;
-* image signing, SBOMs, dependency and container scanning;
-* a threat-model review and a penetration test;
-* any compliance programme (PCI DSS or similar). **None is claimed.**
+* database roles and least privilege, encryption at rest, PITR/WAL archiving;
+* external anchoring of the audit log; signed model artefacts;
+* a cloud secret-manager SDK integration (platform injection via `*_FILE` is supported);
+* mTLS, a WAF and DDoS protection;
+* image signing, a minimal/distroless base, and a real (PyTorch) image built and scanned in
+  CI;
+* a penetration test;
+* any compliance programme (PCI DSS, GDPR, SOC 2 or similar). **None is claimed.**

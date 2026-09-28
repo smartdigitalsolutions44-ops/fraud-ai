@@ -24,6 +24,7 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from sqlalchemy.exc import SQLAlchemyError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from fraud_ai.utils.logging import get_logger
@@ -131,6 +132,23 @@ def install_handlers(app: FastAPI) -> None:
             headers=dict(exc.headers or {}),
         )
 
+    async def database_error(request: Request, exc: Exception) -> JSONResponse:
+        # Connection refused, pool exhausted, statement timeout...: fail closed, and never
+        # leak driver text, SQL or hostnames.
+        log.warning(
+            "database unavailable type=%s correlation_id=%s",
+            type(exc).__name__,
+            correlation_id_of(request),
+        )
+        return error_response(
+            request,
+            503,
+            "DATABASE_UNAVAILABLE",
+            "the database is unavailable; the request was not processed",
+            headers={"Retry-After": "1"},
+        )
+
     app.add_exception_handler(ApiError, api_error)
+    app.add_exception_handler(SQLAlchemyError, database_error)
     app.add_exception_handler(RequestValidationError, validation_error)
     app.add_exception_handler(StarletteHTTPException, http_error)

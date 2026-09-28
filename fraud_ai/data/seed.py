@@ -212,7 +212,7 @@ def seed_with_live_holdout(
         )
         legit += 1
     session.flush()
-    rng = random.Random(seed + 7919)  # noqa: S311 - deterministic simulation, not security
+    rng = random.Random(seed + 7919)  # nosec B311 # noqa: S311 - deterministic simulation, not security
     live: list[tuple[datetime, int, dict[str, Any]]] = []
     late = 0
     for i, event in enumerate(e for e in dataset.events if e.timestamp >= cutoff):
