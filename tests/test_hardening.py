@@ -36,7 +36,14 @@ from fraud_ai.database.models import (
     RiskAssessment,
     ServiceApiKey,
 )
-from fraud_ai.retention import CATEGORIES, PROTECTED_TABLES, RetentionError, plan, run
+from fraud_ai.retention import (
+    CATEGORIES,
+    NULLIFY_ONLY,
+    PROTECTED_TABLES,
+    RetentionError,
+    plan,
+    run,
+)
 from fraud_ai.service.keys import ServiceKeyError, create_key, revoke_key, rotate_key, verify_key
 from fraud_ai.utils.logging import JsonFormatter, RedactingFilter, get_logger
 from tests.service_helpers import Clock, make_harness
@@ -313,7 +320,12 @@ def test_retention_plan_and_run(factory: sessionmaker[Session]) -> None:
         k: v for k, v in before.items() if k != "audit_events"
     }
     assert after["audit_events"] == before["audit_events"] + 2
-    assert all(c.table is None or c.table.__tablename__ not in PROTECTED_TABLES for c in CATEGORIES)
+    assert all(
+        c.table is None
+        or c.table.__tablename__ not in PROTECTED_TABLES
+        or (c.action == "nullify" and c.table.__tablename__ in NULLIFY_ONLY)
+        for c in CATEGORIES
+    )
 
 
 def test_retention_cli(sqlite_url: str, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -33,6 +33,7 @@ from fraud_ai.database import migrations as mig
 from fraud_ai.database.models import ModelVersion
 from fraud_ai.models.registry import resolve_model
 from fraud_ai.models.scoring import load_registered_model
+from fraud_ai.models.signing import ModelSignatureError, ModelTrust
 from fraud_ai.risk.registry import active_deployment
 from fraud_ai.service.dependencies import ServiceContainer
 from fraud_ai.service.errors import log
@@ -62,7 +63,8 @@ def _verify_primary(c: ServiceContainer, record: ModelVersion) -> None:
         return
     started = time.perf_counter()
     try:
-        load_registered_model(record)  # re-hashes every file before deserialising
+        # Re-reads every file once; digest and (Stage 11) signature over those bytes.
+        load_registered_model(record, trust=ModelTrust.from_settings(c.settings))
     except Exception:
         c.metrics.model_verification_failures.inc()
         c.extras.pop("primary_artifact", None)
@@ -116,6 +118,9 @@ def readiness(c: ServiceContainer) -> dict[str, str]:
             c.scoring.cache.get(record)
             _verify_primary(c, record)
             checks["primary_model"] = "ok"
+    except ModelSignatureError as exc:
+        # Safe to log in full: model names, key ids and file names only (no secrets).
+        log.error("readiness: model signature check failed: %s", exc)
     except Exception as exc:
         log.warning("readiness: policy/model check failed (%s)", type(exc).__name__)
     return checks

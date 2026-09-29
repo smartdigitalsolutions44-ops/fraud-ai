@@ -49,6 +49,16 @@ class AuditError(FraudAIError):
 
 
 def cli_actor() -> str:
+    """``operator:<OPERATOR_ID>`` when an operator identity is configured (Stage 11),
+    otherwise ``cli:<os user>``."""
+    from fraud_ai.config.settings import get_settings
+
+    try:
+        operator = get_settings().operator_id
+    except Exception:  # invalid settings must not hide who acted
+        operator = None
+    if operator:
+        return f"operator:{operator}"
     try:
         user = getpass.getuser()
     except Exception:  # pragma: no cover - no user database in some containers

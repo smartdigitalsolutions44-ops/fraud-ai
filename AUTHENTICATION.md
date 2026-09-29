@@ -1,4 +1,4 @@
-# Step-up authentication (Stages 9-10)
+# Step-up authentication (Stages 9-11)
 
 Stage 8 decides *whether* extra authentication is needed: a `STEP_UP_AUTHENTICATION`
 assessment. Stage 9 *executes* the step-up through one of two standard mechanisms, records
@@ -167,6 +167,11 @@ documentation marks the provider as a fake. `simulate_callback()` produces the s
 provider would send, for tests and demos.
 
 ### `StripePaymentAuthProvider`: Stripe TEST MODE (Stage 10)
+
+**Status (Stage 11): REAL STRIPE TEST NOT PERFORMED.** No Stripe test-mode credentials were
+available in this environment, so no request reached Stripe and none was faked as a
+success. The versions the adapter targets and was contract-tested with are the SDK `stripe`
+**15.6.1**, pinned API version **`2026-08-26.dahlia`**.
 
 **Status: implemented, not exercised against Stripe.** The code targets the official
 `stripe` Python SDK (15.x) and Stripe's documented PaymentIntents and webhook APIs.

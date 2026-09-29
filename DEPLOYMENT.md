@@ -1,4 +1,4 @@
-# Deployment (Stages 9-10)
+# Deployment (Stages 9-11)
 
 How to run the fraud service locally, in a container, and as the Stage 10 staging stack.
 This is **not** a production runbook. The platform is a *deployment-hardened prototype* on
@@ -127,6 +127,75 @@ models directory mounted writable.
 The run on this machine is recorded in [HARDENING.md](HARDENING.md) §12. The E2E passed,
 promotion worked, and it failed closed with Redis or PostgreSQL stopped.
 
+## 2b. Stage 11 trust setup
+
+Keys (one per purpose; generate them on a signing host, never on service hosts):
+
+```bash
+fraud-ai keys generate --purpose model   --out /secure/model.pem    # -> MODEL_SIGNING_PUBLIC_KEYS
+fraud-ai keys generate --purpose audit   --out /secure/audit.pem    # -> AUDIT_ANCHOR_PUBLIC_KEYS
+fraud-ai keys generate --purpose release --out /secure/release.pem  # -> RELEASE_SIGNING_PUBLIC_KEYS
+```
+
+Models: sign after training, before proposing or activating a policy.
+`MODEL_SIGNATURES_REQUIRED` is on by default in staging and production, and policy
+evaluation loads the models too.
+
+```bash
+fraud-ai models sign gradient-boosting-1.0.0 --key /secure/model.pem
+fraud-ai models verify-signature gradient-boosting-1.0.0
+```
+
+Two-person activation (`POLICY_APPROVALS_REQUIRED=2`, the default in production). Each
+operator's CLI environment sets its own `OPERATOR_ID`:
+
+```bash
+OPERATOR_ID=alice fraud-ai policy approve risk-policy-1.1.0 --note "..."
+OPERATOR_ID=bob   fraud-ai policy approve risk-policy-1.1.0 --note "..."
+OPERATOR_ID=bob   fraud-ai deployment activate risk-policy-1.1.0 --yes
+```
+
+Audit anchors: run from cron, into storage the DBA cannot write:
+
+```bash
+fraud-ai audit anchor --key /secure/audit.pem --store /mnt/worm/anchors
+fraud-ai audit verify-anchor --store /mnt/worm/anchors
+```
+
+Release manifest:
+
+```bash
+fraud-ai release manifest --out release.json --sbom sbom/fraud-ai.cdx.json \
+    --image-digest "$(docker image inspect --format '{{.Id}}' fraud-ai:release)" --key /secure/release.pem
+fraud-ai release verify release.json --sbom sbom/fraud-ai.cdx.json
+```
+
+Least-privilege PostgreSQL (`fraud_ai/database/roles.py`):
+
+```bash
+# as an administrator; the passwords come from FRAUD_*_PASSWORD(_FILE), never argv
+DATABASE_URL=<admin url> fraud-ai db create-roles --database fraud_ai
+DATABASE_URL=<fraud_migrator url> fraud-ai db migrate
+DATABASE_URL=<fraud_migrator url> fraud-ai db grant-roles     # after EVERY migration
+# service: DATABASE_URL=<fraud_service url>; backups: pg_dump as fraud_backup
+```
+
+**Staging stack (Stage 11).** `generate-secrets.sh` also creates a staging-only model key
+with `openssl`. The private key goes to `signing/` (0700/0600, owned by uid 10001, never
+mounted into the service); the public key goes to `deploy/staging/.env`. The stack sets
+`SIGNATURE_MIN_VERSION=v2`, `MODEL_SIGNATURES_REQUIRED=true` and
+`POLICY_APPROVALS_REQUIRED=2`. The procedure used on this machine:
+
+1. Bootstrap with `scripts/bootstrap_world.py` under `MODEL_SIGNATURES_REQUIRED=false` (the
+   offline training environment), or pass `--sign-key`.
+2. The service **refuses** the unsigned models.
+3. Sign with the one-off `migrate` service, mounting `signing/` read-only.
+4. Restart the service.
+5. Run the E2E and the two-person flow.
+
+The results are in HARDENING.md §24. The stack still connects as a single database user;
+adopting the least-privilege roles there is a Stage 12 item.
+
 ## 3. TLS and reverse proxies (required outside localhost)
 
 The service speaks plain HTTP. **In any shared or production-like environment, terminate
@@ -211,13 +280,12 @@ without values for secrets.
   1/4/8/16 workers, pool sweep) and `python scripts/model_cache_benchmark.py`. Compare
   against `benchmarks/baseline.json` with `scripts/check_regression.py`.
 
-## 6. Not covered (Stage 11 and beyond)
+## 6. Not covered (Stage 12 and beyond)
 
-* database roles and least privilege, encryption at rest, PITR/WAL archiving;
-* external anchoring of the audit log; signed model artefacts;
+* encryption at rest and PITR/WAL archiving;
+* least-privilege roles in the compose stacks (the roles exist and are tested);
+* WORM anchor storage wired in; image signing and provenance (cosign, SLSA);
 * a cloud secret-manager SDK integration (platform injection via `*_FILE` is supported);
 * mTLS, a WAF and DDoS protection;
-* image signing, a minimal/distroless base, and a real (PyTorch) image built and scanned in
-  CI;
 * a penetration test;
-* any compliance programme (PCI DSS, GDPR, SOC 2 or similar). **None is claimed.**
+* any compliance programme (PCI DSS, GDPR, SOC 2, ISO or similar). **None is claimed.**

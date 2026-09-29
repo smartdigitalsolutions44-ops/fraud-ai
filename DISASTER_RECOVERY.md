@@ -1,4 +1,4 @@
-# Disaster recovery (Stage 10)
+# Disaster recovery (Stages 10-11)
 
 These are runbooks for a **deployment-hardened prototype** on synthetic data. The backup
 and restore procedure below **has been restored successfully in tests**
@@ -69,6 +69,16 @@ PostgreSQL). Recovery has three steps:
 1. Fix the cause.
 2. Re-run `fraud-ai db migrate`.
 3. Take a backup before every migration in shared environments.
+
+**Least-privilege backups (Stage 11).** Take dumps as `fraud_backup`, which has SELECT on
+every table and sequence and no write privilege at all. Restore as an administrator or
+`fraud_migrator`. `tests/test_pg_privileges.py::test_backup_role_dump_restores_completely`
+does exactly that: a `fraud_backup` dump restores into a scratch database with every table
+identical, and the backup role cannot write.
+
+After restoring, also run `fraud-ai audit verify-anchor` (Stage 11). The restored chain
+must match the external anchors up to the backup time; anchors newer than the backup
+correctly report the missing events.
 
 ## 3. Database loss
 
@@ -168,7 +178,36 @@ sign requests for any key whose bearer token they also hold.
   re-keying tool yet (Stage 11). The mitigation today is keeping raw IP storage off and
   limiting database access.
 
-## 10. Drills
+## 10. Stage 11 key compromise
+
+* **Model signing key.** Anyone holding it can sign a malicious artefact, and pickles run
+  code (TRUST_CHAIN.md §4).
+  1. Remove its public key from `MODEL_SIGNING_PUBLIC_KEYS` everywhere and restart. Every
+     model it signed now fails closed (not loaded; conservative fallback).
+  2. Generate a new key (`fraud-ai keys generate --purpose model`).
+  3. Re-sign only artefacts whose provenance you can re-establish: files restored from a
+     trusted backup, or retrained.
+  4. Check with `fraud-ai models verify-signature`.
+* **Audit anchor key.** A thief can forge anchors but cannot change the database.
+  1. Rotate the key and anchor again with the new one.
+  2. Distrust anchors created during the exposure window.
+  3. Compare them against an independent copy of the anchor store.
+* **Release signing key.** Rotate it, re-issue the manifests that matter, and treat
+  manifests signed in the exposure window as unverified.
+* **Operator identity (`OPERATOR_ID`) misuse.**
+  1. Review `fraud-ai policy approvals <version>` and `audit list` for `policy.approved` and
+     `policy.activated`.
+  2. Roll back to a known-good policy by activating it again. This itself needs two
+     approvals in production.
+  3. Tighten `OPERATOR_ALLOWLIST`.
+* **`fraud_migrator` credential.** It owns the schema and could drop triggers or rewrite
+  history.
+  1. Rotate the password immediately.
+  2. Run `audit verify-anchor`.
+  3. Check that the triggers still exist (`\dS audit_events`).
+  4. Re-run `fraud-ai db grant-roles`.
+
+## 11. Drills
 
 Before relying on any of this outside a test environment:
 

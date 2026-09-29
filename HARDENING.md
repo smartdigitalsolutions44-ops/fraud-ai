@@ -1,4 +1,4 @@
-# Deployment hardening (Stage 10)
+# Deployment hardening (Stages 10-11)
 
 This stage prepares fraud-ai for **real deployment testing** (staging, load and failure
 testing on non-production infrastructure). The result is a **deployment-hardened
@@ -11,6 +11,11 @@ prototype**. It is not production-ready.
 * real-world fraud reduction or financial savings.
 
 All data, models, benchmarks and decisions here are **synthetic**.
+
+Stage 11 (trust, integrity, privacy and real-integration gaps) is in §23-§26; the trust
+mechanisms are described in [TRUST_CHAIN.md](TRUST_CHAIN.md) and privacy in
+[PRIVACY.md](PRIVACY.md). The result is a **security-hardened prototype**. It is still not
+production-ready.
 
 Related documents:
 
@@ -768,3 +773,122 @@ Also reviewed, with no issue found:
 * There is no cloud secret-manager SDK integration: platform injection only, and untested.
 * Audit anchoring, erasure tooling and data-retention policies for core records are missing.
 * The uvicorn supervisor crash-loops on a worker that refuses start-up, instead of exiting.
+
+---
+
+# Stage 11: trust, integrity, privacy and real integration
+
+## 23. What changed, and what it costs
+
+| Area | Change |
+|---|---|
+| Request signatures | **v2**: binds method, canonical path and query, timestamp and body digest. `SIGNATURE_MIN_VERSION` gives downgrade protection (default v2 in production) |
+| Model artefacts | **Ed25519 signatures** over every file; required by default in staging/production. **Read-once verified load** from in-memory bytes (no symlinks, `fstat`-checked, 1 GiB cap) |
+| Audit | **External signed anchors** (separate audit key, create-only files); `audit anchor` / `audit verify-anchor` |
+| Policy activation | **Two-person rule**: distinct `OPERATOR_ID`s, approval TTL, pinned to the definition hash, DB unique constraint, append-only with triggers |
+| Database | **Least-privilege roles**: `fraud_migrator` owns; `fraud_service` has no DROP/ALTER/TRUNCATE/trigger control and no UPDATE/DELETE on history (one column-level exception: `risk_assessments.latency_ms` telemetry); `fraud_readonly`; `fraud_backup` |
+| Privacy | `privacy inventory`; free-text PII rules (reject/sanitise); dry-run `privacy erasure-plan`; four opt-in core retention classes |
+| Releases | **Signed release manifest** (separate release key); `release verify` |
+| Keys | One Ed25519 key set per purpose, disjoint (validated), with domain-separated messages; `keys generate` |
+| Migration | `0009`: `model_artifact_signatures`, `policy_approvals` (both append-only) |
+
+**Overhead**, measured with `scripts/trust_benchmark.py` on a local 4-vCPU container
+(`benchmarks/stage11_trust_overhead.json`; synthetic; not an SLA):
+
+| What | Cost | When |
+|---|---|---|
+| request signing + verification, v1 | median 9.5 µs (p95 13 µs) | per signed request |
+| request signing + verification, **v2** | median 13.0 µs (p95 20 µs) | per signed request: **+≈4 µs**, noise against about 30-90 ms of scoring |
+| artefact read-once (GB 209 KB / GRU 40 KB / LR 54 KB) | 0.25-0.34 ms | per model load only |
+| digest over the in-memory bytes | 0.05-0.15 ms | per model load only |
+| **Ed25519 signature check** | about 0.2 ms | per model load only (start-up, cache miss, readiness re-verification); **never per request** |
+| full verified load (read + digest + signature + deserialise) | GB 11 ms, GRU 3.6 ms (PyTorch already imported), LR 2.6 ms | per model load only |
+| `audit anchor` over 2,000 events | 43 ms | operator/cron |
+| `audit verify-anchor` over 2,000 events | 62 ms | operator/cron |
+| `policy approve` / activation gate | 7-9 ms / 1.7 ms | operator actions |
+
+## 24. Security status matrix
+
+Evidence levels:
+
+* **Implemented:** the code exists.
+* **Local:** automated tests on this machine (SQLite and/or PostgreSQL 16 plus Redis 7).
+* **Staging:** exercised on the docker-compose staging stack (PostgreSQL, Redis, Caddy TLS,
+  2 workers) or by the staging-profile E2E test.
+* **External:** exercised against a system outside this environment (GitHub Actions,
+  Stripe).
+
+| Control | Implemented | Tested locally | Tested staging | Tested externally | Remaining gap |
+|---|---|---|---|---|---|
+| Signature v2 + downgrade protection | yes | yes (`test_signature_v2`, `test_security_regressions`) | yes: stack through TLS (method/path/body/replay fail, v1 → `SIGNATURE_VERSION_REJECTED`) and staging E2E | GitHub CI runs the tests (pending first run) | path-rewriting proxies must be accounted for; integrators still on v1 during migration |
+| Signed model artefacts | yes | yes (`test_model_signing`) | yes: stack refused unsigned models, loaded signed ones; staging E2E | CI container smoke (full PyTorch image, GRU): pending first run | model key custody; sklearn models are pickles |
+| Read-once verified load | yes | yes (swap-after-read test, symlink/subdir refusal) | indirectly (every load) | CI smoke (pending) | an attacker with write access *and* the signing key |
+| External audit anchors | yes (file store) | yes, SQLite + PostgreSQL (rewrite, truncation, forged/missing/wrong-key anchors) | yes: stack anchor, then a DBA-style rewrite **detected** | no | the store is a local directory unless pointed at WORM storage; unanchored tail |
+| Two-person activation | yes | yes (`test_trust_chain`) | yes: stack CLI flow and staging E2E (double approval refused) | no | `OPERATOR_ID` is configuration, not authentication |
+| Approval expiry | yes | yes | TTL shown in the stack (72 h) | no | none known |
+| Least-privilege DB roles | yes (`db create-roles`, `db grant-roles`) | yes, real PostgreSQL (`test_pg_privileges`, 26 checks) | no: the stack still uses one DB user | CI (pending) | the migrator credential and superusers remain all-powerful; the stack should adopt the roles |
+| Backup with the restricted role | yes | yes (`fraud_backup` dump → restore → identical) | no | no | not timed at real volumes |
+| Privacy inventory | yes | yes (schema-checked) | no | no | not a legal assessment |
+| Free-text PII rules | yes | yes | indirectly (review note in the E2E) | no | heuristic: names and unusual formats are not detected |
+| Erasure plan (dry run) | yes | yes | no | no | no erasure execution (deliberate) |
+| Core retention classes | yes (off by default) | yes | no | no | no retention *policy* chosen for core records |
+| Signed release manifest | yes | yes (`test_release`) | no | no | no image signing or provenance |
+| Key separation | yes | yes (settings refusal, domain separation) | yes (staging keys) | no | key custody is procedural |
+| Real Stripe test mode | adapter only | contract tests | no | **no: REAL STRIPE TEST NOT PERFORMED** (no test credentials) | everything real about Stripe |
+| Full PyTorch image | Dockerfile | torch-less variant only (the CPU wheel index is blocked here) | torch-less variant | CI builds, scans and smoke-tests it (pending first run) | results depend on the CI run |
+| GitHub CI | workflow | n/a | n/a | **Stage 10 run: lint + tests green; security (setuptools) and container (Trivy action tag) failed, both fixed**; Stage 11: pending | – |
+
+## 25. Stripe, PyTorch image, base image, CI
+
+* **Stripe: REAL STRIPE TEST NOT PERFORMED.** No Stripe test-mode credentials were available
+  in this environment (`STRIPE_API_KEY` unset). No external call was faked as a success.
+  * **Local contract tests** (`tests/test_stripe_provider.py`): all pass, against a stub
+    client, with webhook signatures generated and verified by the SDK itself.
+  * **Versions:** SDK `stripe` 15.6.1, pinned API version `2026-08-26.dahlia`.
+  * **Before relying on it:** run AUTHENTICATION.md §3's checklist against a Stripe test
+    account.
+* **Full PyTorch image.** Building it here is still impossible: the CPU wheel index
+  `download.pytorch.org` is blocked (HTTP 403). The **GitHub Actions** runner can reach it:
+  the Stage 10 CI run installed `torch-2.14.0+cpu`. The container job now:
+  * builds the real image;
+  * runs `container_checks.sh`;
+  * runs `container_smoke.sh`: migrate; bootstrap GB + **GRU** + LR; unsigned models must
+    refuse start-up; sign; the service must be ready read-only as uid 10001, with the GRU
+    loaded;
+  * builds the sklearn-only variant for size comparison;
+  * runs Trivy on both images;
+  * uploads everything as artefacts.
+
+  The results are recorded in §26 once the run has completed.
+* **Image minimisation research** (measured here, torch-less, with Trivy 0.58.1 and the
+  2026-09-28 DB):
+
+  | Base | Disk | Compressed | CRITICAL | HIGH (unique CVEs) | HIGH fixable | Smoke test |
+  |---|---|---|---|---|---|---|
+  | `python:3.11-slim` (Debian 13), **current** | 732 MB | 163 MB | 0 | 44 (8) | 0 | passes |
+  | `gcr.io/distroless/python3-debian12` (research: `deploy/research/Dockerfile.distroless`) | 625 MB | 137 MB | **2** (sqlite, zlib) | **51 (28)** | **19** | passes (`PYTHON_BIN=python3`) |
+
+  **Decision: keep the slim base.** Distroless saves 107 MB, but today it carries
+  *more* and *fixable-but-unfixed* findings, because its Debian 12 packages lag. Switching
+  would be for appearance only. Revisit when a distroless Debian 13 image is available.
+  Splitting the GRU into a separate sequence-model worker is **not** justified yet:
+  * the size difference is the PyTorch wheel, in both designs;
+  * the per-worker memory cost (about +470 MB with the GRU) is already known;
+  * the service calls the sequence model in-process on the scoring path, so a split would
+    add a network hop and a new failure mode to every event.
+* **CI.** The Stage 10 push ran on GitHub Actions (run 36363585987):
+  * `lint`: green;
+  * `test`: green in 43 min, including PostgreSQL and Redis;
+  * `security`: failed at pip-audit. `setuptools` 79.0.1 (PYSEC-2026-3447) is pulled in by
+    torch. **Fixed:** a `setuptools>=83` floor;
+  * `container`: failed at set-up because `aquasecurity/trivy-action@0.28.0` does not
+    resolve. **Fixed:** Trivy now runs from the `aquasec/trivy:0.58.1` image.
+
+  Artefacts are now uploaded: coverage (XML and HTML), SBOM, security summaries, container
+  scan and smoke results. Nothing secret is uploaded; the smoke test's keys live in a temp
+  directory that is deleted.
+
+## 26. Stage 11 CI run
+
+Recorded after the Stage 11 push (see the commit that updates this section).
+

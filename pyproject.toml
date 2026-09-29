@@ -34,6 +34,8 @@ dependencies = [
     "redis>=5",
     # Security floors for transitive dependencies (pip-audit, see HARDENING.md).
     "idna>=3.15",
+    # Transitive via torch; floor for PYSEC-2026-3447 (found by pip-audit in CI).
+    "setuptools>=83",
 ]
 
 [project.optional-dependencies]

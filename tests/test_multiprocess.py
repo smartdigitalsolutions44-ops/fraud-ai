@@ -243,9 +243,14 @@ def test_multiprocess_invariants(service: ServiceProcess, world: dict[str, Any])
 
     # 5. The rate limit is global: 150 requests from one key share one bucket of 100.
     limited = Client(service.base_url, _key(world, "policy:read"))
+    started = time.monotonic()
     codes = parallel(150, lambda _: limited.get("/v1/policy").status_code)
+    elapsed = time.monotonic() - started
     allowed = codes.count(200)
-    assert 100 <= allowed <= 112, allowed  # burst + refill (2/s) during the burst
+    # Exactly the burst, plus whatever the bucket refilled (2 tokens/s) while the burst ran:
+    # the bound follows the measured duration, not an assumed one (a loaded machine is slower).
+    ceiling = 100 + int(2 * elapsed) + 1
+    assert 100 <= allowed <= ceiling, (allowed, round(elapsed, 1))
     assert codes.count(429) == 150 - allowed
 
     # 6. Kill a worker: uvicorn replaces it; shared state and idempotency survive.

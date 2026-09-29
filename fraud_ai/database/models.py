@@ -499,6 +499,13 @@ class ModelVersion(Base):
     default_threshold: Mapped[float | None] = mapped_column(Float)
 
     predictions: Mapped[list[ModelPrediction]] = relationship(back_populates="model")
+    # Stage 11: Ed25519 signatures over the artefact (loaded with the row, so a detached
+    # record can still be verified at load time).
+    signatures: Mapped[list[ModelArtifactSignature]] = relationship(
+        back_populates="model",
+        lazy="selectin",
+        order_by="ModelArtifactSignature.signed_at.desc()",
+    )
 
 
 class ModelPrediction(Base):
@@ -1018,9 +1025,6 @@ class PaymentAuthRequest(Base):
     completed_at: Mapped[datetime | None]
 
 
-ALL_TABLES = sorted(Base.metadata.tables)
-
-
 class AuditEvent(Base):
     """An append-only, hash-chained record of an administrative action (Stage 10).
 
@@ -1068,3 +1072,60 @@ class PolicyLifecycleEvent(Base):
     evidence: Mapped[dict[str, Any]] = mapped_column(default=dict)
     note: Mapped[str | None] = mapped_column(String(500))
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
+class ModelArtifactSignature(Base):
+    """An Ed25519 signature over a model artefact (Stage 11).
+
+    The signed statement names the model row, its registered digest and the SHA-256 of
+    **every** file in the artefact directory (``files``), so no file can be added, removed
+    or changed without invalidating it. The private key never reaches the database; only the
+    key id, algorithm and signature are stored. Rows are never updated: re-signing (for
+    example with a rotated key) adds a row.
+    """
+
+    __tablename__ = "model_artifact_signatures"
+    __table_args__ = (
+        CheckConstraint("algorithm = 'ed25519'", name="algorithm_known"),
+        Index("ix_model_artifact_signatures_model", "model_version_id"),
+    )
+
+    signature_id: Mapped[uuid.UUID] = _uuid_pk()
+    model_version_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("model_versions.model_version_id")
+    )
+    artifact_sha256: Mapped[str] = mapped_column(String(64))
+    files: Mapped[dict[str, Any]] = mapped_column(default=dict)
+    key_id: Mapped[str] = mapped_column(String(40))
+    algorithm: Mapped[str] = mapped_column(String(16))
+    signature: Mapped[str] = mapped_column(String(128))
+    signed_at: Mapped[datetime] = mapped_column(default=utcnow)
+    signed_by: Mapped[str] = mapped_column(String(200))
+
+    model: Mapped[ModelVersion] = relationship(back_populates="signatures")
+
+
+class PolicyApproval(Base):
+    """One operator's approval of a candidate policy (Stage 11 two-person rule).
+
+    Append-only. Activation under ``POLICY_APPROVALS_REQUIRED=2`` needs unexpired approvals
+    from two **different** operator identities; the same operator approving twice is
+    refused, and the database enforces it too (unique ``(policy_version, operator)``).
+    """
+
+    __tablename__ = "policy_approvals"
+    __table_args__ = (
+        UniqueConstraint("policy_version", "operator", name="uq_policy_approval_operator"),
+        Index("ix_policy_approvals_policy", "policy_version"),
+    )
+
+    approval_id: Mapped[uuid.UUID] = _uuid_pk()
+    policy_version: Mapped[str] = mapped_column(ForeignKey("risk_policies.policy_version"))
+    policy_sha256: Mapped[str] = mapped_column(String(64))
+    operator: Mapped[str] = mapped_column(String(120))
+    note: Mapped[str] = mapped_column(String(500))
+    approved_at: Mapped[datetime] = mapped_column(default=utcnow)
+    expires_at: Mapped[datetime | None]
+
+
+ALL_TABLES = sorted(Base.metadata.tables)

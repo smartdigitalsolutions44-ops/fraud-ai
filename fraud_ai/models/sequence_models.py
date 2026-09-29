@@ -51,20 +51,22 @@ from torch import nn
 from torch.nn.utils.rnn import pack_padded_sequence
 
 from fraud_ai.features.definitions import DEFAULT_FEATURE_VERSION
+from fraud_ai.models.artifact_io import ArtifactBytes, ArtifactReadError
 from fraud_ai.models.base import EvaluationResult, FraudModel, Labels, Validation
 from fraud_ai.models.matrix import ModelMatrix
 from fraud_ai.models.metrics import evaluate_scores
 from fraud_ai.models.preprocessing import PreprocessingConfig, Preprocessor
 from fraud_ai.models.torch_support import (
+    TorchArtifactIntegrityError,
     TorchModelError,
     deterministic,
     digest_files,
     environment,
     load_state,
     parameter_count,
+    read_verified,
     resolve_device,
     save_state,
-    verify_digest,
     write_hashes,
 )
 from fraud_ai.models.torch_training import (
@@ -658,14 +660,20 @@ class SequenceModel(FraudModel):
         return digest
 
     @classmethod
-    def load(cls, directory: Path, expected_sha256: str) -> SequenceModel:
-        config_path = directory / CONFIG_FILE
-        if not config_path.exists():
-            raise SequenceModelError(f"{config_path} is missing")
-        kind = json.loads(config_path.read_text()).get("kind")
+    def load(
+        cls, directory: Path, expected_sha256: str, blob: ArtifactBytes | None = None
+    ) -> SequenceModel:
+        try:
+            blob = blob if blob is not None else ArtifactBytes.read(directory)
+        except ArtifactReadError as exc:
+            raise TorchArtifactIntegrityError(str(exc)) from None
+        if not blob.has(CONFIG_FILE):
+            raise SequenceModelError(f"{directory / CONFIG_FILE} is missing")
+        # The config is part of the digest; its "kind" only selects which names to check.
+        kind = json.loads(blob.data(CONFIG_FILE)).get("kind")
         names = (WEIGHTS_FILE, CONFIG_FILE) + ((PREPROCESSOR_FILE,) if kind == "hybrid-gru" else ())
-        verify_digest(directory, names, expected_sha256)  # before reading any weights
-        config = json.loads(config_path.read_text())
+        read_verified(directory, names, expected_sha256, blob)  # before parsing any weights
+        config = blob.json(CONFIG_FILE)
         model = cls(
             config["kind"],
             config["model_version"],
@@ -677,7 +685,7 @@ class SequenceModel(FraudModel):
         )
         model.definition = SequenceDefinition.from_dict(config["sequence"])
         if model.kind == "hybrid-gru":
-            pre = Preprocessor.from_dict(json.loads((directory / PREPROCESSOR_FILE).read_text()))
+            pre = Preprocessor.from_dict(blob.json(PREPROCESSOR_FILE))
             if pre.config != STATIC_PREPROCESSING:
                 raise SequenceModelError("stored static preprocessing differs from the model")
             if len(pre.output_columns) != config["static_dim"]:
@@ -686,10 +694,10 @@ class SequenceModel(FraudModel):
         network = SequenceNetwork(
             model.kind, model.config, model.definition.length, config["static_dim"]
         )
-        load_state(network, directory / WEIGHTS_FILE)
+        load_state(network, blob.data(WEIGHTS_FILE))
         network.eval()
         model.network = network
-        if (directory / HISTORY_FILE).exists():
-            stored = json.loads((directory / HISTORY_FILE).read_text())
+        if blob.has(HISTORY_FILE):
+            stored = blob.json(HISTORY_FILE)
             model.history, model.training_summary = stored["history"], stored["summary"]
         return model

@@ -29,3 +29,8 @@ models/*
 deploy/staging/secrets/
 /pg-benchmark/
 /service-benchmark/
+deploy/staging/signing/
+deploy/staging/.env
+deploy/staging/models/
+deploy/staging/anchors/
+deploy/staging/audit-key/

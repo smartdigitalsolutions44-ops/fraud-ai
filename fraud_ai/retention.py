@@ -18,10 +18,23 @@ Categories (``RETENTION_*_DAYS``; 0 disables one):
   set to NULL; the keyed hash stays (default 30 days).
 * ``log_files``: not applicable; the application writes logs to stderr only.
 
+Stage 11 core retention classes (all **disabled by default**; each needs an explicit
+``RETENTION_*_DAYS`` policy):
+
+* ``network_observations``: raw per-event network observations (``network_events``) older
+  than N days. N must be at least 180, well beyond the longest feature window (30 days), so
+  point-in-time features are unaffected.
+* ``request_metadata``: request details on security events (``security_events.details``)
+  older than N days are emptied; the event itself stays.
+* ``investigations``: stored LLM explanations older than N days are deleted (decision
+  support only; nothing references them).
+* ``review_notes``: free-text analyst notes older than N days are set to NULL. The
+  resolution and the review item stay (nullify only, never delete).
+
 **Never touched** (see :data:`PROTECTED_TABLES`): events, risk assessments, model and
-policy history, deployments, fraud labels, review items and outcomes, investigations,
-audit events and lifecycle events. Only an explicit future data-retention policy could
-change that; this module has no code path that deletes them.
+policy history, deployments, fraud labels, review items, audit events, lifecycle events,
+signatures and approvals. This module has no code path that deletes them. Review outcomes
+may only have their note nulled (:data:`NULLIFY_ONLY`).
 
 Runs are dry-run by default. A destructive run needs ``--execute`` **and** either
 ``RETENTION_ALLOW_DELETE=true`` or an interactive confirmation. Every run, dry or not, is
@@ -44,10 +57,14 @@ from fraud_ai.core.enums import AuthenticationResult, PaymentAuthStatus
 from fraud_ai.database.models import (
     AuthenticationAttempt,
     AuthenticationChallenge,
+    Investigation,
+    NetworkEvent,
     NetworkIdentity,
     PaymentAuthRequest,
     RequestIdempotency,
     RequestReplayToken,
+    ReviewOutcome,
+    SecurityEvent,
 )
 
 PROTECTED_TABLES = frozenset(
@@ -63,11 +80,15 @@ PROTECTED_TABLES = frozenset(
         "fraud_labels",
         "review_queue",
         "review_outcomes",
-        "investigations",
         "audit_events",
         "feature_snapshots",
+        "model_artifact_signatures",
+        "policy_approvals",
     }
 )
+# Protected tables where only specific columns may be nulled (the row itself stays).
+NULLIFY_ONLY = frozenset({"review_outcomes"})
+MIN_NETWORK_OBSERVATION_DAYS = 180.0
 STALE_IN_PROGRESS = timedelta(hours=1)
 
 
@@ -83,6 +104,7 @@ class Category:
     days: Callable[[Settings], float | None]  # None: always; 0: disabled
     condition: Callable[[datetime, float], Any] | None
     table: Any = None
+    values: dict[str, Any] | None = None  # for "nullify"
 
 
 def _days(value: float) -> timedelta:
@@ -141,6 +163,22 @@ def _raw_ip(now: datetime, days: float) -> Any:
     )
 
 
+def _network_observations(now: datetime, days: float) -> Any:
+    return NetworkEvent.observed_at < now - _days(max(days, MIN_NETWORK_OBSERVATION_DAYS))
+
+
+def _request_metadata(now: datetime, days: float) -> Any:
+    return and_(SecurityEvent.occurred_at < now - _days(days), SecurityEvent.details != {})
+
+
+def _investigations(now: datetime, days: float) -> Any:
+    return Investigation.created_at < now - _days(days)
+
+
+def _review_notes(now: datetime, days: float) -> Any:
+    return and_(ReviewOutcome.note.is_not(None), ReviewOutcome.created_at < now - _days(days))
+
+
 CATEGORIES: tuple[Category, ...] = (
     Category(
         "replay_tokens",
@@ -189,6 +227,41 @@ CATEGORIES: tuple[Category, ...] = (
         lambda s: s.retention_raw_ip_days,
         _raw_ip,
         NetworkIdentity,
+        {"ip_address": None},
+    ),
+    Category(
+        "network_observations",
+        f"raw network observations (min {MIN_NETWORK_OBSERVATION_DAYS:.0f} days)",
+        "delete",
+        lambda s: s.retention_network_observation_days,
+        _network_observations,
+        NetworkEvent,
+    ),
+    Category(
+        "request_metadata",
+        "request details on security events (the event stays)",
+        "nullify",
+        lambda s: s.retention_request_metadata_days,
+        _request_metadata,
+        SecurityEvent,
+        {"details": {}},
+    ),
+    Category(
+        "investigations",
+        "stored LLM explanations (decision support only)",
+        "delete",
+        lambda s: s.retention_investigation_days,
+        _investigations,
+        Investigation,
+    ),
+    Category(
+        "review_notes",
+        "free-text review notes (resolution kept)",
+        "nullify",
+        lambda s: s.retention_review_note_days,
+        _review_notes,
+        ReviewOutcome,
+        {"note": None},
     ),
     Category(
         "log_files",
@@ -231,7 +304,11 @@ def plan(
         enabled = cat.condition is not None and (days is None or days > 0)
         rows = 0
         if enabled and cat.condition is not None:
-            assert cat.table.__tablename__ not in PROTECTED_TABLES
+            table = cat.table.__tablename__
+            if table in PROTECTED_TABLES and not (
+                cat.action == "nullify" and table in NULLIFY_ONLY
+            ):
+                raise RetentionError(f"{table} is protected")
             rows = int(
                 session.scalar(
                     select(func.count())
@@ -266,7 +343,11 @@ def run(
         for cat, item in zip(CATEGORIES, planned, strict=True):
             if not item.enabled or item.rows == 0 or cat.condition is None:
                 continue
-            assert cat.table.__tablename__ not in PROTECTED_TABLES
+            table = cat.table.__tablename__
+            if table in PROTECTED_TABLES and not (
+                cat.action == "nullify" and table in NULLIFY_ONLY
+            ):
+                raise RetentionError(f"{table} is protected")
             condition = cat.condition(now, item.days or 0.0)
             if cat.action == "delete":
                 result = session.execute(
@@ -276,7 +357,7 @@ def run(
                 result = session.execute(
                     update(cat.table)
                     .where(condition)
-                    .values(ip_address=None)
+                    .values(**(cat.values or {}))
                     .execution_options(synchronize_session=False)
                 )
             applied[cat.name] = int(getattr(result, "rowcount", 0) or 0)

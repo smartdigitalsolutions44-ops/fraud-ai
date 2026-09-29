@@ -3,7 +3,7 @@
 A locally runnable fraud-prevention software platform written in Python. It is not a web
 application: Stage 9 adds a machine-to-machine HTTP API, not a website.
 
-The current release covers **Stages 1 to 10**:
+The current release covers **Stages 1 to 11**:
 
 * **Stage 1:** the software core, the event architecture, the fraud database (PostgreSQL in
   production, SQLite for local use), migrations, synthetic data and the CLI.
@@ -78,6 +78,20 @@ The current release covers **Stages 1 to 10**:
   [DISASTER_RECOVERY.md](DISASTER_RECOVERY.md) and
   [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md).
 
+* **Stage 11:** trust, integrity and privacy. The result is a *security-hardened
+  prototype*, still not production-ready. It adds:
+  * request-signature v2 with downgrade protection;
+  * Ed25519-signed model artefacts, loaded from verified bytes;
+  * external signed audit anchors;
+  * two-person policy activation with approval expiry;
+  * least-privilege PostgreSQL roles;
+  * privacy inventory, free-text PII rules and a dry-run erasure plan;
+  * a signed release manifest;
+  * CI building and scanning the full PyTorch image.
+
+  See [TRUST_CHAIN.md](TRUST_CHAIN.md) and [PRIVACY.md](PRIVACY.md). The real Stripe test was
+  **not** performed (no test credentials).
+
 Decisions are **internal policy outputs** (`ALLOW`, `ALLOW_WITH_MONITORING`,
 `STEP_UP_AUTHENTICATION`, `MANUAL_REVIEW`, `TEMPORARY_BLOCK`). No payment or authentication
 system is called by the engine itself, and there are no permanent bans. Step-up runs only
@@ -92,7 +106,7 @@ describe synthetic data only; they are not real-world detection rates or savings
 [AUTHENTICATION.md](AUTHENTICATION.md), [DEPLOYMENT.md](DEPLOYMENT.md) and
 [ROADMAP.md](ROADMAP.md).
 
-> Not production-ready. No payment-security certification, PCI DSS, GDPR or SOC 2
+> Not production-ready. No payment-security certification, PCI DSS, GDPR, SOC 2 or ISO
 > compliance is claimed, and there are no real-world fraud-reduction or savings figures:
 > everything is measured on synthetic data.
 
@@ -213,6 +227,15 @@ fraud-ai policy promote <version> --to shadow|evaluation|candidate [--approve] -
 python scripts/security_checks.py pip-audit|bandit|secrets|sbom
 python scripts/pg_load_benchmark.py --help                  # PostgreSQL + Redis load test
 docker compose -f deploy/staging/docker-compose.staging.yml up -d   # staging stack (DEPLOYMENT.md §2a)
+
+# Stage 11 - trust chain and privacy (see TRUST_CHAIN.md, PRIVACY.md)
+fraud-ai keys generate --purpose model --out /secure/model.pem
+fraud-ai models sign <model> --key /secure/model.pem ; fraud-ai models verify-signature <model>
+OPERATOR_ID=alice fraud-ai policy approve <version> --note "..."   # two-person rule
+fraud-ai audit anchor --key /secure/audit.pem --store /mnt/worm ; fraud-ai audit verify-anchor --store /mnt/worm
+fraud-ai release manifest --out release.json --key /secure/release.pem ; fraud-ai release verify release.json
+fraud-ai privacy inventory ; fraud-ai privacy erasure-plan <customer-ref>   # dry run
+fraud-ai db create-roles --database fraud_ai ; fraud-ai db grant-roles      # PostgreSQL least privilege
 python -m fraud_ai --help        # equivalent entry point
 ```
 

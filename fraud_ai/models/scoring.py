@@ -30,11 +30,14 @@ from fraud_ai.features.definitions import get_feature_set
 from fraud_ai.features.extractor import compute_vector
 from fraud_ai.features.snapshot import find_snapshot, load_vector, persist_snapshot
 from fraud_ai.features.vector import FraudFeatureVector
+from fraud_ai.models.artifact_io import ArtifactBytes, ArtifactReadError
 from fraud_ai.models.base import FRAUD_PROBABILITY, FraudModel
-from fraud_ai.models.factory import is_anomaly_model, kind_for_name, load_model
+from fraud_ai.models.estimators import ArtifactIntegrityError
+from fraud_ai.models.factory import digest_names, is_anomaly_model, kind_for_name, load_model
 from fraud_ai.models.matrix import FeatureVersionMismatchError, ModelMatrix
 from fraud_ai.models.predictions import record_prediction
 from fraud_ai.models.preprocessing import SUPPORTED_PREPROCESSING_VERSIONS, PreprocessingError
+from fraud_ai.models.signing import ModelTrust, verify_loaded
 from fraud_ai.utils.time import ensure_utc
 
 PROBABILITY_TOLERANCE = 1e-12
@@ -64,8 +67,13 @@ class ScoreResult:
         return self.prediction.fraud_probability
 
 
-def load_registered_model(model: ModelVersion) -> FraudModel:
-    """Load a registered model after verifying compatibility and artefact integrity."""
+def load_registered_model(model: ModelVersion, trust: ModelTrust | None = None) -> FraudModel:
+    """Load a registered model after verifying compatibility, artefact integrity and
+    (Stage 11) its signature.
+
+    The directory is read **once**. The digest and the signature are verified against those
+    bytes, and the model is deserialised from the same bytes. ``trust`` defaults to the
+    current settings (``MODEL_SIGNATURES_REQUIRED``, ``MODEL_SIGNING_PUBLIC_KEYS``)."""
     if model.artifact_sha256 is None:
         raise ScoringError(f"{model.model_name}-{model.model_version} has no artefact digest")
     if model.preprocessing_version not in SUPPORTED_PREPROCESSING_VERSIONS:
@@ -83,9 +91,22 @@ def load_registered_model(model: ModelVersion) -> FraudModel:
             f"{model.model_name}-{model.model_version} was trained on a different "
             f"{model.feature_version} catalogue"
         )
-    return load_model(
-        kind_for_name(model.model_name), Path(model.model_path), model.artifact_sha256
-    )
+    directory = Path(model.model_path)
+    kind = kind_for_name(model.model_name)
+    trust = trust or ModelTrust.current()
+    try:
+        blob = ArtifactBytes.read(directory)
+    except ArtifactReadError as exc:
+        raise ArtifactIntegrityError(str(exc)) from None
+    if trust.required or model.signatures:
+        # Digest first (cheap, and a mismatch is the clearer error), then the signature;
+        # the loader re-checks the digest on the same bytes before deserialising.
+        if blob.digest(digest_names(kind, blob)) != model.artifact_sha256:
+            raise ArtifactIntegrityError(
+                f"{directory}: the files do not match the registered digest"
+            )
+        verify_loaded(model, blob, trust)
+    return load_model(kind, directory, model.artifact_sha256, blob)
 
 
 def trained_kinds(model: ModelVersion) -> set[str]:

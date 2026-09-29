@@ -27,6 +27,7 @@ from sqlalchemy.orm import Session
 
 from fraud_ai import audit
 from fraud_ai.database.models import PolicyLifecycleEvent
+from fraud_ai.privacy import freetext
 from fraud_ai.risk.registry import PolicyError, active_deployment, load_policy
 
 STAGES = ("shadow", "evaluation", "candidate", "rejected")
@@ -87,6 +88,10 @@ def promote(
     evidence: dict[str, Any] | None = None,
     approved: bool = False,
 ) -> PolicyLifecycleEvent:
+    try:
+        note = freetext.check("policy.promotion_note", note)
+    except freetext.FreeTextError as exc:
+        raise PolicyError(str(exc)) from None
     stage_now = current_stage(session, version)
     deployment = check_transition(session, version, stage)
     if stage == "shadow" and (

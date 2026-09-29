@@ -38,6 +38,7 @@ from fraud_ai.service.keys import VerifiedKey, signing_secret, touch_key, verify
 from fraud_ai.service.metrics import ServiceMetrics
 from fraud_ai.service.rate_limit import RateLimiter
 from fraud_ai.service.signatures import (
+    RequestTarget,
     SignatureError,
     check_signature,
     remember,
@@ -203,6 +204,8 @@ def _check_signature(c: ServiceContainer, request: Request, key: VerifiedKey, bo
     if not (timestamp or signature or c.settings.service_require_signatures):
         return False
     max_age = c.settings.signature_max_age
+    min_version = c.settings.effective_signature_min_version
+    target = RequestTarget(request.method, request.url.path, request.url.query)
     now = c.clock()
     candidates = c.verification_keys(now)
     if wanted_version is not None:
@@ -219,6 +222,8 @@ def _check_signature(c: ServiceContainer, request: Request, key: VerifiedKey, bo
                     body,
                     now=now,
                     max_age=max_age,
+                    target=target,
+                    min_version=min_version,
                 )
             except SignatureError as exc:
                 if exc.code != "INVALID_SIGNATURE":

@@ -6,6 +6,9 @@
 #
 # Secrets are mounted as files (/run/secrets/*) and read through the *_FILE convention,
 # so they never appear in the environment, `docker inspect` or process listings.
+# The model-signing PRIVATE key (deploy/staging/signing/model.pem) is never mounted into the
+# service; only its public key is configured. Sign models with the one-off `migrate` service:
+#   docker compose ... run --rm -v ./signing:/keys:ro migrate models sign <model> --key /keys/model.pem
 # The DEVELOPMENT FAKE payment provider is enabled explicitly
 # (PAYMENT_AUTH_ALLOW_FAKE_IN_STAGING=true); it is not 3-D Secure and production refuses it.
 # The optional local LLM runs as a separate service (profile "llm"); scoring never needs it.
@@ -32,6 +35,11 @@ x-fraud-env: &fraud_env
   DB_POOL_SIZE: "5"
   DB_MAX_OVERFLOW: "5"
   RETENTION_ALLOW_DELETE: "false"
+  # Stage 11: v2 request signatures only, signed models only, two-person activation.
+  SIGNATURE_MIN_VERSION: v2
+  MODEL_SIGNATURES_REQUIRED: "true"
+  MODEL_SIGNING_PUBLIC_KEYS: ${MODEL_SIGNING_PUBLIC_KEYS:?run generate-secrets.sh (writes deploy/staging/.env)}
+  POLICY_APPROVALS_REQUIRED: "2"
 
 x-fraud-secrets: &fraud_secrets
   - database_url

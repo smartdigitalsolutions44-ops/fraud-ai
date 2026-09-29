@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import contextlib
+import functools
 import time
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
@@ -38,6 +39,9 @@ from fraud_ai import __version__
 from fraud_ai.config.settings import Settings, get_settings, parse_rate
 from fraud_ai.core.exceptions import FraudAIError
 from fraud_ai.database import engine_from_settings, make_session_factory
+from fraud_ai.models.scoring import load_registered_model
+from fraud_ai.models.signing import ModelTrust
+from fraud_ai.realtime.cache import ModelCache
 from fraud_ai.realtime.service import FraudScoringService
 from fraud_ai.security.keys import build_pseudonymiser
 from fraud_ai.service.dependencies import ServiceContainer, SigningKey
@@ -143,12 +147,18 @@ def build_container(
         rate_limiter = InMemoryRateLimiter(count, period, settings.rate_limit_burst)
         auth_limiter = InMemoryRateLimiter(count, period, settings.rate_limit_burst)
     _instrument(engine, metrics)
+    trust = ModelTrust.from_settings(settings)
     return ServiceContainer(
         settings=settings,
         engine=engine,
         factory=factory,
         scoring=FraudScoringService(
-            factory, pseudonymiser, store_raw_ip=settings.store_raw_ip, clock=clock
+            factory,
+            pseudonymiser,
+            store_raw_ip=settings.store_raw_ip,
+            clock=clock,
+            # Stage 11: every load verifies the artefact signature under these settings.
+            cache=ModelCache(functools.partial(load_registered_model, trust=trust)),
         ),
         pseudonymiser=pseudonymiser,
         webauthn=WebAuthnConfig(

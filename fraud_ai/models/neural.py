@@ -50,6 +50,7 @@ import torch
 from torch import nn
 
 from fraud_ai.features.definitions import DEFAULT_FEATURE_VERSION
+from fraud_ai.models.artifact_io import ArtifactBytes
 from fraud_ai.models.base import EvaluationResult, FraudModel, Labels, Validation
 from fraud_ai.models.inspection import grouped_permutation_importance
 from fraud_ai.models.matrix import ModelMatrix
@@ -62,9 +63,9 @@ from fraud_ai.models.torch_support import (
     environment,
     load_state,
     parameter_count,
+    read_verified,
     resolve_device,
     save_state,
-    verify_digest,
     write_hashes,
 )
 from fraud_ai.models.torch_training import (
@@ -409,12 +410,13 @@ class NeuralNetworkModel(FraudModel):
         return digest
 
     @classmethod
-    def load(cls, directory: Path, expected_sha256: str) -> NeuralNetworkModel:
-        verify_digest(directory, DIGEST_FILES, expected_sha256)  # before reading any weights
-        config = json.loads((directory / CONFIG_FILE).read_text())
-        preprocessor = Preprocessor.from_dict(
-            json.loads((directory / PREPROCESSOR_FILE).read_text())
-        )
+    def load(
+        cls, directory: Path, expected_sha256: str, blob: ArtifactBytes | None = None
+    ) -> NeuralNetworkModel:
+        # One read; the digest is checked against these bytes before anything is parsed.
+        blob = read_verified(directory, DIGEST_FILES, expected_sha256, blob)
+        config = blob.json(CONFIG_FILE)
+        preprocessor = Preprocessor.from_dict(blob.json(PREPROCESSOR_FILE))
         if preprocessor.config != PREPROCESSING:
             raise NeuralModelError("stored preprocessing configuration differs from the model")
         if config["input_dim"] != len(preprocessor.output_columns):
@@ -429,10 +431,10 @@ class NeuralNetworkModel(FraudModel):
         )
         model.preprocessor = preprocessor
         network = build_network(config["input_dim"], model.config)
-        load_state(network, directory / WEIGHTS_FILE)
+        load_state(network, blob.data(WEIGHTS_FILE))
         network.eval()
         model.network = network
-        if (directory / HISTORY_FILE).exists():
-            stored = json.loads((directory / HISTORY_FILE).read_text())
+        if blob.has(HISTORY_FILE):
+            stored = blob.json(HISTORY_FILE)
             model.history, model.training_summary = stored["history"], stored["summary"]
         return model

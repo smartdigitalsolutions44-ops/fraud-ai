@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import func, select
@@ -35,6 +36,7 @@ from fraud_ai.database.models import (
 from fraud_ai.models.factory import is_anomaly_model, is_sequence_kind, kind_for_name
 from fraud_ai.models.registry import resolve_model
 from fraud_ai.models.scoring import load_registered_model
+from fraud_ai.privacy import freetext
 from fraud_ai.risk.policy import ModelSlot, RiskPolicyDefinition
 from fraud_ai.rules.ruleset import get_rule_set
 
@@ -200,6 +202,8 @@ def activate(
     note: str | None = None,
     activated_by: str | None = None,
     require_promotion: bool = False,
+    approvals_required: int = 0,
+    now: datetime | None = None,
 ) -> PolicyDeployment:
     """Validate and append a deployment. It takes effect for events scored afterwards.
 
@@ -210,13 +214,23 @@ def activate(
       set disagree on the feature version (the service computes one vector per event);
     * a calibration is missing, belongs to another model, or has other parameters;
     * the rule set changed since the policy was created;
-    * ``require_promotion`` is set and the policy is not a promoted ``candidate``.
+    * ``require_promotion`` is set and the policy is not a promoted ``candidate``;
+    * (Stage 11) ``approvals_required`` distinct, unexpired operator approvals of this
+      exact definition are missing (the two-person rule, :mod:`fraud_ai.risk.approvals`).
     """
+    try:
+        note = freetext.check("deployment.note", note)
+    except freetext.FreeTextError as exc:
+        raise PolicyError(str(exc)) from None
     definition = load_policy(session, version)
-    if require_promotion:
+    if require_promotion or approvals_required:
         from fraud_ai.risk.promotion import ensure_activatable
 
         ensure_activatable(session, version)
+    if approvals_required:
+        from fraud_ai.risk.approvals import ensure_approved
+
+        ensure_approved(session, version, required=approvals_required, now=now)
     validate_references(session, definition)
     _check_feature_versions(session, definition, shadow_models or [])
     shadows = sorted(set(shadow_models or []))

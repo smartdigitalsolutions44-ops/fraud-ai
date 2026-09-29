@@ -1,11 +1,23 @@
-# Service security (Stages 9-10)
+# Service security (Stages 9-11)
 
 This document describes how the HTTP boundary protects the fraud engine and what it
 deliberately does **not** claim. It is a research system on synthetic data. It is not
 production-ready, not penetration-tested, not certified and not PCI-assessed.
 
-Stage 10 additions are summarised here. The details, measurements and remaining risks are
-in [HARDENING.md](HARDENING.md) and [THREAT_MODEL.md](THREAT_MODEL.md).
+Stage 10 and 11 additions are summarised here. The details, measurements and remaining
+risks are in [HARDENING.md](HARDENING.md), [TRUST_CHAIN.md](TRUST_CHAIN.md) and
+[THREAT_MODEL.md](THREAT_MODEL.md).
+
+**Stage 11 in one paragraph.**
+
+* **Requests:** signature **v2** binds method, path, query, timestamp and body digest, with
+  downgrade protection (`SIGNATURE_MIN_VERSION`).
+* **Models:** only models carrying a **trusted Ed25519 signature** load (required in
+  staging/production). They are verified from the exact bytes that are deserialised.
+* **Audit:** the chain is **anchored externally** under a separate key.
+* **Policies:** activation can require **two different operators**.
+* **Database:** the service can use a **least-privilege role** that cannot alter history.
+* **Free text:** it is checked for personal data and secrets.
 
 ## 1. Threat model (summary)
 
@@ -103,8 +115,12 @@ Give a checkout backend `score:write assessment:read stepup:write` and nothing m
   * **Stage 10:** with `STATE_BACKEND=redis`, the claim is an atomic Redis `SET NX` shared
     by every worker and instance, so exactly one accepts a signature. A Redis failure
     gives 503 `STATE_UNAVAILABLE`, never acceptance.
-* **Known gap:** v1 does not sign the method or path. Reuse on another route is prevented
-  by the single-use claim; a v2 scheme is planned (THREAT_MODEL.md T3).
+* **Signature v2 (Stage 11):** `v2=HMAC(secret, "fraud-ai-v2\nMETHOD\nCANONICAL_TARGET\n
+  TIMESTAMP\nhex(SHA-256(body))")` binds the method, path and query. A header may carry both
+  versions during a migration; only the strongest present is verified, with no fallback.
+  Below `SIGNATURE_MIN_VERSION` the response is **401 `SIGNATURE_VERSION_REJECTED`**.
+  The minimum defaults to `v2` in production and `v1` elsewhere. Canonicalisation is
+  defined in [TRUST_CHAIN.md](TRUST_CHAIN.md) §2.
 
 ## 4. Rate limiting and request limits
 
@@ -244,4 +260,8 @@ The Docker image contains no secrets, `.env` files, databases, models or LLM wei
 * **Retention:** short-lived records have opt-in retention jobs since Stage 10
   (HARDENING.md §9). Core records have no retention policy.
 * **Assurance:** the security tests are unit and integration tests, not a penetration
-  test. No compliance certification (PCI DSS, SOC 2, …) is claimed.
+  test. No compliance certification (PCI DSS, GDPR, SOC 2, ISO, …) is claimed.
+* **Database role (Stage 11):** run the service as `fraud_service` (DEPLOYMENT.md §2b). It
+  cannot drop, alter or truncate tables, disable triggers, create objects or roles, or
+  update or delete history rows. This is verified against PostgreSQL by
+  `tests/test_pg_privileges.py`.

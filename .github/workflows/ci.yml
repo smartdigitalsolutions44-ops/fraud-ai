@@ -1,5 +1,8 @@
-# fraud-ai CI (Stage 10). Benchmarks are NOT run here (they need a quiet, comparable
+# fraud-ai CI (Stages 10-11). Benchmarks are NOT run here (they need a quiet, comparable
 # machine); see scripts/check_regression.py and HARDENING.md.
+# Artefacts: coverage, SBOM, security summary, container scan and smoke results. Never
+# uploaded: .env files, secrets, signing keys or test credentials (the smoke test's keys are
+# generated in a temp directory and deleted with it).
 name: ci
 
 on:
@@ -35,7 +38,7 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 150
     services:
       postgres:
         image: postgres:16
@@ -63,10 +66,22 @@ jobs:
             -c "CREATE DATABASE fraud_ai_staging OWNER fraud_ai_staging"
           echo "::add-mask::${STAGING_PW}"
           echo "TEST_STAGING_POSTGRES_URL=postgresql+psycopg://fraud_ai_staging:${STAGING_PW}@localhost:5432/fraud_ai_staging" >> "$GITHUB_ENV"
-      - name: Tests (SQLite + PostgreSQL + Redis), coverage gate 95%
+      - name: Tests (SQLite + PostgreSQL + Redis + least-privilege roles), coverage gate 95%
         env:
           TEST_POSTGRES_URL: postgresql+psycopg://fraud_ai:fraud_ai_dev@localhost:5432/fraud_ai_test
-        run: python -m pytest -q --cov=fraud_ai --cov-report=term --cov-fail-under=95
+          # The service container's user is a superuser: it creates the Stage 11 roles.
+          TEST_PG_ADMIN_URL: postgresql+psycopg://fraud_ai:fraud_ai_dev@localhost:5432/postgres
+        run: |
+          python -m pytest -q --cov=fraud_ai --cov-report=term --cov-report=xml:coverage.xml \
+            --cov-report=html:coverage-html --cov-fail-under=95
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage
+          path: |
+            coverage.xml
+            coverage-html/
+          if-no-files-found: ignore
 
   security:
     runs-on: ubuntu-latest
@@ -81,37 +96,96 @@ jobs:
           cache: pip
       - run: pip install -e ".[postgres,stripe,security]"
       - name: Dependency audit (known vulnerabilities; see security/pip-audit-ignore.txt)
-        run: python scripts/security_checks.py pip-audit
+        run: python scripts/security_checks.py pip-audit | tee security-pip-audit.txt
       - name: Static analysis (bandit, config in pyproject.toml)
-        run: python scripts/security_checks.py bandit
+        if: always()
+        run: python scripts/security_checks.py bandit | tee security-bandit.txt
       - name: Secret scan (detect-secrets against the reviewed baseline)
-        run: python scripts/security_checks.py secrets
+        if: always()
+        run: python scripts/security_checks.py secrets | tee security-detect-secrets.txt
       - name: Secret scan of the full git history (gitleaks, config .gitleaks.toml)
+        if: always()
         run: |
           curl -sSL https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_linux_x64.tar.gz | tar xz gitleaks
-          ./gitleaks git --no-banner --redact -c .gitleaks.toml .
+          ./gitleaks git --no-banner --redact -c .gitleaks.toml . 2>&1 | tee security-gitleaks.txt
+          exit "${PIPESTATUS[0]}"
       - name: SBOM (CycloneDX)
+        if: always()
         run: python scripts/security_checks.py sbom --output sbom.cdx.json
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Security checks"
+            for f in security-*.txt; do echo "### ${f}"; echo '```'; tail -5 "$f"; echo '```'; done
+          } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: sbom
-          path: sbom.cdx.json
+          name: security-summary
+          path: |
+            security-*.txt
+            sbom.cdx.json
+          if-no-files-found: ignore
 
   container:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     needs: [lint]
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: fraud_ai
+          POSTGRES_PASSWORD: fraud_ai_dev # CI-only throwaway database
+          POSTGRES_DB: fraud_ai_smoke
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U fraud_ai" --health-interval 5s --health-retries 20
     steps:
       - uses: actions/checkout@v4
-      - name: Build the service image
-        run: docker build -t fraud-ai:ci .
-      - name: Image checks (non-root, no secrets/.git/databases, read-only start)
+      - name: Build the release image (CPU PyTorch)
+        run: DOCKER_BUILDKIT=1 docker build -t fraud-ai:ci .
+      - name: Build the scikit-learn-only variant (size comparison only; never released)
+        run: DOCKER_BUILDKIT=1 docker build --build-arg WITH_TORCH=0 -t fraud-ai:ci-notorch .
+      - name: Image checks (non-root, no secrets/.git/databases/keys, read-only start)
         run: bash scripts/container_checks.sh fraud-ai:ci
-      - name: Vulnerability scan (Trivy; HIGH/CRITICAL are reported, never hidden)
-        uses: aquasecurity/trivy-action@0.28.0
+      - name: Smoke test (migrate, GRU, unsigned models refused, signed models load)
+        run: |
+          bash scripts/container_smoke.sh fraud-ai:ci \
+            postgresql+psycopg://fraud_ai:fraud_ai_dev@127.0.0.1:5432/fraud_ai_smoke container-results
+      - name: Image sizes and largest packages
+        run: |
+          mkdir -p container-results
+          {
+            for image in fraud-ai:ci fraud-ai:ci-notorch; do
+              echo "${image} $(docker image inspect --format '{{.Size}}' "$image") bytes"
+            done
+            docker run --rm --entrypoint sh fraud-ai:ci -c \
+              'du -sm /usr/local/lib/python3.11/site-packages/* | sort -rn | head -15'
+          } | tee container-results/sizes.txt
+      - name: Vulnerability scan (Trivy 0.58.1; HIGH/CRITICAL are reported, never hidden)
+        run: |
+          for image in fraud-ai:ci fraud-ai:ci-notorch; do
+            tag="${image//:/_}"
+            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+              -v "$PWD/container-results:/out" aquasec/trivy:0.58.1 image --scanners vuln \
+              --format json -o "/out/trivy-${tag}.json" "$image"
+            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.58.1 \
+              image --scanners vuln --severity HIGH,CRITICAL --format table "$image" \
+              | tee "container-results/trivy-${tag}.txt"
+          done
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Container"
+            echo '```'; cat container-results/sizes.txt 2>/dev/null || true; echo '```'
+            echo '```'; cat container-results/container-smoke.json 2>/dev/null || true; echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          image-ref: fraud-ai:ci
-          severity: HIGH,CRITICAL
-          ignore-unfixed: false
-          exit-code: "0" # reported for review in RELEASE_CHECKLIST.md; the release gate decides
-          format: table
+          name: container-scan
+          path: container-results/
+          if-no-files-found: ignore

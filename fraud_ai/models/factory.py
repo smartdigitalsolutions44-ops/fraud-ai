@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from fraud_ai.features.definitions import DEFAULT_FEATURE_VERSION
+from fraud_ai.models.artifact_io import ArtifactBytes
 from fraud_ai.models.base import FraudModel
 from fraud_ai.models.estimators import SPECS, BaselineModel, ModelError
 
@@ -108,20 +109,47 @@ def build_model(
     raise ModelError(f"unknown model kind {kind!r}")
 
 
-def load_model(kind: str, directory: Path, expected_sha256: str) -> FraudModel:
-    """Verify the artefact digest, then load (the loaders check before deserialising)."""
+def load_model(
+    kind: str, directory: Path, expected_sha256: str, blob: ArtifactBytes | None = None
+) -> FraudModel:
+    """Verify the artefact digest, then load (the loaders check before deserialising).
+
+    With ``blob`` (Stage 11) the loader uses exactly those already-read bytes."""
     if kind in SPECS:
-        return BaselineModel.load(directory, expected_sha256)
+        return BaselineModel.load(directory, expected_sha256, blob)
     if kind == NEURAL_KIND:
         from fraud_ai.models.neural import NeuralNetworkModel
 
-        return NeuralNetworkModel.load(directory, expected_sha256)
+        return NeuralNetworkModel.load(directory, expected_sha256, blob)
     if kind in SEQUENCE_KINDS:
         from fraud_ai.models.sequence_models import SequenceModel
 
-        return SequenceModel.load(directory, expected_sha256)
+        return SequenceModel.load(directory, expected_sha256, blob)
     if kind == AUTOENCODER_KIND:
         from fraud_ai.models.anomaly import AutoencoderModel
 
-        return AutoencoderModel.load(directory, expected_sha256)
+        return AutoencoderModel.load(directory, expected_sha256, blob)
+    raise ModelError(f"unknown model kind {kind!r}")
+
+
+def digest_names(kind: str, blob: ArtifactBytes) -> tuple[str, ...]:
+    """The files covered by a kind's registered digest (the same lists the savers use)."""
+    from fraud_ai.models.estimators import ESTIMATOR_FILE
+    from fraud_ai.models.estimators import PREPROCESSOR_FILE as BASELINE_PREPROCESSOR
+
+    if kind in SPECS:
+        return (ESTIMATOR_FILE, BASELINE_PREPROCESSOR)
+    if kind == NEURAL_KIND:
+        from fraud_ai.models.neural import DIGEST_FILES
+
+        return DIGEST_FILES
+    if kind == AUTOENCODER_KIND:
+        from fraud_ai.models.anomaly import DIGEST_FILES as AUTOENCODER_FILES
+
+        return AUTOENCODER_FILES
+    if kind in SEQUENCE_KINDS:
+        from fraud_ai.models.sequence_models import CONFIG_FILE, PREPROCESSOR_FILE, WEIGHTS_FILE
+
+        hybrid = blob.has(CONFIG_FILE) and blob.json(CONFIG_FILE).get("kind") == "hybrid-gru"
+        return (WEIGHTS_FILE, CONFIG_FILE) + ((PREPROCESSOR_FILE,) if hybrid else ())
     raise ModelError(f"unknown model kind {kind!r}")

@@ -362,31 +362,50 @@ in [HARDENING.md](HARDENING.md).
   * CI workflow, example alerts, THREAT_MODEL.md, DISASTER_RECOVERY.md and
     RELEASE_CHECKLIST.md.
 
-## Stage 11: Recommendation (not started)
+## Stage 11: Trust, integrity, privacy and real integration ✅
 
-Close the gaps that Stage 10 measured or could not verify before any analyst UI or wider
-rollout:
+The result is a *security-hardened prototype*. It is still not production-ready, and makes no
+compliance or fraud-reduction claims. Details are in [TRUST_CHAIN.md](TRUST_CHAIN.md),
+[PRIVACY.md](PRIVACY.md) and [HARDENING.md](HARDENING.md) §23-26.
 
-1. **Verify what could not be verified here:**
-   * build and scan the real PyTorch image in CI;
-   * run the Stripe adapter against a Stripe test account;
-   * run the CI workflow on GitHub;
-   * repeat the load test with networked PostgreSQL and Redis.
-2. **Integrity:**
-   * anchor the audit chain externally;
-   * sign model artefacts (not only digests in the same database);
-   * a signature v2 covering method and path;
-   * a two-person rule for policy activation.
-3. **Platform:**
-   * a minimal or distroless base image, a seccomp profile and image signing;
-   * PostgreSQL roles and least privilege, encryption at rest, PITR;
-   * a cloud secret-manager integration.
-4. **Privacy:**
-   * a retention policy for core records;
-   * erasure and subject-access tooling;
-   * pseudonymisation-key rotation;
-   * a DPIA before any real data.
-5. **Performance:** a faster feature path, or a CPU-bound scoring budget per worker; the
-   crash-loop behaviour of the uvicorn supervisor on start-up refusal.
-6. **Only then**, and only if required, an analyst desktop interface as a client of
-   `/v1/reviews` and `/v1/assessments`.
+* **Requests:** signature v2 (method, canonical path/query, timestamp, body digest) with
+  downgrade protection.
+* **Models:**
+  * Ed25519 model signatures (`models sign` / `verify-signature`), required in
+    staging/production;
+  * a read-once verified load from in-memory bytes;
+  * a serialisation review.
+* **Audit:** external audit anchors under a separate audit key (`audit anchor` /
+  `verify-anchor`); a DBA-style rewrite is detected on PostgreSQL and on the staging stack.
+* **Policies:** two-person activation with operator identity and approval expiry.
+* **Database:** least-privilege roles (`db create-roles` / `grant-roles`), tested on real
+  PostgreSQL, including backups with the restricted backup role.
+* **Privacy:**
+  * `privacy inventory`;
+  * free-text PII rules;
+  * a dry-run `privacy erasure-plan`;
+  * opt-in core retention classes.
+* **Releases:** a signed release manifest (`release manifest` / `verify`).
+* **Container and CI:**
+  * CI builds, scans and smoke-tests the full PyTorch image;
+  * the Stage 10 CI failures were fixed (a setuptools floor, Trivy);
+  * base-image research: distroless measured and **not** adopted.
+* **Stripe:** the real test was **not** performed (no test credentials).
+* **Migration:** `0009`.
+
+## Stage 12: Recommendation (not started)
+
+1. **Make the controls operational, not just available:**
+   * run the compose/staging stacks with the least-privilege roles;
+   * anchor to real WORM storage on a schedule, alerting on stale anchors;
+   * bind `OPERATOR_ID` to SSO or hardware-backed identity.
+2. **Supply chain:** image signing and provenance (cosign/SLSA), verified against the
+   release manifest at deploy time.
+3. **Models:** a non-executable format for the scikit-learn models, or sandboxed loading.
+4. **External verification:**
+   * the real Stripe test-mode run;
+   * a load test on networked PostgreSQL and Redis;
+   * an independent penetration test.
+5. **Privacy:** pseudonymisation-key rotation, and an audited erasure *execution* path once
+   the legal retention rules exist.
+6. **Only then**, and only if required, an analyst desktop interface as a client of the API.

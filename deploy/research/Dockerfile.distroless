@@ -1,0 +1,47 @@
+# syntax=docker/dockerfile:1
+# RESEARCH ONLY (Stage 11 base-image comparison; see HARDENING.md). Not the release image.
+#
+# Same application and dependency set as ../../Dockerfile, on a distroless runtime:
+# no shell, no package manager, no coreutils; Debian 12's Python 3.11.
+# The dependencies are installed with --target into /app/deps by a Python 3.11 builder on
+# the same Debian release (ABI-compatible cp311 manylinux wheels).
+#
+#   docker build -f deploy/research/Dockerfile.distroless --build-arg WITH_TORCH=0 .
+FROM python:3.11-slim-bookworm AS build
+ENV PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1
+WORKDIR /src
+COPY pyproject.toml README.md ./
+COPY fraud_ai ./fraud_ai
+ARG WITH_TORCH=1
+ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
+RUN --mount=type=secret,id=ca_bundle,required=false \
+    if [ -f /run/secrets/ca_bundle ]; then export PIP_CERT=/run/secrets/ca_bundle; fi; \
+    if [ "$WITH_TORCH" = "1" ]; then \
+        pip install --target /app/deps --extra-index-url "$TORCH_INDEX_URL" ".[postgres,stripe]"; \
+    else \
+        python -c "import tomllib; p = tomllib.load(open('pyproject.toml', 'rb'))['project']; \
+reqs = p['dependencies'] + p['optional-dependencies']['postgres'] + p['optional-dependencies']['stripe']; \
+print('\n'.join(r for r in reqs if not r.startswith(('torch', 'setuptools'))))" > /tmp/requirements.txt \
+        && pip install --target /app/deps --no-deps . \
+        && pip install --target /app/deps -r /tmp/requirements.txt; \
+    fi \
+    && rm -rf /app/deps/setuptools* /app/deps/pip* /app/deps/wheel* /app/deps/bin
+
+FROM gcr.io/distroless/python3-debian12:nonroot
+ENV PYTHONPATH=/app/deps \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    FRAUD_AI_MIGRATIONS_DIR=/app/migrations \
+    SERVICE_HOST=0.0.0.0 \
+    SERVICE_PORT=8080 \
+    DATA_DIRECTORY=/tmp/fraud-ai \
+    MODEL_DIRECTORY=/models
+COPY --from=build /app/deps /app/deps
+COPY migrations /app/migrations
+WORKDIR /app
+USER 10001:10001
+EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=3s --start-period=30s --retries=3 \
+    CMD ["python3", "-c", "import os, sys, urllib.request; url = 'http://127.0.0.1:%s/v1/health' % os.environ.get('SERVICE_PORT', '8080'); sys.exit(0 if urllib.request.urlopen(url, timeout=2).status == 200 else 1)"]
+ENTRYPOINT ["python3", "-m", "fraud_ai"]
+CMD ["service", "run"]

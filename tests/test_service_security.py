@@ -689,13 +689,21 @@ def test_production_refuses_development_service_settings() -> None:
             payment_auth_provider="fake",
             payment_auth_webhook_secret=pysecrets.token_urlsafe(32),
         )
+    from fraud_ai.trust.keys import encode_public, generate
+
     ok = Settings(
         **base,
         webauthn_origin="https://pay.example",
         service_signing_master_key=pysecrets.token_urlsafe(32),
         service_require_signatures=True,
+        # Stage 11: production requires signed models, hence a trusted model key.
+        model_signing_public_keys=encode_public(generate().public),
     )
     assert ok.service_problems() == []
+    assert ok.requires_model_signatures and ok.effective_signature_min_version == "v2"
+    assert ok.effective_policy_approvals == 2
+    unsigned = Settings(**{**ok.model_dump(), "model_signing_public_keys": None})
+    assert any("MODEL_SIGNING_PUBLIC_KEYS" in p for p in unsigned.service_problems())
     assert ok.cors_origins == [] and ok.trusted_proxy_networks == []
     assert ok.service_host == "127.0.0.1"
     assert ok.requires_promotion and ok.effective_log_format == "json"

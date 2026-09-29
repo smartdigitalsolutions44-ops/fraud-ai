@@ -29,6 +29,7 @@ from threadpoolctl import ThreadpoolController
 
 from fraud_ai.core.exceptions import FraudAIError
 from fraud_ai.features.definitions import DEFAULT_FEATURE_VERSION
+from fraud_ai.models.artifact_io import ArtifactBytes, ArtifactReadError
 from fraud_ai.models.base import EvaluationResult, FraudModel, Labels, Validation
 from fraud_ai.models.matrix import ModelMatrix
 from fraud_ai.models.metrics import evaluate_scores
@@ -297,21 +298,23 @@ class BaselineModel(FraudModel):
         return digest
 
     @classmethod
-    def load(cls, directory: Path, expected_sha256: str) -> BaselineModel:
-        for name in (ESTIMATOR_FILE, PREPROCESSOR_FILE, MANIFEST_FILE):
-            if not (directory / name).exists():
-                raise ArtifactIntegrityError(f"{directory / name} is missing")
-        actual = artifact_digest(directory)
-        if actual != expected_sha256:
+    def load(
+        cls, directory: Path, expected_sha256: str, blob: ArtifactBytes | None = None
+    ) -> BaselineModel:
+        """The estimator is a joblib (pickle) file: unpickling runs code, so it is trusted
+        only after its bytes match the recorded digest (and, where required, a trusted
+        signature). It is unpickled from those same in-memory bytes (Stage 11)."""
+        try:
+            blob = blob if blob is not None else ArtifactBytes.read(directory)
+            for name in (ESTIMATOR_FILE, PREPROCESSOR_FILE, MANIFEST_FILE):
+                blob.data(name)
             # Never unpickle an artefact whose bytes differ from what was trained.
-            raise ArtifactIntegrityError(
-                f"{directory}: digest {actual[:12]} != recorded {expected_sha256[:12]}"
-            )
-        manifest = json.loads((directory / MANIFEST_FILE).read_text())
+            blob.verify((ESTIMATOR_FILE, PREPROCESSOR_FILE), expected_sha256)
+        except ArtifactReadError as exc:
+            raise ArtifactIntegrityError(str(exc)) from None
+        manifest = blob.json(MANIFEST_FILE)
         spec = SPECS[manifest["kind"]]
-        preprocessor = Preprocessor.from_dict(
-            json.loads((directory / PREPROCESSOR_FILE).read_text())
-        )
+        preprocessor = Preprocessor.from_dict(blob.json(PREPROCESSOR_FILE))
         if preprocessor.config != spec.preprocessing:
             raise ModelError("stored preprocessing configuration differs from the model spec")
         model = cls(
@@ -324,5 +327,5 @@ class BaselineModel(FraudModel):
             oversample_ratio=manifest["oversample_ratio"],
         )
         model.preprocessor = preprocessor
-        model.estimator = joblib.load(directory / ESTIMATOR_FILE)
+        model.estimator = joblib.load(blob.stream(ESTIMATOR_FILE))  # nosec B301 - verified bytes
         return model

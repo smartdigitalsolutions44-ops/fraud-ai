@@ -1,0 +1,102 @@
+{
+  "audit_anchoring": {
+    "create_anchor_ms": 43.1,
+    "events": 2000,
+    "verify_chain_and_anchors_ms": 61.5
+  },
+  "kind": "stage11_trust_overhead",
+  "model_loading": {
+    "gradient-boosting-1.0.0": {
+      "artifact_bytes": 208744,
+      "digest_ms": {
+        "median": 0.149,
+        "n": 7,
+        "p95": 0.161
+      },
+      "full_verified_load_ms": {
+        "median": 11.002,
+        "n": 7,
+        "p95": 12.034
+      },
+      "read_once_ms": {
+        "median": 0.34,
+        "n": 7,
+        "p95": 0.394
+      },
+      "signature_check_ms": {
+        "median": 0.216,
+        "n": 7,
+        "p95": 0.234
+      }
+    },
+    "gru-1.0.0": {
+      "artifact_bytes": 40367,
+      "digest_ms": {
+        "median": 0.063,
+        "n": 7,
+        "p95": 0.074
+      },
+      "full_verified_load_ms": {
+        "median": 3.643,
+        "n": 7,
+        "p95": 3.741
+      },
+      "read_once_ms": {
+        "median": 0.306,
+        "n": 7,
+        "p95": 0.387
+      },
+      "signature_check_ms": {
+        "median": 0.2,
+        "n": 7,
+        "p95": 0.234
+      }
+    },
+    "logistic-regression-1.0.0": {
+      "artifact_bytes": 53560,
+      "digest_ms": {
+        "median": 0.045,
+        "n": 7,
+        "p95": 0.048
+      },
+      "full_verified_load_ms": {
+        "median": 2.639,
+        "n": 7,
+        "p95": 2.979
+      },
+      "read_once_ms": {
+        "median": 0.253,
+        "n": 7,
+        "p95": 0.343
+      },
+      "signature_check_ms": {
+        "median": 0.198,
+        "n": 7,
+        "p95": 0.244
+      }
+    },
+    "unit": "milliseconds (startup / cache miss only; never per request)"
+  },
+  "note": "SYNTHETIC; local 4-vCPU container; not an SLA",
+  "request_signing": {
+    "unit": "microseconds per request (sign + verify, 1.5 KB body)",
+    "v1": {
+      "median": 9.503,
+      "n": 20000,
+      "p95": 13.416
+    },
+    "v2": {
+      "median": 13.04,
+      "n": 20000,
+      "p95": 20.311
+    }
+  },
+  "two_person_approval": {
+    "activation_gate_ms": 1.72,
+    "approve_ms": [
+      8.5,
+      7.0
+    ],
+    "note": "operator actions, never on the request path"
+  }
+}

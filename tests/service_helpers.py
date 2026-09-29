@@ -28,7 +28,7 @@ from fraud_ai.database.engine import session_scope
 from fraud_ai.service.app import build_container, create_app
 from fraud_ai.service.dependencies import ServiceContainer
 from fraud_ai.service.keys import create_key, signing_secret
-from fraud_ai.service.signatures import sign
+from fraud_ai.service.signatures import sign, sign_v2
 
 MASTER_KEY = "test-signing-master-key-0123456789abcdef"
 WEBHOOK_SECRET = "test-payment-webhook-secret-0123456789ab"
@@ -169,14 +169,25 @@ class Harness:
         return {"Authorization": f"Bearer {credential}"}
 
     def signed(
-        self, credential: str, body: bytes, *, timestamp: int | None = None
+        self,
+        credential: str,
+        body: bytes,
+        *,
+        timestamp: int | None = None,
+        version: str = "v1",
+        method: str = "POST",
+        path: str = "/v1/score",
+        master: str = MASTER_KEY,
     ) -> dict[str, str]:
         key_id = credential.split(".", 1)[0]
         ts = int(self.clock().timestamp()) if timestamp is None else timestamp
-        return {
-            "X-Fraud-Timestamp": str(ts),
-            "X-Fraud-Signature": sign(signing_secret(MASTER_KEY, key_id), ts, body),
-        }
+        secret = signing_secret(master, key_id)
+        if version == "v2":
+            bare, _, query = path.partition("?")
+            signature = sign_v2(secret, method, bare, ts, body, query=query)
+        else:
+            signature = sign(secret, ts, body)
+        return {"X-Fraud-Timestamp": str(ts), "X-Fraud-Signature": signature}
 
     def post(
         self,
@@ -187,17 +198,30 @@ class Harness:
         sign_it: bool = False,
         headers: dict[str, str] | None = None,
         raw: bytes | None = None,
+        sign_version: str = "v1",
     ) -> Any:
         body = raw if raw is not None else json.dumps(payload).encode()
         h = {"Content-Type": "application/json", **(headers or {})}
         if credential is not None:
             h.update(self.auth(credential))
             if sign_it:
-                h.update(self.signed(credential, body))
+                h.update(self.signed(credential, body, version=sign_version, path=path))
         return self.client.post(path, content=body, headers=h)
 
-    def get(self, path: str, credential: str | None, **kwargs: Any) -> Any:
+    def get(
+        self,
+        path: str,
+        credential: str | None,
+        *,
+        sign_it: bool = False,
+        sign_version: str = "v1",
+        **kwargs: Any,
+    ) -> Any:
         headers = self.auth(credential) if credential else {}
+        if credential and sign_it:
+            headers.update(
+                self.signed(credential, b"", version=sign_version, method="GET", path=path)
+            )
         headers.update(kwargs.pop("headers", {}))
         return self.client.get(path, headers=headers, **kwargs)
 

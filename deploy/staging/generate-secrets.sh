@@ -29,3 +29,20 @@ else
   chmod 444 "${service_files[@]/#/$dir/}"
   echo "wrote staging secrets to $dir (0700 directory; files 0444 - run with sudo for 0400/uid 10001)"
 fi
+
+# Stage 11: a STAGING-ONLY Ed25519 model-signing key (PKCS#8 PEM, 0600). The private key
+# stays in deploy/staging/signing/ (git-ignored, never mounted into the service); compose
+# only gets the public key, through deploy/staging/.env.
+signing="$(cd "$(dirname "$0")" && pwd)/signing"
+mkdir -p "$signing"
+chmod 700 "$signing"
+if [ ! -f "$signing/model.pem" ]; then
+  openssl genpkey -algorithm ed25519 -out "$signing/model.pem"
+  chmod 600 "$signing/model.pem"
+fi
+public="$(openssl pkey -in "$signing/model.pem" -pubout -outform DER | tail -c 32 \
+  | base64 | tr '+/' '-_' | tr -d '=\n')"
+printf 'MODEL_SIGNING_PUBLIC_KEYS=%s\n' "$public" > "$(dirname "$signing")/.env"
+if [ "$(id -u)" = "0" ]; then chown 10001:10001 "$signing" "$signing/model.pem"; fi
+echo "model signing key: $signing/model.pem (public key in deploy/staging/.env)"
+

@@ -39,6 +39,7 @@ from sqlalchemy.orm import Session
 
 from fraud_ai.core.exceptions import FraudAIError
 from fraud_ai.database.models import ServiceApiKey
+from fraud_ai.privacy import freetext
 
 KEY_PREFIX = "fak_"
 KEY_ID_PATTERN = re.compile(r"^fak_[0-9a-f]{16}$")
@@ -102,6 +103,10 @@ def create_key(
         raise ServiceKeyError("a key needs at least one scope")
     if not 1 <= len(name) <= 100:
         raise ServiceKeyError("name must be 1-100 characters")
+    try:
+        freetext.check("service_key.name", name)
+    except freetext.FreeTextError as exc:
+        raise ServiceKeyError(str(exc)) from None
     if expires_at is not None and expires_at <= (now or datetime.now(UTC)):
         raise ServiceKeyError("expires_at must be in the future")
     key_id = KEY_PREFIX + secrets.token_hex(8)

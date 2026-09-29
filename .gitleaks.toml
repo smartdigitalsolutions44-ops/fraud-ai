@@ -1,4 +1,4 @@
-# gitleaks configuration (Stage 10). The default rules stay on; the allowlist only names
+# gitleaks configuration (Stages 10-11). The default rules stay on; the allowlist only names
 # reviewed, SYNTHETIC example/test values (see HARDENING.md, "Secret scanning").
 title = "fraud-ai"
 
@@ -16,4 +16,6 @@ regexes = [
   '''tok_abcdefgh1234''',
   '''test-pseudonymisation-key-0123456789abcdef''',
   '''sk_live_SECRETVALUE''',
+  '''regression-signing-secret-0123456789abcd''',
+  '''^abcd1234secret$''',
 ]

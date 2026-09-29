@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 from collections.abc import Iterator
@@ -30,6 +31,7 @@ import torch
 from torch import nn
 
 from fraud_ai.core.exceptions import FraudAIError
+from fraud_ai.models.artifact_io import ArtifactBytes, ArtifactReadError
 
 HASHES_FILE = "artifact_hashes.json"
 
@@ -112,15 +114,21 @@ def write_hashes(directory: Path, digest: str, names: tuple[str, ...]) -> None:
     )
 
 
+def read_verified(
+    directory: Path, names: tuple[str, ...], expected: str, blob: ArtifactBytes | None = None
+) -> ArtifactBytes:
+    """Read the directory once and verify the recorded digest against those bytes
+    (Stage 11); the caller then deserialises from the returned bytes only."""
+    try:
+        blob = blob if blob is not None else ArtifactBytes.read(directory)
+        blob.verify(names, expected)
+    except ArtifactReadError as exc:
+        raise TorchArtifactIntegrityError(str(exc)) from None
+    return blob
+
+
 def verify_digest(directory: Path, names: tuple[str, ...], expected: str) -> None:
-    for name in names:
-        if not (directory / name).exists():
-            raise TorchArtifactIntegrityError(f"{directory / name} is missing")
-    actual = digest_files(directory, names)
-    if actual != expected:
-        raise TorchArtifactIntegrityError(
-            f"{directory}: digest {actual[:12]} != recorded {expected[:12]}"
-        )
+    read_verified(directory, names, expected)
 
 
 def save_state(module: nn.Module, path: Path) -> None:
@@ -128,9 +136,11 @@ def save_state(module: nn.Module, path: Path) -> None:
     torch.save(state, path)
 
 
-def load_state(module: nn.Module, path: Path) -> None:
-    """Tensors only (``weights_only=True``); the digest must be verified before calling."""
-    state = torch.load(path, map_location="cpu", weights_only=True)
+def load_state(module: nn.Module, source: Path | bytes) -> None:
+    """Tensors only (``weights_only=True``, which refuses pickled code objects). Pass the
+    verified bytes (Stage 11), not a path, so exactly what was verified is loaded."""
+    handle = io.BytesIO(source) if isinstance(source, bytes) else source
+    state = torch.load(handle, map_location="cpu", weights_only=True)
     if not isinstance(state, dict):
-        raise TorchModelError(f"{path} does not contain a state_dict")
+        raise TorchModelError("the weights file does not contain a state_dict")
     module.load_state_dict(state, strict=True)

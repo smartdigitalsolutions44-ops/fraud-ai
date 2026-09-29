@@ -35,6 +35,7 @@ import torch
 from torch import nn
 
 from fraud_ai.features.definitions import DEFAULT_FEATURE_VERSION
+from fraud_ai.models.artifact_io import ArtifactBytes
 from fraud_ai.models.base import ANOMALY_SCORE, EvaluationResult, FraudModel, Labels, Validation
 from fraud_ai.models.matrix import ModelMatrix
 from fraud_ai.models.metrics import evaluate_scores
@@ -46,9 +47,9 @@ from fraud_ai.models.torch_support import (
     environment,
     load_state,
     parameter_count,
+    read_verified,
     resolve_device,
     save_state,
-    verify_digest,
     write_hashes,
 )
 
@@ -383,12 +384,12 @@ class AutoencoderModel(FraudModel):
         return digest
 
     @classmethod
-    def load(cls, directory: Path, expected_sha256: str) -> AutoencoderModel:
-        verify_digest(directory, DIGEST_FILES, expected_sha256)
-        config = json.loads((directory / CONFIG_FILE).read_text())
-        preprocessor = Preprocessor.from_dict(
-            json.loads((directory / PREPROCESSOR_FILE).read_text())
-        )
+    def load(
+        cls, directory: Path, expected_sha256: str, blob: ArtifactBytes | None = None
+    ) -> AutoencoderModel:
+        blob = read_verified(directory, DIGEST_FILES, expected_sha256, blob)
+        config = blob.json(CONFIG_FILE)
+        preprocessor = Preprocessor.from_dict(blob.json(PREPROCESSOR_FILE))
         if preprocessor.config != PREPROCESSING:
             raise AnomalyModelError("stored preprocessing configuration differs from the model")
         if config["input_dim"] != len(preprocessor.output_columns):
@@ -401,11 +402,11 @@ class AutoencoderModel(FraudModel):
         )
         model.preprocessor = preprocessor
         network = build_autoencoder(config["input_dim"], model.config)
-        load_state(network, directory / WEIGHTS_FILE)
+        load_state(network, blob.data(WEIGHTS_FILE))
         network.eval()
         model.network = network
-        model.reference = json.loads((directory / REFERENCE_FILE).read_text())["quantiles"]
-        if (directory / HISTORY_FILE).exists():
-            stored = json.loads((directory / HISTORY_FILE).read_text())
+        model.reference = blob.json(REFERENCE_FILE)["quantiles"]
+        if blob.has(HISTORY_FILE):
+            stored = blob.json(HISTORY_FILE)
             model.history, model.training_summary = stored["history"], stored["summary"]
         return model

@@ -7,11 +7,12 @@ supplied through the environment only.
 from __future__ import annotations
 
 import ipaddress
+import re
 from datetime import datetime
 from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlparse
 
 from pydantic import Field, SecretStr, field_validator, model_validator
@@ -28,6 +29,7 @@ class Environment(StrEnum):
 
 _LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 _MIN_KEY_LENGTH = 32
+_OPERATOR = re.compile(r"[a-z0-9._@-]{2,64}")
 
 
 _RATE_UNITS = {"second": 1.0, "minute": 60.0, "hour": 3600.0}
@@ -171,6 +173,10 @@ class Settings(BaseSettings):
     service_signing_previous_key_expires_at: datetime | None = None
     service_require_signatures: bool = False
     signature_max_age: int = Field(default=300, ge=10, le=3600)
+    # Stage 11: the weakest request-signature scheme accepted (v1 = timestamp + body;
+    # v2 = method + canonical path/query + timestamp + body digest). Unset: v2 in
+    # production, v1 elsewhere (migration). v1 is then refused, never silently accepted.
+    signature_min_version: Literal["v1", "v2"] | None = None
     # Comma-separated allowed CORS origins. Empty (default) disables CORS entirely.
     service_cors_origins: str = ""
     service_expose_openapi: bool = False
@@ -219,6 +225,34 @@ class Settings(BaseSettings):
     retention_payment_request_days: float = Field(default=0.0, ge=0)
     retention_failed_attempt_days: float = Field(default=0.0, ge=0)
     retention_raw_ip_days: float = Field(default=30.0, ge=0)
+    # Stage 11 core retention classes (``fraud-ai retention``; 0 disables). Assessments,
+    # labels, model/policy history and the audit log have no class: never deleted here.
+    retention_network_observation_days: float = Field(default=0.0, ge=0)
+    retention_request_metadata_days: float = Field(default=0.0, ge=0)
+    retention_investigation_days: float = Field(default=0.0, ge=0)
+    retention_review_note_days: float = Field(default=0.0, ge=0)
+
+    # Stage 11 trust chain (TRUST_CHAIN.md). Public keys are base64url raw Ed25519 keys,
+    # comma-separated; one set per purpose, and no key may appear in two sets. Private keys
+    # live in files and are needed only by the signing commands, never by the service.
+    model_signing_public_keys: str | None = None
+    model_signing_private_key_file: Path | None = None
+    # Unset: required in staging and production. Required means an unsigned model, or one
+    # signed by an untrusted key, is never loaded (conservative fallback instead).
+    model_signatures_required: bool | None = None
+    audit_anchor_public_keys: str | None = None
+    audit_anchor_private_key_file: Path | None = None
+    audit_anchor_directory: Path | None = None
+    release_signing_public_keys: str | None = None
+    release_signing_private_key_file: Path | None = None
+    # Two-person rule: distinct operator approvals needed before activation (0 = off).
+    # Unset: 2 in production, 0 elsewhere. Approvals expire after the TTL (0 = never).
+    policy_approvals_required: int | None = Field(default=None, ge=0, le=2)
+    policy_approval_ttl_hours: float = Field(default=72.0, ge=0)
+    # The operator identity for approvals, from trusted CLI configuration (not a login).
+    operator_id: str | None = None
+    # Optional allow-list of operator identities that may approve.
+    operator_allowlist: str | None = None
     # Readiness re-hashes the primary artefact at least this often (and on any change).
     readiness_reverify_seconds: float = Field(default=300.0, ge=0, le=86_400)
 
@@ -327,6 +361,12 @@ class Settings(BaseSettings):
             raise ValueError("STATE_BACKEND=redis needs REDIS_URL")
         if self.payment_auth_provider is not None and self.payment_auth_webhook_secret is None:
             raise ValueError("PAYMENT_AUTH_PROVIDER needs PAYMENT_AUTH_WEBHOOK_SECRET")
+        self._validate_trust()
+        if 0 < self.retention_network_observation_days < 180:
+            raise ValueError(
+                "RETENTION_NETWORK_OBSERVATION_DAYS must be 0 (off) or at least 180 "
+                "(beyond every feature window)"
+            )
         if self.log_format not in (None, "text", "json"):
             raise ValueError("LOG_FORMAT must be 'text' or 'json'")
         if self.payment_auth_provider == "stripe":
@@ -356,6 +396,40 @@ class Settings(BaseSettings):
             raise ValueError(f"PSEUDONYMISATION_KEY must be at least {_MIN_KEY_LENGTH} characters")
         return self
 
+    def _validate_trust(self) -> None:
+        from fraud_ai.trust.keys import TrustError, check_separation, parse_public_keys
+
+        try:
+            check_separation(
+                {
+                    "model": parse_public_keys(self.model_signing_public_keys),
+                    "audit": parse_public_keys(self.audit_anchor_public_keys),
+                    "release": parse_public_keys(self.release_signing_public_keys),
+                }
+            )
+        except TrustError as exc:
+            raise ValueError(str(exc)) from None
+        if self.operator_id is not None and not _OPERATOR.fullmatch(self.operator_id):
+            raise ValueError("OPERATOR_ID must be 2-64 characters of [a-z0-9._@-]")
+
+    @property
+    def requires_model_signatures(self) -> bool:
+        if self.model_signatures_required is not None:
+            return self.model_signatures_required
+        return self.environment in {Environment.STAGING, Environment.PRODUCTION}
+
+    @property
+    def effective_policy_approvals(self) -> int:
+        if self.policy_approvals_required is not None:
+            return self.policy_approvals_required
+        return 2 if self.environment is Environment.PRODUCTION else 0
+
+    @property
+    def operators_allowed(self) -> set[str] | None:
+        if not self.operator_allowlist:
+            return None
+        return {o.strip() for o in self.operator_allowlist.split(",") if o.strip()}
+
     def service_problems(self) -> list[str]:
         """Settings the HTTP service refuses to start with (checked only when serving, so
         batch and CLI jobs need no service configuration)."""
@@ -375,6 +449,10 @@ class Settings(BaseSettings):
         for origin in self.cors_origins:
             if origin == "*" or not origin.startswith("https://"):
                 problems.append(f"{env} refuses the CORS origin {origin!r} (https only, no *)")
+        if self.requires_model_signatures and not self.model_signing_public_keys:
+            problems.append(
+                "model signatures are required but MODEL_SIGNING_PUBLIC_KEYS is not set"
+            )
         if self.environment is Environment.PRODUCTION:
             if self.local_llm_runtime == "reference" and not self.allow_reference_llm:
                 problems.append(
@@ -404,6 +482,12 @@ class Settings(BaseSettings):
         if self.policy_require_promotion is not None:
             return self.policy_require_promotion
         return self.environment in {Environment.STAGING, Environment.PRODUCTION}
+
+    @property
+    def effective_signature_min_version(self) -> str:
+        if self.signature_min_version is not None:
+            return self.signature_min_version
+        return "v2" if self.environment is Environment.PRODUCTION else "v1"
 
     @property
     def effective_log_format(self) -> str:

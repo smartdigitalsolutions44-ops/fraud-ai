@@ -102,6 +102,55 @@ def db_init(app: AppContext) -> None:
     click.echo(f"initialised {app.settings.safe_database_url} at revision {mig.head_revision(url)}")
 
 
+@db.command("create-roles")
+@click.option("--database", required=True, help="Database the roles may connect to.")
+@click.option("--schema", default="public", show_default=True)
+@pass_app
+def db_create_roles(app: AppContext, database: str, schema: str) -> None:
+    """Create or update the least-privilege roles (run as a PostgreSQL administrator).
+
+    Passwords are read from FRAUD_MIGRATOR_PASSWORD, FRAUD_SERVICE_PASSWORD,
+    FRAUD_READONLY_PASSWORD and FRAUD_BACKUP_PASSWORD (or their *_FILE variants), never
+    from the command line."""
+    import os
+
+    from fraud_ai.database.roles import RolePasswords, create_roles
+
+    if app.settings.is_sqlite:
+        raise click.ClickException("roles apply to PostgreSQL only")
+
+    def secret(name: str) -> str:
+        path = os.environ.get(f"{name}_FILE")
+        value = Path(path).read_text().strip() if path else os.environ.get(name, "")
+        if len(value) < 16:
+            raise click.ClickException(f"{name} (or {name}_FILE) must hold 16+ characters")
+        return value
+
+    passwords = RolePasswords(
+        migrator=secret("FRAUD_MIGRATOR_PASSWORD"),
+        service=secret("FRAUD_SERVICE_PASSWORD"),
+        readonly=secret("FRAUD_READONLY_PASSWORD"),
+        backup=secret("FRAUD_BACKUP_PASSWORD"),
+    )
+    create_roles(app.engine, database, schema, passwords)
+    click.echo(f"roles ready for {database}.{schema}; now migrate as fraud_migrator, then grant")
+
+
+@db.command("grant-roles")
+@click.option("--schema", default="public", show_default=True)
+@pass_app
+def db_grant_roles(app: AppContext, schema: str) -> None:
+    """(Re)apply the documented table privileges; run as fraud_migrator after every
+    migration. History tables stay append-only for fraud_service."""
+    from fraud_ai.database.roles import APPEND_ONLY, apply_grants
+
+    if app.settings.is_sqlite:
+        raise click.ClickException("roles apply to PostgreSQL only")
+    tables = apply_grants(app.engine, schema)
+    history = sorted(set(tables) & APPEND_ONLY)
+    click.echo(f"granted on {len(tables)} tables; append-only for fraud_service: {len(history)}")
+
+
 @db.command("migrate")
 @click.option("--revision", default="head", show_default=True, help="Target revision.")
 @pass_app
@@ -257,6 +306,38 @@ def seed(
 
 
 # --------------------------------------------------------------------------- demo-data
+@cli.group("keys")
+def keys_group() -> None:
+    """Ed25519 signing keys for model artefacts, audit anchors and releases (Stage 11)."""
+
+
+@keys_group.command("generate")
+@click.option("--purpose", type=click.Choice(["model", "audit", "release"]), required=True)
+@click.option("--out", "out", type=click.Path(path_type=Path, dir_okay=False), required=True)
+def keys_generate(purpose: str, out: Path) -> None:
+    """Write a new private key (0600, never overwritten) and print its public key.
+
+    Keep the private key out of the repository and off the service hosts; put the public key
+    in the matching *_PUBLIC_KEYS setting. Use a separate key for each purpose."""
+    from fraud_ai.trust.keys import encode_public, generate, write_private_key
+
+    pair = generate()
+    try:
+        write_private_key(pair, out)
+    except FileExistsError:
+        raise click.ClickException(f"{out} already exists; refusing to overwrite") from None
+    setting = {
+        "model": "MODEL_SIGNING_PUBLIC_KEYS",
+        "audit": "AUDIT_ANCHOR_PUBLIC_KEYS",
+        "release": "RELEASE_SIGNING_PUBLIC_KEYS",
+    }[purpose]
+    click.echo(f"purpose     {purpose}")
+    click.echo(f"key id      {pair.key_id}")
+    click.echo(f"private key {out} (0600)")
+    click.echo(f"public key  {encode_public(pair.public)}")
+    click.echo(f"add the public key to {setting}")
+
+
 @cli.group("demo-data")
 def demo_data() -> None:
     """Inspect synthetic demonstration data."""
@@ -1147,6 +1228,72 @@ def models_show(app: AppContext, model_ref: str) -> None:
         if rows:
             click.echo("\ntest threshold analysis (evaluation only):")
             click.echo(threshold_table(rows))
+
+
+@models.command("sign")
+@click.argument("model_ref")
+@click.option(
+    "--key",
+    "key_file",
+    type=click.Path(path_type=Path, dir_okay=False),
+    default=None,
+    help="Ed25519 private key (PEM, 0600). Default: MODEL_SIGNING_PRIVATE_KEY_FILE.",
+)
+@pass_app
+def models_sign(app: AppContext, model_ref: str, key_file: Path | None) -> None:
+    """Sign a model artefact (Ed25519) as it is on disk now (Stage 11).
+
+    The files must match the registered digest. The private key is read from a file and
+    never stored; the signature, key id and per-file hashes are recorded and audited."""
+    app.require_migrated()
+    from fraud_ai import audit as audit_log
+    from fraud_ai.models.registry import resolve_model
+    from fraud_ai.models.signing import sign_model
+    from fraud_ai.trust.keys import TrustError, load_private_key, parse_public_keys
+
+    path = key_file or app.settings.model_signing_private_key_file
+    if path is None:
+        raise click.ClickException("give --key or set MODEL_SIGNING_PRIVATE_KEY_FILE")
+    try:
+        pair = load_private_key(path)
+    except TrustError as exc:
+        raise click.ClickException(str(exc)) from None
+    trusted = parse_public_keys(app.settings.model_signing_public_keys) or None
+    with session_scope(make_session_factory(app.engine)) as session:
+        try:
+            model = resolve_model(session, model_ref)
+            row = sign_model(session, model, pair, actor=audit_log.cli_actor(), trusted=trusted)
+        except FraudAIError as exc:
+            raise click.ClickException(str(exc)) from None
+        click.echo(
+            f"signed {model.model_name}-{model.model_version} with {row.key_id} "
+            f"({len(row.files)} files, digest {row.artifact_sha256[:12]})"
+        )
+        if trusted is None:
+            click.echo("warning: MODEL_SIGNING_PUBLIC_KEYS is not set; the service trusts no key")
+
+
+@models.command("verify-signature")
+@click.argument("model_ref")
+@pass_app
+def models_verify_signature(app: AppContext, model_ref: str) -> None:
+    """Verify a model artefact's digest and signature against the trusted keys."""
+    app.require_migrated()
+    from fraud_ai.models.registry import resolve_model
+    from fraud_ai.models.signing import ModelTrust, check_model_signature
+
+    trust = ModelTrust.from_settings(app.settings)
+    with session_scope(make_session_factory(app.engine)) as session:
+        try:
+            model = resolve_model(session, model_ref)
+            key = check_model_signature(model, trust)
+        except FraudAIError as exc:
+            raise click.ClickException(f"NOT VERIFIED: {exc}") from None
+        name = f"{model.model_name}-{model.model_version}"
+        if key is None:
+            click.echo(f"{name}: digest OK; UNSIGNED (signatures not required here)")
+        else:
+            click.echo(f"{name}: digest OK; signature OK (key {key})")
 
 
 @models.command("activate")
@@ -3301,6 +3448,60 @@ def policy_history(app: AppContext, version: str) -> None:
             )
 
 
+@policy.command("approve")
+@click.argument("version")
+@click.option("--note", required=True, help="Why this policy may be activated.")
+@pass_app
+def policy_approve(app: AppContext, version: str, note: str) -> None:
+    """Approve a candidate policy as the configured operator (two-person rule, Stage 11).
+
+    The operator identity is OPERATOR_ID from this CLI's trusted configuration. The same
+    operator cannot approve twice; approvals expire after POLICY_APPROVAL_TTL_HOURS."""
+    app.require_migrated()
+    from fraud_ai.risk.approvals import approve, status
+
+    s = app.settings
+    with session_scope(make_session_factory(app.engine)) as session:
+        try:
+            row = approve(
+                session,
+                version,
+                operator=s.operator_id,
+                note=note,
+                ttl_hours=s.policy_approval_ttl_hours,
+                allowed=s.operators_allowed,
+            )
+            state = status(session, version, required=s.effective_policy_approvals)
+        except FraudAIError as exc:
+            raise click.ClickException(str(exc)) from None
+        expiry = row.expires_at.isoformat(timespec="minutes") if row.expires_at else "never"
+        click.echo(f"{version} approved by {row.operator} (expires {expiry})")
+        click.echo(
+            f"valid approvals: {len(state.valid_operators)}/{state.required} "
+            f"({', '.join(state.valid_operators)})"
+        )
+
+
+@policy.command("approvals")
+@click.argument("version")
+@pass_app
+def policy_approvals(app: AppContext, version: str) -> None:
+    """Approval status of a policy (distinct operators, expiry, definition hash)."""
+    app.require_migrated()
+    from fraud_ai.risk.approvals import status
+
+    with session_scope(make_session_factory(app.engine)) as session:
+        try:
+            state = status(session, version, required=app.settings.effective_policy_approvals)
+        except FraudAIError as exc:
+            raise click.ClickException(str(exc)) from None
+        click.echo(f"required  {state.required}")
+        click.echo(f"valid     {', '.join(state.valid_operators) or '-'}")
+        click.echo(f"expired   {', '.join(state.expired) or '-'}")
+        click.echo(f"stale     {', '.join(state.stale) or '-'}")
+        click.echo(f"activatable by approvals: {'yes' if state.satisfied else 'no'}")
+
+
 @policy.command("compare")
 @click.argument("version_a")
 @click.argument("version_b")
@@ -3429,9 +3630,19 @@ def deployment_activate(
                 note=note,
                 activated_by=actor,
                 require_promotion=app.settings.requires_promotion,
+                approvals_required=app.settings.effective_policy_approvals,
             )
         except FraudAIError as exc:
             raise click.ClickException(str(exc)) from None
+        approvers: list[str] = []
+        if app.settings.effective_policy_approvals:
+            from fraud_ai.risk.approvals import status as approval_status
+
+            approvers = list(
+                approval_status(
+                    session, policy_version, required=app.settings.effective_policy_approvals
+                ).valid_operators
+            )
         audit_log.record(
             session,
             "policy.activated",
@@ -3443,6 +3654,8 @@ def deployment_activate(
                 "shadow_models": list(row.shadow_models),
                 "shadow_policies": list(row.shadow_policies),
                 "promotion_required": app.settings.requires_promotion,
+                "approvals_required": app.settings.effective_policy_approvals,
+                "approved_by": approvers,
             },
         )
         click.echo(f"deployment #{row.sequence}: {policy_version} is active")
@@ -3989,6 +4202,235 @@ def audit_verify(app: AppContext) -> None:
         return
     click.echo(f"audit chain BROKEN at #{report.first_bad_sequence}: {report.reason}", err=True)
     raise SystemExit(1)
+
+
+def _anchor_store(app: AppContext, store: Path | None) -> Any:
+    from fraud_ai.trust.anchors import FileAnchorStore
+
+    directory = store or app.settings.audit_anchor_directory
+    if directory is None:
+        raise click.ClickException("give --store or set AUDIT_ANCHOR_DIRECTORY")
+    return FileAnchorStore(directory)
+
+
+@audit.command("anchor")
+@click.option(
+    "--key",
+    "key_file",
+    type=click.Path(path_type=Path, dir_okay=False),
+    default=None,
+    help="Ed25519 audit key (PEM, 0600). Default: AUDIT_ANCHOR_PRIVATE_KEY_FILE.",
+)
+@click.option("--store", type=click.Path(path_type=Path, file_okay=False), default=None)
+@pass_app
+def audit_anchor(app: AppContext, key_file: Path | None, store: Path | None) -> None:
+    """Sign the audit chain head and write it to the external anchor store (Stage 11).
+
+    Uses the dedicated audit key (never the model, release or API signing key). Refuses to
+    anchor a chain that does not verify."""
+    app.require_migrated()
+    from fraud_ai import audit as audit_log
+    from fraud_ai.trust.anchors import create_anchor
+    from fraud_ai.trust.keys import TrustError, load_private_key, parse_public_keys
+
+    path = key_file or app.settings.audit_anchor_private_key_file
+    if path is None:
+        raise click.ClickException("give --key or set AUDIT_ANCHOR_PRIVATE_KEY_FILE")
+    target = _anchor_store(app, store)
+    try:
+        pair = load_private_key(path)
+        trusted = parse_public_keys(app.settings.audit_anchor_public_keys) or None
+        with session_scope(make_session_factory(app.engine)) as session:
+            anchor, location = create_anchor(
+                session, target, pair, actor=audit_log.cli_actor(), trusted=trusted
+            )
+    except TrustError as exc:
+        raise click.ClickException(str(exc)) from None
+    click.echo(
+        f"anchor {anchor.number}: sequence {anchor.sequence}, head "
+        f"{anchor.statement['head_sha256'][:16]}..., key {anchor.signature.key_id}"
+    )
+    click.echo(f"written to {location}")
+
+
+@audit.command("verify-anchor")
+@click.option("--store", type=click.Path(path_type=Path, file_okay=False), default=None)
+@pass_app
+def audit_verify_anchor(app: AppContext, store: Path | None) -> None:
+    """Verify the database chain against the signed external anchors: signatures, anchor
+    order, the anchored hash at each position and that no chain section is missing."""
+    app.require_migrated()
+    from fraud_ai.trust.anchors import verify_anchors
+    from fraud_ai.trust.keys import parse_public_keys
+
+    trusted = parse_public_keys(app.settings.audit_anchor_public_keys)
+    if not trusted:
+        raise click.ClickException("AUDIT_ANCHOR_PUBLIC_KEYS is not set")
+    target = _anchor_store(app, store)
+    with session_scope(make_session_factory(app.engine)) as session:
+        report = verify_anchors(session, target, trusted)
+    click.echo(
+        f"database chain: {report.chain_events} events; anchors: {report.anchors}; latest "
+        f"anchored sequence: {report.latest_anchored_sequence}; not yet anchored: "
+        f"{report.unanchored_events}"
+    )
+    if report.ok:
+        click.echo("anchors OK")
+        return
+    for problem in report.problems:
+        click.echo(f"ANCHOR MISMATCH: {problem}", err=True)
+    raise SystemExit(1)
+
+
+# --------------------------------------------------------------------------- release
+@cli.group()
+def release() -> None:
+    """Signed release manifests (Stage 11)."""
+
+
+@release.command("manifest")
+@click.option("--out", "out", type=click.Path(path_type=Path, dir_okay=False), required=True)
+@click.option("--sbom", type=click.Path(path_type=Path, dir_okay=False, exists=True), default=None)
+@click.option("--image-digest", default=None, help="e.g. sha256:… of the built image")
+@click.option(
+    "--key",
+    "key_file",
+    type=click.Path(path_type=Path, dir_okay=False),
+    default=None,
+    help="Ed25519 release key (PEM, 0600). Default: RELEASE_SIGNING_PRIVATE_KEY_FILE.",
+)
+@pass_app
+def release_manifest(
+    app: AppContext, out: Path, sbom: Path | None, image_digest: str | None, key_file: Path | None
+) -> None:
+    """Build and sign a release manifest: commit, migration, versions, active policy, model
+    digests and signatures, SBOM hash and image digest."""
+    app.require_migrated()
+    from fraud_ai.trust.keys import TrustError, load_private_key, parse_public_keys
+    from fraud_ai.trust.release import build_manifest, sign_manifest
+
+    path = key_file or app.settings.release_signing_private_key_file
+    if path is None:
+        raise click.ClickException("give --key or set RELEASE_SIGNING_PRIVATE_KEY_FILE")
+    if out.exists():
+        raise click.ClickException(f"{out} already exists; refusing to overwrite")
+    try:
+        pair = load_private_key(path)
+        trusted = parse_public_keys(app.settings.release_signing_public_keys) or None
+        with make_session_factory(app.engine)() as session:
+            manifest = build_manifest(
+                session, app.settings.resolved_database_url, sbom=sbom, image_digest=image_digest
+            )
+        document = sign_manifest(manifest, pair, trusted)
+    except TrustError as exc:
+        raise click.ClickException(str(exc)) from None
+    out.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n")
+    click.echo(
+        f"release manifest for {manifest['git_commit'] or 'unknown commit'} "
+        f"({len(manifest['models'])} models) signed by {pair.key_id}: {out}"
+    )
+
+
+@release.command("verify")
+@click.argument("manifest_path", type=click.Path(path_type=Path, dir_okay=False, exists=True))
+@click.option("--sbom", type=click.Path(path_type=Path, dir_okay=False), default=None)
+@click.option("--no-database", is_flag=True, help="Only the signature, SBOM and commit.")
+@pass_app
+def release_verify(
+    app: AppContext, manifest_path: Path, sbom: Path | None, no_database: bool
+) -> None:
+    """Verify a signed release manifest against this environment (every available hash and
+    signature). Unavailable checks are reported as skipped, never as passed."""
+    from fraud_ai.models.signing import ModelTrust
+    from fraud_ai.trust.keys import TrustError, parse_public_keys
+    from fraud_ai.trust.release import load_document, verify_release
+
+    trusted = parse_public_keys(app.settings.release_signing_public_keys)
+    if not trusted:
+        raise click.ClickException("RELEASE_SIGNING_PUBLIC_KEYS is not set")
+    try:
+        document = load_document(manifest_path)
+    except TrustError as exc:
+        raise click.ClickException(str(exc)) from None
+    trust = ModelTrust.from_settings(app.settings)
+    if no_database:
+        report = verify_release(document, trusted, sbom=sbom)
+    else:
+        app.require_migrated()
+        with make_session_factory(app.engine)() as session:
+            report = verify_release(
+                document,
+                trusted,
+                session=session,
+                database_url=app.settings.resolved_database_url,
+                sbom=sbom,
+                model_trust=trust,
+            )
+    for name, result in report.checks.items():
+        click.echo(f"{name:<40} {result}")
+    if not report.ok:
+        raise SystemExit(1)
+    click.echo("release manifest verified (see skipped checks above)")
+
+
+# --------------------------------------------------------------------------- privacy
+@cli.group()
+def privacy() -> None:
+    """Data inventory and erasure analysis (Stage 11). Analysis only: no compliance claim."""
+
+
+@privacy.command("inventory")
+@click.option("--format", "fmt", type=click.Choice(["table", "json"]), default="table")
+def privacy_inventory(fmt: str) -> None:
+    """Every stored field holding or derived from personal data: class, table, field,
+    purpose, retention, pseudonymisation, access path and deletion capability."""
+    from dataclasses import asdict
+
+    from fraud_ai.privacy.inventory import INVENTORY, check_inventory
+
+    problems = check_inventory()
+    if problems:
+        raise click.ClickException("inventory out of date: " + "; ".join(problems))
+    if fmt == "json":
+        click.echo(json.dumps([asdict(i) for i in INVENTORY], indent=2))
+        return
+    for item in INVENTORY:
+        click.echo(f"{item.data_class}  [{item.table}.{item.field}]")
+        click.echo(f"    purpose: {item.purpose}")
+        click.echo(f"    retention: {item.retention}")
+        click.echo(f"    pseudonymisation: {item.pseudonymisation}")
+        click.echo(f"    access: {item.access_path}")
+        click.echo(f"    deletion: {item.deletion}")
+
+
+@privacy.command("erasure-plan")
+@click.argument("pseudonym")
+@click.option("--format", "fmt", type=click.Choice(["table", "json"]), default="table")
+@pass_app
+def privacy_erasure_plan(app: AppContext, pseudonym: str, fmt: str) -> None:
+    """DRY RUN: what could be erased, pseudonymised, or must remain for one user (merchant
+    reference or user id), and why. Nothing is changed."""
+    app.require_migrated()
+    from fraud_ai.privacy.inventory import erasure_plan
+
+    with make_session_factory(app.engine)() as session:
+        plan_ = erasure_plan(session, pseudonym)
+    if fmt == "json":
+        click.echo(json.dumps(plan_, indent=2))
+        return
+    if not plan_["found"]:
+        raise click.ClickException(f"no user with reference or id {pseudonym!r}")
+    click.echo(f"erasure plan for user {plan_['user_id']} (DRY RUN - nothing changed)")
+    for action in ("erase", "pseudonymise", "must_remain"):
+        rows = [s_ for s_ in plan_["steps"] if s_["action"] == action]
+        if rows:
+            click.echo(f"\n{action.replace('_', ' ')}:")
+            for step in rows:
+                click.echo(f"  {step['table']:<28} {step['rows']:>6} rows  {step['detail']}")
+    click.echo("\ndependencies (foreign keys to users):")
+    for dep in plan_["dependencies"]:
+        click.echo(f"  {dep}")
+    click.echo(f"\n{plan_['note']}")
 
 
 # --------------------------------------------------------------------------- retention

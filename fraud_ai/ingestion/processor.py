@@ -63,6 +63,7 @@ from fraud_ai.database.models import (
     UserDevice,
 )
 from fraud_ai.database.repositories import record_label
+from fraud_ai.privacy.freetext import sanitise_event_metadata
 from fraud_ai.security.hashing import Pseudonymiser
 from fraud_ai.security.redaction import redact_mapping
 from fraud_ai.utils.logging import get_logger
@@ -350,7 +351,8 @@ class EventProcessor:
             data["fingerprint_hash"] = self._pseudo.hash_payment_fingerprint(
                 data.pop("fingerprint")
             )
-        return redact_mapping(data)
+        # Stage 11: declared free-text keys are PII-sanitised; structured keys untouched.
+        return sanitise_event_metadata(redact_mapping(data))
 
     # ------------------------------------------------------------------ handlers
     def _require_user(self, ctx: _Context) -> User:

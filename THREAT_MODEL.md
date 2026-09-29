@@ -1,7 +1,8 @@
-# Threat model (Stage 10)
+# Threat model (Stages 10-11)
 
 This is the threat model for the fraud-ai service, a **deployment-hardened prototype**, as
-deployed in `deploy/staging/`. It lists what an attacker could want, how, what the code
+deployed in `deploy/staging/`. Stage 11 revisions are marked **(S11)**; the trust
+mechanisms are described in [TRUST_CHAIN.md](TRUST_CHAIN.md). It lists what an attacker could want, how, what the code
 does about it, and what remains.
 
 "Remaining risk" is honest, not exhaustive. Nothing here claims PCI DSS, GDPR or SOC 2
@@ -65,13 +66,29 @@ operators ──shell/CLI (fraud-ai …)─────────────�
 | T17 | A4 | Cardholder data captured by the service | Only provider token references and non-sensitive card attributes; PAN/CVV/PIN keys and card-like numbers redacted before storage; Stripe adapter never receives card numbers | Merchants could put card data in free-text fields not recognised by the patterns |
 | T18 | A1 | Container escape / host compromise via the service | Non-root uid 10001, read-only root, `cap_drop: ALL`, `no-new-privileges`, no shell user, no package installers | Kernel/runtime vulnerabilities; no seccomp/AppArmor profile beyond the runtime defaults |
 
-## Open items for Stage 11
+## Stage 11 revisit
 
-1. External anchoring of the audit chain (a write-once store or a signed chain head).
-2. A signature v2 covering method, path and a nonce; optional mTLS between the proxy and
-   the service.
-3. Minimal or distroless base image; runtime seccomp profile.
-4. Signed model artefacts (a signature, not only a digest held in the same database).
-5. A two-person rule for policy activation.
-6. Pseudonymisation-key rotation and data erasure tooling.
-7. An independent penetration test.
+The Stage 10 rows above describe the Stage 10 state. Stage 11 changes these rows:
+
+| # | Threat | Stage 11 mitigation | Remaining risk |
+|---|---|---|---|
+| T3 (S11) | **Signature substitution:** moving a signed body to another method, path or query | Signature **v2** binds method, canonical path and query, timestamp and body digest. `SIGNATURE_MIN_VERSION=v2` refuses v1 with an explicit code, and there is no fallback from an invalid v2 to a valid v1 | Clients on v1 during the migration window are still exposed to the v1 gap (mitigated by the single-use claim); the canonical path is the one the service receives, so a path-rewriting proxy must be accounted for |
+| T7 (S11) | **Model tampering / substitution** by someone who can write the model directory and the registry row | Ed25519 **model signatures** over every artefact file, with the key outside the database. Required by default in staging and production. **Read-once verified load:** no symlinks, `fstat`-checked regular files, digest and signature over the in-memory bytes, deserialisation from those bytes | A compromised **model signing key** can sign a malicious pickle. That key is code-execution trust (keep it offline). scikit-learn models remain pickles (TRUST_CHAIN.md §4) |
+| T9 (S11) | **DB-superuser audit tampering:** a consistent rewrite of the chain | **External anchors** signed with a separate audit key, stored outside the database; `audit verify-anchor` checks each position and detects truncation (tested on PostgreSQL) | Events after the latest anchor; deletion of the newest anchors by someone with write access to the anchor store (use WORM storage) |
+| T8 (S11) | **Operator compromise / a single rogue operator** activating a policy | **Two-person rule:** distinct `OPERATOR_ID`s, unexpired approvals pinned to the definition hash, DB unique constraint, append-only approvals, audit. **Least-privilege DB roles:** the service cannot DROP, ALTER, TRUNCATE, disable triggers or change history (tested) | `OPERATOR_ID` is configuration, not authentication: two compromised operator environments, or the migrator/superuser credential, defeat it. No hardware-backed approvals |
+| T10/T17 (S11) | **Privacy leakage** through free text | Declared free-text fields with length limits: **reject** PII in operator/analyst text; **sanitise** merchant event text; card numbers refused by the contract | Pattern detection misses names and unusual formats; there is no erasure execution, only a dry-run plan (PRIVACY.md) |
+| T15 (S11) | **Supply chain** | pip-audit (a setuptools floor added after CI found PYSEC-2026-3447), bandit, detect-secrets, gitleaks, SBOM; **signed release manifest** pinning commit, migration, policy, model digests and signatures, SBOM hash and image digest (`release verify`); CI builds and scans the real PyTorch image | The manifest is only as good as the release key's custody; there is no image signing (Sigstore/cosign) or SLSA provenance yet; the Debian base CVEs remain until patched |
+| new | **Key confusion:** one key used for several purposes | Settings refuse a key trusted for two purposes; domain-separated messages; signing commands check purpose membership | Operators can still store several private keys carelessly; key custody is procedural |
+
+## Open items for Stage 12
+
+1. Hardware-backed or SSO-bound operator identity for approvals, instead of a configured
+   `OPERATOR_ID`.
+2. Image signing and provenance (cosign / SLSA), verified at deploy time against the
+   release manifest.
+3. Non-executable model formats for the scikit-learn models, or sandboxed loading.
+4. WORM anchor storage wired in (object lock), and anchoring on a schedule with alerting on
+   a stale anchor.
+5. Pseudonymisation-key rotation and an audited erasure *execution* path, once the legal
+   retention rules are defined.
+6. An independent penetration test.

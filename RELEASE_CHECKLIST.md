@@ -1,4 +1,4 @@
-# Release checklist (Stage 10)
+# Release checklist (Stages 10-11)
 
 Use this for any build that leaves a developer machine (staging or a test deployment).
 Every item needs its **evidence**: the command output or CI run link, recorded in the
@@ -13,7 +13,7 @@ and it is not a PCI DSS, GDPR or SOC 2 assessment.
       `test_multiprocess`, `test_backup_restore`, `test_migration_recovery`, `test_chaos`
       and `test_staging_e2e`. Coverage ≥ 95 %.
 - [ ] No test skipped, disabled or quarantined to get green.
-- [ ] Migration head recorded (currently `0008`); `fraud-ai db migrate` on a copy of the
+- [ ] Migration head recorded (currently `0009`); `fraud-ai db migrate` on a copy of the
       target database succeeds; a backup was taken before migrating.
 
 ## 2. Security
@@ -31,6 +31,29 @@ and it is not a PCI DSS, GDPR or SOC 2 assessment.
 - [ ] Trivy HIGH/CRITICAL list reviewed. Each finding is fixed, or recorded with "no fix
       available / not reachable because …". **Nothing is hidden or silenced.**
 - [ ] THREAT_MODEL.md reviewed for changes in this release.
+
+## 2a. Trust chain (Stage 11)
+
+- [ ] Every model of the active set is signed with the release's model key:
+      `fraud-ai models verify-signature <model>` prints `signature OK`.
+- [ ] `MODEL_SIGNATURES_REQUIRED=true` and `MODEL_SIGNING_PUBLIC_KEYS` contains only
+      current keys (retired or compromised keys removed).
+- [ ] `SIGNATURE_MIN_VERSION=v2` (or a dated plan to get there);
+      `fraud_api_signatures_verified_total` shows no v1 traffic before switching.
+- [ ] The model, audit and release keys are distinct (settings refuse overlaps), kept off
+      service hosts, 0600.
+- [ ] `fraud-ai audit anchor` ran just before the release, into write-once storage;
+      `fraud-ai audit verify-anchor` is OK.
+- [ ] The policy being activated has two valid approvals from different operators
+      (`fraud-ai policy approvals <version>`).
+- [ ] The service connects as `fraud_service`, not the migrator or a superuser;
+      `fraud-ai db grant-roles` ran after the migration.
+- [ ] A signed release manifest exists (`fraud-ai release manifest …`), and
+      `fraud-ai release verify` in the target environment shows no `FAILED` rows. Review
+      every `skipped` row.
+- [ ] CI container job: full PyTorch image built; `container_smoke.sh` passed (GRU loaded,
+      unsigned models refused); the Trivy HIGH/CRITICAL list reviewed.
+- [ ] `fraud-ai privacy inventory` reviewed for new fields; retention settings chosen.
 
 ## 3. Configuration
 

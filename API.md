@@ -177,6 +177,40 @@ A GET is signed over an empty body. Requests are rejected with 401 when the sign
   claimed atomically in Redis across all workers and instances when
   `STATE_BACKEND=redis` (Stage 10).
 
+**Signature v2 (Stage 11, preferred).**
+
+```
+canonical = "fraud-ai-v2\n" + METHOD + "\n" + CANONICAL_TARGET + "\n" + timestamp + "\n" + hex(sha256(body))
+X-Fraud-Signature: v2=hex(HMAC-SHA256(signing_secret, canonical))
+```
+
+`CANONICAL_TARGET` is the request path, percent-decoded and re-encoded with RFC 3986
+unreserved characters and `/` kept. If there is a query, it is followed by `?` and the
+query parameters, sorted by name then value and encoded the same way (blank values kept).
+Sign the path exactly as the service receives it: if a proxy rewrites paths, sign the
+rewritten one.
+
+```python
+import hashlib, hmac, time
+from urllib.parse import parse_qsl, quote, unquote
+
+def canonical_target(path, query=""):
+    p = quote(unquote(path), safe="/-._~") or "/"
+    pairs = sorted(parse_qsl(query, keep_blank_values=True))
+    q = "&".join(f"{quote(k, safe='-._~')}={quote(v, safe='-._~')}" for k, v in pairs)
+    return f"{p}?{q}" if q else p
+
+ts = int(time.time())
+msg = "\n".join(["fraud-ai-v2", "POST", canonical_target("/v1/score"), str(ts),
+                 hashlib.sha256(body).hexdigest()]).encode()
+headers = {"X-Fraud-Timestamp": str(ts),
+           "X-Fraud-Signature": "v2=" + hmac.new(signing_secret.encode(), msg, hashlib.sha256).hexdigest()}
+```
+
+During a migration a client may send `v1=…,v2=…`; the server verifies only the strongest
+version present. A request signed only with a version below `SIGNATURE_MIN_VERSION` gets
+**401 `SIGNATURE_VERSION_REJECTED`**. The minimum defaults to v2 in production.
+
 **Signing-key versions (Stage 10).** During a master-key rotation, signatures from both the
 current and the previous master key verify until the previous key's expiry. A client may
 send `X-Fraud-Key-Version: <version>` to name the key it signed with. Without the header,
@@ -377,7 +411,7 @@ with its own timeout (`LOCAL_LLM_TIMEOUT` + 10 s). It is never part of scoring.
 | HTTP | Codes |
 |---|---|
 | 400 | `BAD_REQUEST`, `INVALID_JSON`, `INVALID_IDEMPOTENCY_KEY`, `SIGNING_NOT_CONFIGURED` |
-| 401 | `UNAUTHENTICATED`, `MISSING_SIGNATURE`, `INVALID_SIGNATURE`, `EXPIRED_SIGNATURE`, `REPLAYED_SIGNATURE`, `UNKNOWN_PROVIDER`, `INVALID_CALLBACK` |
+| 401 | `UNAUTHENTICATED`, `MISSING_SIGNATURE`, `INVALID_SIGNATURE`, `EXPIRED_SIGNATURE`, `REPLAYED_SIGNATURE`, `SIGNATURE_VERSION_REJECTED` (Stage 11), `UNKNOWN_PROVIDER`, `INVALID_CALLBACK` |
 | 403 | `INSUFFICIENT_SCOPE` |
 | 404 | `NOT_FOUND` |
 | 409 | `EVENT_CONFLICT`, `IDEMPOTENCY_KEY_REUSED`, `IDEMPOTENCY_IN_PROGRESS`, `CHALLENGE_INVALID`, `STEP_UP_NOT_REQUIRED`, `STEP_UP_ALREADY_COMPLETED`, `ATTEMPTS_EXHAUSTED`, `NO_CREDENTIALS`, `NO_USER`, `SESSION_MISMATCH`, `CREDENTIAL_EXISTS`, `DUPLICATE_CALLBACK`, `ALREADY_RESOLVED`, `INVESTIGATION_NOT_POSSIBLE` |

@@ -30,7 +30,7 @@ import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from fraud_ai.service.signatures import sign
+from fraud_ai.service.signatures import sign, sign_v2
 from fraud_ai.stepup.payment import FakePaymentAuthProvider
 
 
@@ -39,11 +39,20 @@ class E2EError(AssertionError):
 
 
 class SignedClient:
-    def __init__(self, base: str, credential: str, signing_secret: str, *, verify: Any = True):
+    def __init__(
+        self,
+        base: str,
+        credential: str,
+        signing_secret: str,
+        *,
+        verify: Any = True,
+        version: str = "v2",
+    ):
         self.base = base.rstrip("/")
         self.credential = credential
         self.secret = signing_secret
         self.verify = verify
+        self.version = version
         self._used: dict[bytes, set[int]] = {}
         self._lock = threading.Lock()
 
@@ -55,6 +64,31 @@ class SignedClient:
             used.add(ts)
             return ts
 
+    def headers(self, method: str, path: str, body: bytes) -> dict[str, str]:
+        ts = self._ts(body)
+        if self.version == "v2":
+            bare, _, query = path.partition("?")
+            signature = sign_v2(self.secret, method, bare, ts, body, query=query)
+        else:
+            signature = sign(self.secret, ts, body)
+        return {
+            "Authorization": f"Bearer {self.credential}",
+            "Content-Type": "application/json",
+            "X-Fraud-Timestamp": str(ts),
+            "X-Fraud-Signature": signature,
+        }
+
+    def send(self, method: str, path: str, body: bytes, headers: dict[str, str]) -> httpx.Response:
+        """Send with exactly the given headers (used for the tampering checks)."""
+        return httpx.request(
+            method,
+            self.base + path,
+            content=body or None,
+            headers=headers,
+            timeout=120,
+            verify=self.verify,
+        )
+
     def request(
         self, method: str, path: str, payload: Any = None, *, retries: int = 5
     ) -> httpx.Response:
@@ -62,21 +96,7 @@ class SignedClient:
         freshly signed (the service rejects a re-used timestamp/signature as a replay)."""
         body = b"" if payload is None else json.dumps(payload).encode()
         for attempt in range(retries + 1):
-            ts = self._ts(body)
-            headers = {
-                "Authorization": f"Bearer {self.credential}",
-                "Content-Type": "application/json",
-                "X-Fraud-Timestamp": str(ts),
-                "X-Fraud-Signature": sign(self.secret, ts, body),
-            }
-            response = httpx.request(
-                method,
-                self.base + path,
-                content=body or None,
-                headers=headers,
-                timeout=120,
-                verify=self.verify,
-            )
+            response = self.send(method, path, body, self.headers(method, path, body))
             if response.status_code != 429 or attempt == retries:
                 return response
             time.sleep(min(float(response.headers.get("Retry-After", "1")), 30.0))
@@ -86,6 +106,35 @@ class SignedClient:
 def _expect(cond: bool, message: str) -> None:
     if not cond:
         raise E2EError(message)
+
+
+def signature_checks(client: SignedClient) -> dict[str, Any]:
+    """Signature v2 against the live service: method, path, body and replay tampering must
+    all fail; the untouched request must pass."""
+    codes: dict[str, Any] = {}
+    reviews = "/v1/reviews?status=open&limit=1"
+    signed = client.headers("GET", reviews, b"")
+    codes["valid"] = client.send("GET", reviews, b"", signed).status_code
+    codes["replay"] = client.send("GET", reviews, b"", signed).json()["error"]["code"]
+    as_post = client.headers("POST", "/v1/policy", b"")
+    codes["method"] = client.send("GET", "/v1/policy", b"", as_post).json()["error"]["code"]
+    for_policy = client.headers("GET", "/v1/policy", b"")
+    codes["path"] = client.send("GET", reviews, b"", for_policy).json()["error"]["code"]
+    body = json.dumps({"not": "an event"}).encode()
+    for_body = client.headers("POST", "/v1/score", body)
+    codes["body"] = client.send("POST", "/v1/score", body + b" ", for_body).json()["error"]["code"]
+    v1 = SignedClient(client.base, client.credential, client.secret, verify=client.verify,
+                      version="v1")  # fmt: skip
+    downgrade = v1.send("GET", "/v1/policy", b"", v1.headers("GET", "/v1/policy", b""))
+    codes["v1_downgrade"] = (
+        downgrade.status_code,
+        (downgrade.json().get("error", {}).get("code") if downgrade.status_code != 200 else "ok"),
+    )
+    _expect(codes["valid"] == 200, f"valid v2 request refused: {codes}")
+    _expect(codes["replay"] == "REPLAYED_SIGNATURE", f"replay: {codes}")
+    for tampered in ("method", "path", "body"):
+        _expect(codes[tampered] == "INVALID_SIGNATURE", f"{tampered} tampering: {codes}")
+    return codes
 
 
 def run(
@@ -107,6 +156,9 @@ def run(
     policy = client.request("GET", "/v1/policy")
     _expect(policy.status_code == 200, f"policy: {policy.text}")
     step("policy", version=policy.json()["policy_version"])
+
+    if client.version == "v2":
+        step("signature_v2", **signature_checks(client))
 
     wanted = {"STEP_UP_AUTHENTICATION": [], "MANUAL_REVIEW": []}
     for event in events:
@@ -233,10 +285,15 @@ def main() -> None:
     parser.add_argument("--rp-id", default="localhost")
     parser.add_argument("--origin", default="http://localhost:8080")
     parser.add_argument("--ca-bundle", default=None, help="TLS CA for a staging certificate")
+    parser.add_argument("--signature-version", choices=["v1", "v2"], default="v2")
     args = parser.parse_args()
     events = [json.loads(line) for line in args.events.read_text().splitlines() if line.strip()]
     client = SignedClient(
-        args.base_url, args.credential, args.signing_secret, verify=args.ca_bundle or True
+        args.base_url,
+        args.credential,
+        args.signing_secret,
+        verify=args.ca_bundle or True,
+        version=args.signature_version,
     )
     try:
         report = run(
