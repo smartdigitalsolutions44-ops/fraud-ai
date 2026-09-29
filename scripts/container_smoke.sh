@@ -20,7 +20,16 @@ declare -A names=([gradient-boosting]=gradient-boosting-1.0.0 [gru]=gru-1.0.0
                   [logistic]=logistic-regression-1.0.0)
 mkdir -p "$out"
 work="$(mktemp -d)"
-trap 'docker rm -f fraud-ai-smoke >/dev/null 2>&1 || true; rm -rf "$work"' EXIT
+cleanup() {
+  docker rm -f fraud-ai-smoke >/dev/null 2>&1 || true
+  # The container wrote the models and the throwaway key as uid 10001: delete them from a
+  # root container (the host user may not own them), then the directory itself.
+  docker run --rm -u 0 --entrypoint "$python_bin" -v "$work:/w" "$image" -c \
+    'import shutil; [shutil.rmtree(p, ignore_errors=True) for p in ("/w/models", "/w/keys")]' \
+    >/dev/null 2>&1 || true
+  rm -rf "$work"
+}
+trap cleanup EXIT
 mkdir -p "$work/models" "$work/keys"
 chmod 0777 "$work/models" "$work/keys"  # the image runs as uid 10001
 key="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
