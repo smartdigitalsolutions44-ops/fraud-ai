@@ -48,7 +48,8 @@ jobs:
           POSTGRES_DB: fraud_ai_test
         ports: ["5432:5432"]
         options: >-
-          --health-cmd "pg_isready -U fraud_ai" --health-interval 5s --health-retries 20
+          --health-cmd "pg_isready -U fraud_ai -d fraud_ai_test" --health-interval 5s
+          --health-retries 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -141,7 +142,8 @@ jobs:
           POSTGRES_DB: fraud_ai_smoke
         ports: ["5432:5432"]
         options: >-
-          --health-cmd "pg_isready -U fraud_ai" --health-interval 5s --health-retries 20
+          --health-cmd "pg_isready -U fraud_ai -d fraud_ai_smoke" --health-interval 5s
+          --health-retries 20
     steps:
       - uses: actions/checkout@v4
       - name: Build the release image (CPU PyTorch)

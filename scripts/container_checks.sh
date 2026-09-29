@@ -19,7 +19,9 @@ found="$(docker run --rm --entrypoint sh "$image" -c \
   'find / -xdev \( -name .git -o -name ".env" -o -name ".env.*" -o -name "*.db" -o -name "*.sqlite*" \
      -o -name "*.gguf" -o -name "*.joblib" -o -name "*.pt" -o -name ".pseudonymisation_key" \) \
      -not -path "/proc/*" -not -path "/sys/*" \
-     -not -path "/usr/local/lib/python3.11/site-packages/*/tests/*" 2>/dev/null' || true)"
+     -not -path "/usr/local/lib/python3.11/site-packages/*/tests/*" \
+     -not -path "/usr/local/lib/python3.11/site-packages/torch/bin/*.pt" 2>/dev/null' || true)"
+# (torch/bin/*.pt: a test fixture that ships inside the PyTorch wheel, not a model artefact.)
 [[ -z "$found" ]] || fail "unexpected files in the image:\n$found"
 # Public CA bundles (*.pem) are expected; private-key material is not, wherever it is.
 keys="$(docker run --rm --entrypoint sh "$image" -c \
