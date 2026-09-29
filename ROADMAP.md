@@ -387,7 +387,9 @@ compliance or fraud-reduction claims. Details are in [TRUST_CHAIN.md](TRUST_CHAI
   * opt-in core retention classes.
 * **Releases:** a signed release manifest (`release manifest` / `verify`).
 * **Container and CI:**
-  * CI builds, scans and smoke-tests the full PyTorch image;
+  * CI builds, scans and smoke-tests the full PyTorch image: all four jobs green in run
+    36579194568 (1,395 MB; GRU loaded; 0 CRITICAL, 44 HIGH without an upstream fix, all in
+    Debian base packages; HARDENING.md §26);
   * the Stage 10 CI failures were fixed (a setuptools floor, Trivy);
   * base-image research: distroless measured and **not** adopted.
 * **Stripe:** the real test was **not** performed (no test credentials).

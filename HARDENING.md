@@ -820,13 +820,13 @@ Evidence levels:
 
 | Control | Implemented | Tested locally | Tested staging | Tested externally | Remaining gap |
 |---|---|---|---|---|---|
-| Signature v2 + downgrade protection | yes | yes (`test_signature_v2`, `test_security_regressions`) | yes: stack through TLS (method/path/body/replay fail, v1 → `SIGNATURE_VERSION_REJECTED`) and staging E2E | GitHub CI runs the tests (pending first run) | path-rewriting proxies must be accounted for; integrators still on v1 during migration |
-| Signed model artefacts | yes | yes (`test_model_signing`) | yes: stack refused unsigned models, loaded signed ones; staging E2E | CI container smoke (full PyTorch image, GRU): pending first run | model key custody; sklearn models are pickles |
-| Read-once verified load | yes | yes (swap-after-read test, symlink/subdir refusal) | indirectly (every load) | CI smoke (pending) | an attacker with write access *and* the signing key |
+| Signature v2 + downgrade protection | yes | yes (`test_signature_v2`, `test_security_regressions`) | yes: stack through TLS (method/path/body/replay fail, v1 → `SIGNATURE_VERSION_REJECTED`) and staging E2E | GitHub CI run 36579194568: tests green | path-rewriting proxies must be accounted for; integrators still on v1 during migration |
+| Signed model artefacts | yes | yes (`test_model_signing`) | yes: stack refused unsigned models, loaded signed ones; staging E2E | **yes:** CI smoke on the full PyTorch image refused unsigned models, then loaded the signed GB/GRU/LR (GRU 1.38 s) | model key custody; sklearn models are pickles |
+| Read-once verified load | yes | yes (swap-after-read test, symlink/subdir refusal) | indirectly (every load) | CI smoke on the full PyTorch image (every load) | an attacker with write access *and* the signing key |
 | External audit anchors | yes (file store) | yes, SQLite + PostgreSQL (rewrite, truncation, forged/missing/wrong-key anchors) | yes: stack anchor, then a DBA-style rewrite **detected** | no | the store is a local directory unless pointed at WORM storage; unanchored tail |
 | Two-person activation | yes | yes (`test_trust_chain`) | yes: stack CLI flow and staging E2E (double approval refused) | no | `OPERATOR_ID` is configuration, not authentication |
 | Approval expiry | yes | yes | TTL shown in the stack (72 h) | no | none known |
-| Least-privilege DB roles | yes (`db create-roles`, `db grant-roles`) | yes, real PostgreSQL (`test_pg_privileges`, 26 checks) | no: the stack still uses one DB user | CI (pending) | the migrator credential and superusers remain all-powerful; the stack should adopt the roles |
+| Least-privilege DB roles | yes (`db create-roles`, `db grant-roles`) | yes, real PostgreSQL (`test_pg_privileges`, 26 checks) | no: the stack still uses one DB user | GitHub CI (`test_pg_privileges` against the runner's PostgreSQL 16) | the migrator credential and superusers remain all-powerful; the stack should adopt the roles |
 | Backup with the restricted role | yes | yes (`fraud_backup` dump → restore → identical) | no | no | not timed at real volumes |
 | Privacy inventory | yes | yes (schema-checked) | no | no | not a legal assessment |
 | Free-text PII rules | yes | yes | indirectly (review note in the E2E) | no | heuristic: names and unusual formats are not detected |
@@ -835,8 +835,8 @@ Evidence levels:
 | Signed release manifest | yes | yes (`test_release`) | no | no | no image signing or provenance |
 | Key separation | yes | yes (settings refusal, domain separation) | yes (staging keys) | no | key custody is procedural |
 | Real Stripe test mode | adapter only | contract tests | no | **no: REAL STRIPE TEST NOT PERFORMED** (no test credentials) | everything real about Stripe |
-| Full PyTorch image | Dockerfile | torch-less variant only (the CPU wheel index is blocked here) | torch-less variant | CI builds, scans and smoke-tests it (pending first run) | results depend on the CI run |
-| GitHub CI | workflow | n/a | n/a | **Stage 10 run: lint + tests green; security (setuptools) and container (Trivy action tag) failed, both fixed**; Stage 11: pending | – |
+| Full PyTorch image | Dockerfile | torch-less variant only (the CPU wheel index is blocked here) | torch-less variant | **yes (GitHub CI):** built, checked, smoke-tested with the GRU, Trivy-scanned: 1,395 MB, 0 CRITICAL, 44 HIGH (8 unique, none fixable) | 773 MB of the image is PyTorch; base-OS HIGHs without an upstream fix |
+| GitHub CI | workflow | n/a | n/a | **Stage 10 run: lint + tests green; security (setuptools) and container (Trivy action tag) failed, both fixed**; **Stage 11: run 36579194568 all four jobs green** (§26) | no branch protection or required checks configured; runs are not reproducible builds |
 
 ## 25. Stripe, PyTorch image, base image, CI
 
@@ -859,7 +859,7 @@ Evidence levels:
   * runs Trivy on both images;
   * uploads everything as artefacts.
 
-  The results are recorded in §26 once the run has completed.
+  The results are in §26.
 * **Image minimisation research** (measured here, torch-less, with Trivy 0.58.1 and the
   2026-09-28 DB):
 
@@ -890,5 +890,61 @@ Evidence levels:
 
 ## 26. Stage 11 CI run
 
-Recorded after the Stage 11 push (see the commit that updates this section).
+Three runs after the Stage 11 push, each fixing what the previous one found. Nothing was
+skipped, disabled or ignored to get green.
+
+| Run | Commit | Result | Cause and fix |
+|---|---|---|---|
+| 36511027891 | 20f11cb | container job failed at the image checks (then cancelled by the next push) | `torch/bin/test_interpreter_async.pt` is a test fixture shipped in the PyTorch wheel, flagged as a model file. `container_checks.sh` now excludes `torch/bin/*.pt` (only that path). The PostgreSQL health check named a missing database: fixed (`-d`). |
+| 36513383020 | b342be2 | lint, security, **test green**; container job failed **after** `SMOKE OK` | the clean-up could not delete files the container wrote as uid 10001. Clean-up now removes them from a root container of the same image. |
+| **36579194568** | **b2e0ed4** | **all four jobs green** | – |
+
+Results of run 36579194568:
+
+* **lint:** ruff, ruff format --check and mypy strict clean.
+* **test:** 1056 passed, 0 skipped, in 42 min (SQLite, PostgreSQL 16, Redis, least-privilege
+  roles, restricted backup, staging E2E, multiprocess); coverage 97.39 % (gate 95 %).
+  The `duplicate key` errors in the PostgreSQL service log are from the replay and
+  idempotency race tests, which provoke them on purpose.
+* **security:** pip-audit 0 findings, bandit 0, detect-secrets 0 new, gitleaks (full
+  history) clean, CycloneDX SBOM uploaded.
+* **container:**
+  * the **full PyTorch release image** (CPU wheel) built in 61 s;
+  * `container_checks.sh`: uid 10001, no secrets, `.git`, databases or keys; read-only start;
+  * `container_smoke.sh`:
+    * migrate `<empty> → 0009`;
+    * bootstrap GB + **GRU** + LR;
+    * **unsigned models refused start-up**;
+    * all three signed with a throwaway Ed25519 key, each verified;
+    * the service became ready read-only, with all capabilities dropped, as uid 10001;
+    * the model cache warmed GB 0.002 s, **GRU 1.381 s**, LR 0.007 s.
+
+  Image sizes (`docker image inspect`, uncompressed):
+
+  | Image | Size | Largest packages (MB) |
+  |---|---|---|
+  | `fraud-ai:ci` (release, CPU PyTorch) | **1,395 MB** | torch 773, scipy 113, sympy 80, sklearn 51, numpy 45 |
+  | `fraud-ai:ci-notorch` (comparison only) | 518 MB | – |
+
+  Trivy 0.58.1, HIGH/CRITICAL, on both images:
+
+  | Image | CRITICAL | HIGH | Unique CVEs | With a fixed version | In Python packages |
+  |---|---|---|---|---|---|
+  | `fraud-ai:ci` | 0 | 44 | 8 | 0 | 0 |
+  | `fraud-ai:ci-notorch` | 0 | 44 | 8 | 0 | 0 |
+
+  **All 44 are in Debian 13.7 base packages**, and none has a fixed version upstream.
+  They are in util-linux (4 CVEs: mount helpers, nsenter, bind mounts), acl, ncurses,
+  systemd-homed and perl Archive::Tar (`fix_deferred`).
+  **PyTorch adds no HIGH/CRITICAL finding.**
+
+  Reachability: the service runs no mount, nsenter, homed or tar operation. The container
+  runs read-only, non-root, with all capabilities dropped and `no-new-privileges`.
+  **They are not suppressed:** CI prints them on every run, and they must be re-checked
+  when Debian ships fixes (rebuild the image to pick them up).
+
+Not verified by CI:
+* image signing or provenance;
+* branch protection or required checks;
+* a scheduled rebuild for new base-image fixes.
 
