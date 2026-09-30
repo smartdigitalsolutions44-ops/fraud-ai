@@ -220,7 +220,8 @@ Two stores implement it:
 
 Run it on a schedule: every 5-15 minutes, or the staging `anchor` service loop
 (`ANCHOR_INTERVAL`). `fraud-ai audit anchor-status --max-age-minutes N` exits non-zero
-when the latest anchor is older than N minutes or the store is unhealthy; alert on it. A
+when events have waited unanchored for more than N minutes, or the store is unhealthy;
+alert on it. An idle, fully anchored log is not flagged, because nothing is unprotected. A
 store failure records `audit.anchor_failed` and exits non-zero.
 
 **The staging drill** (`scripts/audit_tamper_drill.py`, HARDENING.md §29):

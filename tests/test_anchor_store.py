@@ -25,7 +25,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from fraud_ai import audit
 from fraud_ai.cli.main import cli
 from fraud_ai.config.settings import get_settings
-from fraud_ai.database.engine import make_session_factory, session_scope
+from fraud_ai.database.engine import create_db_engine, make_session_factory, session_scope
 from fraud_ai.trust import keys as tk
 from fraud_ai.trust.anchor_s3 import S3Config, S3ObjectLockAnchorStore
 from fraud_ai.trust.anchors import (
@@ -256,8 +256,14 @@ def test_anchor_now_and_status(sqlite_url: str, tmp_path: Path, key: tk.KeyPair)
     ok = _cli(env, "audit", "anchor-status")
     assert ok.exit_code == 0 and "anchor status OK" in ok.output
     assert "a plain directory is not write-once" in ok.output
+    # Fully anchored and idle: an old anchor is not a problem (nothing is unprotected).
+    idle_old = _cli(env, "audit", "anchor-status", "--max-age-minutes", "0.0001")
+    assert idle_old.exit_code == 0, idle_old.output
+    engine = create_db_engine(sqlite_url)
+    _events(make_session_factory(engine), 1)
+    engine.dispose()
     stale = _cli(env, "audit", "anchor-status", "--max-age-minutes", "0.0001")
-    assert stale.exit_code == 1 and "min old" in stale.output
+    assert stale.exit_code == 1 and "min old" in stale.output and "not yet anchored" in stale.output
     # The anchor recorded in the database is gone from the store: reported.
     for f in (tmp_path / "anchors").glob("anchor-00000002.json"):
         f.unlink()

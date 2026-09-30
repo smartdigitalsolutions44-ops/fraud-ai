@@ -1042,6 +1042,11 @@ example the model token on the audit key), for each pair tried.
 * **Scheduling:** the `anchor` service runs `audit anchor-now` every `ANCHOR_INTERVAL`, and
   skips when nothing is new. `audit anchor-status` was OK: COMPLIANCE, versioning enabled,
   a fresh anchor.
+* **Found on the 5,000-user stack:** after 85 idle minutes, `anchor-status` reported
+  "newest anchor … old" although no event was waiting, which was a false alarm.
+  **Fixed:** staleness is now a problem only while events wait unanchored (tested both
+  ways). The anchor job's inherited HTTP health check, which reported "unhealthy" for a
+  job with no server, is disabled in compose.
 * **Drill** (`stack.sh drill`, `scripts/audit_tamper_drill.py`):
   1. backup as `fraud_backup`;
   2. restore into `fraud_ai_drill_clone`;

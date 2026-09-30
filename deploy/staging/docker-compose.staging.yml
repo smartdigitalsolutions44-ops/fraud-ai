@@ -201,6 +201,10 @@ services:
     <<: *app
     profiles: ["ops"]
     entrypoint: ["sh", "-c", "while true; do fraud-ai audit anchor-now || echo 'ANCHOR FAILED' >&2; sleep $${ANCHOR_INTERVAL:-300}; done"]
+    # A job, not an HTTP service: the image's /v1/health check does not apply. Alert on
+    # `fraud-ai audit anchor-status` instead.
+    healthcheck:
+      disable: true
     environment:
       <<: [*fraud_env, *anchor_writer]
       DATABASE_URL_FILE: /run/secrets/service_database_url

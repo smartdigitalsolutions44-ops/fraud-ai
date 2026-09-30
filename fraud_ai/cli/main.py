@@ -4522,8 +4522,13 @@ def audit_anchor_status(app: AppContext, max_age_minutes: float | None, store: P
     elif held.statement.get("head_sha256") != last.head_sha256:
         problems.append(f"anchor {last.anchor_number} in the store has a different head")
     age = last.age_minutes()
-    if age > limit:
-        problems.append(f"newest anchor is {age:.0f} min old (limit {limit:g})")
+    # Staleness matters only while events wait unanchored: an idle, fully anchored log has
+    # nothing unprotected (the scheduled job then skips, by design).
+    if age > limit and last.events_since > 0:
+        problems.append(
+            f"newest anchor is {age:.0f} min old (limit {limit:g}) with "
+            f"{last.events_since} events not yet anchored"
+        )
     click.echo(f"anchor        {last.anchor_number}")
     click.echo(f"anchored at   {last.anchored_at.isoformat()} ({age:.1f} min ago)")
     click.echo(f"sequence      {last.sequence}")
