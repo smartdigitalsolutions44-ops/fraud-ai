@@ -90,13 +90,20 @@ class SignedClient:
         )
 
     def request(
-        self, method: str, path: str, payload: Any = None, *, retries: int = 5
+        self,
+        method: str,
+        path: str,
+        payload: Any = None,
+        *,
+        retries: int = 5,
+        extra: dict[str, str] | None = None,
     ) -> httpx.Response:
         """Signed request; a 429 is retried after its ``Retry-After`` (bounded), each attempt
         freshly signed (the service rejects a re-used timestamp/signature as a replay)."""
         body = b"" if payload is None else json.dumps(payload).encode()
         for attempt in range(retries + 1):
-            response = self.send(method, path, body, self.headers(method, path, body))
+            headers = {**self.headers(method, path, body), **(extra or {})}
+            response = self.send(method, path, body, headers)
             if response.status_code != 429 or attempt == retries:
                 return response
             time.sleep(min(float(response.headers.get("Retry-After", "1")), 30.0))
@@ -145,9 +152,14 @@ def run(
     rp_id: str,
     origin: str,
     session_lookup: Any = None,
+    reviewer: Any = None,
 ) -> dict[str, Any]:
     """``session_lookup(assessment_id) -> (user_id, session_id)`` enables the WebAuthn leg
-    (it needs the assessed event's user and session, which the merchant already knows)."""
+    (it needs the assessed event's user and session, which the merchant already knows).
+
+    ``reviewer(review_id, resolution) -> assertion`` (Stage 12) signs the reviewer's
+    operator assertion; the resolution is then first attempted without it (must be refused
+    with OPERATOR_AUTH_REQUIRED) and then with it."""
     report: dict[str, Any] = {"steps": []}
 
     def step(name: str, **info: Any) -> None:
@@ -250,14 +262,30 @@ def run(
     review_assessment = wanted["MANUAL_REVIEW"][0]["assessment_id"]
     items = client.request("GET", "/v1/reviews?status=open&limit=200").json()["items"]
     item = next(i for i in items if i["assessment_id"] == review_assessment)
-    resolved = client.request(
-        "POST",
-        f"/v1/reviews/{item['review_id']}/resolve",
-        {"resolution": "legitimate", "note": "e2e synthetic check"},
-    )
+    resolve_path = f"/v1/reviews/{item['review_id']}/resolve"
+    resolution = {"resolution": "legitimate", "note": "e2e synthetic check"}
+    extra: dict[str, str] = {}
+    unauthenticated = None
+    if reviewer is not None:
+        refused = client.request("POST", resolve_path, resolution)
+        unauthenticated = (refused.status_code, refused.json()["error"]["code"])
+        _expect(refused.status_code == 401, f"unauthenticated resolve: {refused.text}")
+        wrong = reviewer(item["review_id"], "fraud")  # bound to another resolution
+        mismatch = client.request(
+            "POST", resolve_path, resolution, extra={"X-Fraud-Operator-Assertion": wrong}
+        )
+        _expect(mismatch.status_code == 401, f"mismatched assertion: {mismatch.text}")
+        extra = {"X-Fraud-Operator-Assertion": reviewer(item["review_id"], "legitimate")}
+    resolved = client.request("POST", resolve_path, resolution, extra=extra)
     _expect(resolved.status_code == 200, f"resolve: {resolved.text}")
     _expect(resolved.json()["assessment"]["decision"] == "MANUAL_REVIEW", "decision rewritten")
-    step("review", resolution="legitimate")
+    step(
+        "review",
+        resolution="legitimate",
+        authenticated=reviewer is not None,
+        unauthenticated=unauthenticated,
+        mismatched_binding=mismatch.json()["error"]["code"] if reviewer is not None else None,
+    )
 
     # Investigation (optional LLM; the reference template counts as a runtime here).
     inv = client.request("POST", f"/v1/assessments/{review_assessment}/investigate", {})
@@ -286,7 +314,27 @@ def main() -> None:
     parser.add_argument("--origin", default="http://localhost:8080")
     parser.add_argument("--ca-bundle", default=None, help="TLS CA for a staging certificate")
     parser.add_argument("--signature-version", choices=["v1", "v2"], default="v2")
+    parser.add_argument("--reviewer-key", type=Path, default=None, help="reviewer's operator key")
+    parser.add_argument("--reviewer-id", default=None)
+    parser.add_argument("--operator-audience", default="fraud-ai-admin")
     args = parser.parse_args()
+    reviewer = None
+    if args.reviewer_key is not None:
+        from fraud_ai.trust.keys import load_private_key
+        from fraud_ai.trust.operators import create_assertion
+
+        pair = load_private_key(args.reviewer_key)
+
+        def reviewer(review_id: str, resolution: str) -> str:
+            return create_assertion(
+                pair,
+                args.reviewer_id,
+                action="review.resolve",
+                target=review_id,
+                binding={"resolution": resolution},
+                audience=args.operator_audience,
+            )
+
     events = [json.loads(line) for line in args.events.read_text().splitlines() if line.strip()]
     client = SignedClient(
         args.base_url,
@@ -297,7 +345,12 @@ def main() -> None:
     )
     try:
         report = run(
-            client, events, webhook_secret=args.webhook_secret, rp_id=args.rp_id, origin=args.origin
+            client,
+            events,
+            webhook_secret=args.webhook_secret,
+            rp_id=args.rp_id,
+            origin=args.origin,
+            reviewer=reviewer,
         )
     except E2EError as exc:
         print(json.dumps({"ok": False, "error": str(exc)}))

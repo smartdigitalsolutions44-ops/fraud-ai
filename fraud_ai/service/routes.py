@@ -471,18 +471,34 @@ def resolve_review(
     body: ResolveRequest,
     request: Request,
     caller: Annotated[Caller, Depends(require("review:write"))],
+    operator_assertion: Annotated[
+        str | None, Header(alias="X-Fraud-Operator-Assertion", max_length=4096)
+    ] = None,
 ) -> ReviewDetailView:
     c = container_of(request)
     with write_scope(c.factory) as session:
+        reviewer = _reviewer(c, session, review_id, body, caller, operator_assertion)
         try:
-            review_ops.resolve(session, review_id, body.resolution, note=body.note, now=c.clock())
+            review_ops.resolve(
+                session,
+                review_id,
+                body.resolution,
+                note=body.note,
+                now=c.clock(),
+                reviewer=reviewer,
+            )
             audit.record(
                 session,
                 "review.resolved",
-                actor=audit.api_actor(caller.key_id),
+                actor=reviewer,
                 target_type="review",
                 target_id=str(review_id),
-                details={"resolution": body.resolution.value, "via": "api"},
+                details={
+                    "resolution": body.resolution.value,
+                    "via": "api",
+                    "calling_key_id": caller.key_id,
+                    "authenticated": reviewer.startswith("operator:"),
+                },
             )
         except review_ops.ReviewError as exc:
             message = str(exc)
@@ -492,6 +508,53 @@ def resolve_review(
                 raise ApiError(409, "ALREADY_RESOLVED", "the review is already resolved") from None
             raise ApiError(422, "INVALID_NOTE", _safe(message)) from None
         return _review_detail(session, review_id)
+
+
+def _reviewer(
+    c: ServiceContainer,
+    session: Session,
+    review_id: uuid.UUID,
+    body: ResolveRequest,
+    caller: Caller,
+    token: str | None,
+) -> str:
+    """Stage 12: the authenticated reviewer (role ``reviewer``) from the operator's own
+    signed assertion, bound to this review and resolution. Required when operator
+    authentication is on; the API key alone then only identifies the calling tool."""
+    from fraud_ai.trust.operators import OperatorAuthError, authenticate, record_failure
+
+    required = c.settings.operator_auth_is_required
+    if token is None:
+        if required:
+            raise ApiError(
+                401,
+                "OPERATOR_AUTH_REQUIRED",
+                "resolving a review needs the reviewer's X-Fraud-Operator-Assertion",
+            )
+        return audit.api_actor(caller.key_id)
+    if c.operator_registry is None:
+        raise ApiError(401, "OPERATOR_AUTH_UNAVAILABLE", "operator authentication is not set up")
+    try:
+        verified = authenticate(
+            session,
+            c.settings,
+            token,
+            action="review.resolve",
+            target=str(review_id),
+            binding={"resolution": body.resolution.value},
+            registry=c.operator_registry,
+            now=c.clock(),
+        )
+    except OperatorAuthError as exc:
+        session.rollback()
+        record_failure(
+            c.factory, action="review.resolve", target=str(review_id), error=exc, via="api"
+        )
+        status = 403 if exc.code == "FORBIDDEN" else 401
+        raise ApiError(
+            status, "OPERATOR_AUTH_FAILED", f"operator authentication failed ({exc.code})"
+        ) from None
+    return verified.actor
 
 
 # ------------------------------------------------------------------ policy

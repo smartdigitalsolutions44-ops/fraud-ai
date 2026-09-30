@@ -395,19 +395,51 @@ compliance or fraud-reduction claims. Details are in [TRUST_CHAIN.md](TRUST_CHAI
 * **Stripe:** the real test was **not** performed (no test credentials).
 * **Migration:** `0009`.
 
-## Stage 12: Recommendation (not started)
+## Stage 12: Operational controls and portfolio handoff ✅ (release candidate)
 
-1. **Make the controls operational, not just available:**
-   * run the compose/staging stacks with the least-privilege roles;
-   * anchor to real WORM storage on a schedule, alerting on stale anchors;
-   * bind `OPERATOR_ID` to SSO or hardware-backed identity.
-2. **Supply chain:** image signing and provenance (cosign/SLSA), verified against the
-   release manifest at deploy time.
-3. **Models:** a non-executable format for the scikit-learn models, or sandboxed loading.
-4. **External verification:**
-   * the real Stripe test-mode run;
-   * a load test on networked PostgreSQL and Redis;
+* **Staging least privilege:**
+  * migrations run as `fraud_migrator`, the service as `fraud_service`, backups as
+    `fraud_backup`, tooling as `fraud_readonly`;
+  * `db check-privileges` probes every role on the stack;
+  * the staging E2E runs as the restricted role.
+* **KMS:** a `Signer` provider interface, with local files and Vault transit
+  (non-exportable, per-purpose keys, policies and tokens). Fail closed; no fallback.
+* **Audit anchors:** an S3 Object Lock (COMPLIANCE) store, `audit anchor-now` on a
+  schedule, `anchor-status` alerts. Tamper drill on a restored clone: detected.
+* **Operators:** Ed25519 assertions, a role registry, authenticated two-person approval
+  re-verified at activation, admin audit events; migration `0010`.
+* **Supply chain:**
+  * cosign image signatures with a dedicated key;
+  * SLSA v1 provenance and CycloneDX SBOM attestations;
+  * `release verify-image`, with a tampered image failing;
+  * manifest v2 with image evidence and the anchor key.
+* **Privacy:** `privacy export`; the erasure-execution design (not implemented); a
+  retention run in staging.
+* **Scale and operations:**
+  * a 5,000-user staging world and load test (single host; HARDENING.md §33);
+  * the CVE review;
+  * the image-size review;
+  * the sequence-runtime decision (stay in-process).
+* **Handoff:**
+  * the demo world and `demo reset|start|run`;
+  * DEMO.md, PORTFOLIO.md, INTERVIEW_GUIDE.md and ANALYST_WORKFLOW.md;
+  * a real local LLM benchmark.
+* **Stripe:** REAL STRIPE TEST NOT PERFORMED (no credentials; network blocked). The
+  checklist is in AUTHENTICATION.md §3.
+
+## After Stage 12: recommendations (no further backend stage is planned here)
+
+1. **External verification:**
+   * the Stripe test-mode checklist;
+   * a multi-host load and failure test;
    * an independent penetration test.
-5. **Privacy:** pseudonymisation-key rotation, and an audited erasure *execution* path once
-   the legal retention rules exist.
-6. **Only then**, and only if required, an analyst desktop interface as a client of the API.
+2. **Independence of trust roots:**
+   * anchors in a separate account or provider;
+   * hardware-backed operator keys;
+   * a Vault cluster with split unseal keys;
+   * deploy-time enforcement of image signatures.
+3. **Models:** a non-executable format for the scikit-learn models, or sandboxed loading.
+4. **Privacy:** pseudonymisation-key rotation; erasure execution once the safeguards in
+   PRIVACY.md §6.4 exist.
+5. **Only then**, and only if required, an analyst interface built on
+   ANALYST_WORKFLOW.md.

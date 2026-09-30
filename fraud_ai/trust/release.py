@@ -9,7 +9,12 @@ It records:
 * the active policy (with its definition hash) and the shadow policies;
 * every model of the active set: artefact digest, signature key id and value;
 * the SBOM hash;
-* the container image digest, when one is given.
+* the container image digest, when one is given;
+* (Stage 12) the container image evidence: image reference and digest, the cosign
+  signature reference and the image-signing key fingerprint, the SLSA provenance reference
+  and digest, and the image SBOM digest (from ``scripts/image_sign.sh``);
+* (Stage 12) the newest audit anchor: number, sequence, chain head, audit-key id and
+  destination.
 
 ``fraud-ai release manifest`` writes ``{"manifest": {...}, "signature": {...}}``.
 ``fraud-ai release verify <file>`` checks, as far as the environment allows:
@@ -29,6 +34,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shutil
 import subprocess  # nosec B404 - only `git rev-parse HEAD`, fixed argv, no shell
 from dataclasses import dataclass, field
@@ -41,10 +47,10 @@ from sqlalchemy.orm import Session
 
 from fraud_ai import __version__
 from fraud_ai.trust import keys as tk
-from fraud_ai.trust.keys import KeyPair, Signature, TrustError
+from fraud_ai.trust.keys import Signature, Signer, TrustError
 
 PURPOSE = "release"
-MANIFEST_VERSION = 1
+MANIFEST_VERSION = 2  # Stage 12: image evidence and audit anchor
 
 
 def _sha256_file(path: Path) -> str:
@@ -117,12 +123,60 @@ def _models(session: Session) -> tuple[dict[str, Any] | None, list[dict[str, Any
     )
 
 
+IMAGE_EVIDENCE_FIELDS = (
+    "image",
+    "digest",
+    "signature_ref",
+    "signing_key_fingerprint",
+    "signing_key_ref",
+    "provenance_ref",
+    "provenance_sha256",
+    "provenance_predicate_type",
+    "sbom_ref",
+    "sbom_sha256",
+)
+_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+def load_image_evidence(path: Path) -> dict[str, Any]:
+    """The evidence file written by ``scripts/image_sign.sh`` (strictly checked)."""
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError) as exc:
+        raise TrustError(f"cannot read image evidence {path}: {exc}") from None
+    if not isinstance(data, dict):
+        raise TrustError("image evidence must be a JSON object")
+    missing = [f for f in IMAGE_EVIDENCE_FIELDS if not data.get(f)]
+    if missing:
+        raise TrustError(f"image evidence lacks {', '.join(missing)}")
+    if not _DIGEST.match(str(data["digest"])):
+        raise TrustError("image evidence digest must be sha256:<64 hex>")
+    return {f: str(data[f]) for f in IMAGE_EVIDENCE_FIELDS}
+
+
+def _anchor(session: Session) -> dict[str, Any] | None:
+    from fraud_ai.trust.anchors import latest_status
+
+    last = latest_status(session)
+    if last is None:
+        return None
+    return {
+        "anchor_number": last.anchor_number,
+        "sequence": last.sequence,
+        "head_sha256": last.head_sha256,
+        "key_id": last.key_id,
+        "destination": last.destination,
+        "anchored_at": last.anchored_at.isoformat(),
+    }
+
+
 def build_manifest(
     session: Session,
     database_url: str,
     *,
     sbom: Path | None = None,
     image_digest: str | None = None,
+    image_evidence: dict[str, Any] | None = None,
     commit: str | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
@@ -132,6 +186,10 @@ def build_manifest(
     from fraud_ai.service.schemas import API_VERSION
 
     policy, models = _models(session)
+    if image_evidence is not None:
+        if image_digest is not None and image_digest != image_evidence["digest"]:
+            raise TrustError("--image-digest differs from the image evidence digest")
+        image_digest = image_evidence["digest"]
     return {
         "manifest_version": MANIFEST_VERSION,
         "product": "fraud-ai",
@@ -146,12 +204,14 @@ def build_manifest(
         "models": models,
         "sbom": None if sbom is None else {"path": sbom.name, "sha256": _sha256_file(sbom)},
         "container_image": {"digest": image_digest} if image_digest else None,
+        "image_evidence": image_evidence,
+        "audit_anchor": _anchor(session),
         "created_at": (now or datetime.now(UTC)).isoformat(timespec="seconds"),
     }
 
 
 def sign_manifest(
-    manifest: dict[str, Any], pair: KeyPair, trusted: dict[str, Ed25519PublicKey] | None = None
+    manifest: dict[str, Any], pair: Signer, trusted: dict[str, Ed25519PublicKey] | None = None
 ) -> dict[str, Any]:
     if trusted is not None and pair.key_id not in trusted:
         raise TrustError(f"key {pair.key_id} is not in RELEASE_SIGNING_PUBLIC_KEYS")
@@ -176,6 +236,8 @@ def verify_release(
     sbom: Path | None = None,
     model_trust: Any = None,
     repo: Path | None = None,
+    image_check: Any = None,
+    anchor_keys: dict[str, Ed25519PublicKey] | None = None,
 ) -> ReleaseReport:
     report = ReleaseReport()
     try:
@@ -217,6 +279,29 @@ def verify_release(
         if image
         else "skipped: no image digest recorded"
     )
+    evidence = manifest.get("image_evidence")
+    if evidence is None:
+        report.checks["image_evidence"] = "skipped: no image signature/provenance recorded"
+    elif image_check is None:
+        report.checks["image_evidence"] = (
+            "skipped: recorded; give --image-key to verify signature, provenance and SBOM"
+        )
+    else:
+        for name, result in image_check(evidence).items():
+            report.checks[name] = result
+    anchor = manifest.get("audit_anchor")
+    if anchor is None:
+        report.checks["audit_anchor"] = "skipped: no audit anchor recorded"
+    elif anchor_keys is None:
+        report.checks["audit_anchor"] = f"recorded anchor {anchor['anchor_number']} (no key set)"
+    elif anchor.get("key_id") in anchor_keys:
+        report.checks["audit_anchor"] = (
+            f"ok (anchor {anchor['anchor_number']}, key {anchor['key_id']} is trusted)"
+        )
+    else:
+        report.checks["audit_anchor"] = (
+            f"FAILED: anchor key {anchor.get('key_id')} is not in AUDIT_ANCHOR_PUBLIC_KEYS"
+        )
 
     if session is None:
         report.checks["database"] = "skipped: no database"

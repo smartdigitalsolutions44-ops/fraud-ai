@@ -1,4 +1,4 @@
-# Deployment hardening (Stages 10-11)
+# Deployment hardening (Stages 10-12)
 
 This stage prepares fraud-ai for **real deployment testing** (staging, load and failure
 testing on non-production infrastructure). The result is a **deployment-hardened
@@ -16,6 +16,10 @@ Stage 11 (trust, integrity, privacy and real-integration gaps) is in §23-§26; 
 mechanisms are described in [TRUST_CHAIN.md](TRUST_CHAIN.md) and privacy in
 [PRIVACY.md](PRIVACY.md). The result is a **security-hardened prototype**. It is still not
 production-ready.
+
+Stage 12 (making the controls operational in staging, and the portfolio and demo handoff)
+is in §27-§39. The result is a **portfolio release candidate** (`v0.12.0-rc1`). It is
+still not production-ready, and no compliance is claimed.
 
 Related documents:
 
@@ -948,3 +952,409 @@ Not verified by CI:
 * branch protection or required checks;
 * a scheduled rebuild for new base-image fixes.
 
+
+# Stage 12: operational controls, portfolio and demo handoff
+
+## 27. What changed
+
+| Area | Change |
+|---|---|
+| Staging database | Four roles in use: `fraud_migrator` migrates, `fraud_service` serves, `fraud_backup` dumps, `fraud_readonly` reads. The superuser is used only by `db-init`. `db check-privileges` probes each role |
+| KMS | `Signer` interface (`fraud_ai/trust/kms.py`): local files, or **Vault transit** (non-exportable, one key, policy and token per purpose). Fail closed; no fallback to files |
+| Audit anchors | **S3 Object Lock (COMPLIANCE)** store; `audit anchor-now` scheduled; `anchor-status`; `audit.anchor_failed`; a tamper drill on a restored clone |
+| Operators | Ed25519 **signed operator assertions** (EdDSA JWT), a role registry, single-use `jti`, and bindings to exact content. Authenticated two-person approval, re-verified at activation. Admin audit events |
+| Images | **cosign** signature, **SLSA v1** provenance and **CycloneDX** SBOM attestations with a dedicated image key; `release verify-image`; manifest v2 with image evidence and the anchor key |
+| Privacy | `privacy export` (one pseudonym, allow-list); erasure-execution **design** (not implemented); a retention run in staging |
+| Demo and handoff | `fraud-ai demo reset|start|run`; DEMO.md, PORTFOLIO.md, INTERVIEW_GUIDE.md, ANALYST_WORKFLOW.md |
+| Migration | `0010`: `operator_assertions` (append-only); `policy_approvals` gains `operator_key_id`, `assertion_jti` (unique) and `assertion`; `review_outcomes.reviewer` |
+| CI | anchors extra; a local registry; cosign sign and verify of the CI image; a tampered image must fail; a torch size breakdown; a weekly scheduled rebuild and scan |
+
+## 28. Staging: least-privilege roles and the E2E
+
+The stack (`deploy/staging/stack.sh up`, DEPLOYMENT.md §2c) on this machine had PostgreSQL
+16, Redis 7, Vault 1.18 (server mode), RustFS 1.0.0, Caddy TLS and fraud-ai with 2-3
+workers.
+
+**Privilege probes** (`fraud-ai db check-privileges --expect <role>`, run as each role
+inside its own container):
+
+| Role | Probes | Unexpected | Examples of refused operations |
+|---|---|---|---|
+| `fraud_migrator` | 6 | 0 | superuser-level operations: CREATE ROLE, `ALTER ROLE … SUPERUSER`, `session_replication_role = replica` (which skips triggers), CREATE DATABASE |
+| `fraud_service` | 28 | 0 | DDL, TRUNCATE, `ALTER TABLE … DISABLE TRIGGER`, UPDATE or DELETE on history, `UPDATE alembic_version`, CREATE ROLE, CREATE DATABASE |
+| `fraud_readonly` | 28 | 0 | every write |
+
+The first run found that `fraud_service` could `UPDATE alembic_version`. **Fixed:** it now
+has SELECT only (`SERVICE_READ_ONLY`), and the probe is part of the check.
+
+**The staging E2E** (`scripts/staging_e2e.py`, over TLS, the service connected as
+`fraud_service`) passed:
+
+* policy lookup;
+* signature v2: a valid request 200; replayed, method, path and body tampering refused;
+  v1 downgrade refused;
+* scoring: 3 step-ups and 1 review;
+* payment step-up → a follow-up `ALLOW_WITH_MONITORING`;
+* **review resolution:**
+  * no assertion → 401 `OPERATOR_AUTH_REQUIRED`;
+  * mismatched binding → `OPERATOR_AUTH_FAILED`;
+  * reviewer `rita` → 200;
+* investigation 503 (no LLM in the stack: "decisions unaffected");
+* metrics.
+
+The E2E above ran on the first, 80-user stack. On the 5,000-user stack it **could not
+complete**: its derived policy has **no score-based STEP_UP band** (§33), and the script
+needs two step-ups from the stream. That is a property of this world's derived policy.
+Nothing was bypassed, and the policy was not edited to make the test pass. The same E2E
+runs in the test suite (`tests/test_staging_e2e.py`). It also covers the
+authenticated two-person flow, impersonation and role checks.
+
+**Two-person approval on the stack** (the operators from `generate-secrets.sh`):
+
+| Attempt | Result |
+|---|---|
+| approve without an operator key | refused, `OPERATOR_AUTH_REQUIRED` |
+| alice approves | 1/2 |
+| alice approves again | refused: "a second approval must come from a different operator" |
+| carol (activator) approves | refused, `FORBIDDEN` |
+| carol activates with one approval | refused: "needs 2 approvals … it has 1 valid" |
+| bob approves | 2/2 (alice, bob) |
+| bob (approver) activates | refused, `FORBIDDEN` |
+| carol activates | deployment #2 active |
+
+**Vault token scoping:** a purpose token signing with another purpose's key got 403 (for
+example the model token on the audit key), for each pair tried.
+
+## 29. External audit anchors (WORM) and the tamper drill
+
+* **Store:** RustFS 1.0.0 bucket `fraud-ai-audit-anchors`, versioning **Enabled**, Object
+  Lock **COMPLIANCE**, default retention 1 day in staging (400 by default).
+* **Credentials:**
+  * the writer can put and set retention, but **cannot delete** an object or version,
+    or create a bucket (tested);
+  * the reader can only get and list.
+  * RustFS custom policies needed an explicit `sts:AssumeRole` statement to take effect.
+* **Store checks (`tests/test_anchor_store.py`, also against real RustFS):**
+  * refuses a bucket without versioning or without COMPLIANCE;
+  * each write is read back and its retention checked;
+  * the verifier reads the oldest version and reports overwrites, delete markers, stray
+    objects and missing locks.
+* **Scheduling:** the `anchor` service runs `audit anchor-now` every `ANCHOR_INTERVAL`, and
+  skips when nothing is new. `audit anchor-status` was OK: COMPLIANCE, versioning enabled,
+  a fresh anchor.
+* **Drill** (`stack.sh drill`, `scripts/audit_tamper_drill.py`):
+  1. backup as `fraud_backup`;
+  2. restore into `fraud_ai_drill_clone`;
+  3. as a superuser, rewrite event 2 (`model.signed`) and re-chain everything after it.
+
+  | Check | Result |
+  |---|---|
+  | clone: internal hash chain | **OK: fooled**, as expected |
+  | clone: `audit verify-anchor` | **FAILED**: anchors 1, 2 and 3 report "event … no longer has the anchored hash (history was rewritten)" |
+  | live database: chain and anchors | OK, untouched |
+
+* **Repeated on the 5,000-user stack** (`out/drill-5000.log`): the internal chain was
+  fooled again, anchors 1-5 reported the rewrite, and the live chain (168 events, 5
+  anchors) verified OK. The real-RustFS test (`test_real_object_lock_service`) confirmed
+  that even the **root** credential cannot delete a locked version or shorten its
+  retention.
+* **Honest limit: WORM at the S3 API only.** RustFS enforced COMPLIANCE for every
+  credential, including root. Its files are on the same host, though, so a host
+  administrator could delete them underneath. **True write-once storage independent of
+  this host was not available here.** For that, use S3 Object Lock in a separate account
+  (the policy is in DEPLOYMENT.md §2c) or another provider.
+
+## 30. KMS, key purposes and operator authentication
+
+* **Vault transit (staging):**
+  * `fraud-ai-model`, `-audit` and `-release` are Ed25519 and `exportable=false`;
+    `fraud-ai-image` is ECDSA P-256 (cosign);
+  * the key version is pinned when opened, and each signature is **verified locally**;
+  * bootstrap signed the staging models through Vault (`--sign-with-provider`).
+* **Tests** (`tests/test_kms.py`: a fake Vault, plus a test against a real Vault server
+  that passed here):
+  * signing through Vault, verified locally;
+  * Vault failures fail closed, with **no fallback to local files**;
+  * `KMS_REQUIRED` refuses local keys;
+  * purpose separation in settings;
+  * key rotation through the CLI.
+* **Purpose separation:**
+  * the model, audit, release, image and API keys are distinct (settings validation);
+  * operator keys may not be any signing key (`operators registry-check`);
+  * secret values must differ from each other.
+* **HSM:** not available here. Vault transit is the external provider. An HSM-backed or
+  cloud KMS provider plugs in behind the same `Signer` interface, and cosign accepts
+  `awskms://`, `gcpkms://` and `azurekms://`. **Not tested.**
+* **Operator authentication** (AUTHENTICATION.md §6):
+  * `tests/test_operators.py` (12 tests) covers:
+    * impersonation, forgeries, `alg=none` and HS256;
+    * the wrong action, target or binding;
+    * roles taken from the registry, not the token; disabled operators;
+    * replay and expiry;
+    * approval rows inserted behind the tooling, and an edited approval note;
+    * the CLI flow, and the API review-resolution path;
+  * approvals re-verified at activation;
+  * audited without tokens.
+
+## 31. Stripe: REAL STRIPE TEST NOT PERFORMED
+
+* No Stripe test-mode credentials were available, and `api.stripe.com` is refused by this
+  environment's network policy (`CONNECT tunnel failed, response 403`).
+* **No call was faked as a success.** Local contract tests still pass (SDK 15.6.1, API
+  `2026-08-26.dahlia`).
+* The precise operator checklist is in AUTHENTICATION.md §3. It covers test
+  PaymentMethods only, live mode refused, never a PAN or CVV, and the evidence to record.
+
+## 32. Image signing, provenance and SBOM
+
+`scripts/image_sign.sh` (TRUST_CHAIN.md §8), run locally on the torch-less staging image
+(digest `sha256:319f58f8…`, rebuilt with the final code) against a local registry, with the
+Vault transit image key (`hashivault://fraud-ai-image`, non-exportable, fingerprint
+`sha256:7102b3e8…`). `tests/test_images.py::test_real_image_evidence` verified the same
+evidence:
+
+| Case | `release verify-image` |
+|---|---|
+| the signed image, correct commit | **OK**: key, signature, provenance and SBOM |
+| a wrong `--commit` | **FAILED** (`image_provenance`) |
+| a tampered image (one extra `LABEL`, so another digest) | **FAILED**: digest mismatch, no signature |
+| a wrong public key | **FAILED** (`image_key` and `image_signature`) |
+
+* **Formats:** SLSA provenance v1 (`https://slsa.dev/provenance/v1`: builder, git commit
+  and ref, workflow and run, base-image digest, SBOM digest as a by-product), and a
+  CycloneDX SBOM from Trivy. Both are cosign in-toto attestations on the image digest.
+* **Canonicalisation:** cosign normalises `invocationId` to `invocationID` and times to
+  `Z`. The evidence therefore records the SHA-256 of the canonical, **read-back**
+  predicate.
+* **Evidence** (`image-evidence.json`) goes into manifest v2.
+* **In CI** (container job): the same script signs the CI image. It uses the repository
+  secret `COSIGN_PRIVATE_KEY` if set, otherwise an **ephemeral** key, and says so in the
+  summary. It then verifies inside the image, and checks that a tampered image fails.
+* **Tests:** `tests/test_images.py` (6), with a fake cosign and a real image.
+* **Key reuse is refused.** The image key is its own Vault key, never the model, audit,
+  release or API key.
+
+## 33. Large world, networked load and failure under load
+
+**World:** the 5,000-user staging world, built by `stack.sh up` with `USERS=5000`,
+`ACTIVITY_DAYS=60` and `LIVE_DAYS=5`:
+
+* 5,000 users; **402,029 events** of history; a live stream of 22,556 events;
+* GB primary with LR shadow, both signed through Vault;
+* the bootstrap took about 2 h 40 min on this host:
+  * seeding about 1 h 30 min, as row-by-row ORM inserts over the network;
+  * `policy propose` about 50 min each, rebuilding point-in-time validation features.
+
+  This is not in CI.
+
+**The derived policy** (`risk-policy-1.0.0`) for this world:
+
+| Calibrated score | Decision |
+|---|---|
+| below 0.04 | ALLOW |
+| from 0.04 | MANUAL_REVIEW |
+| from 0.91 | TEMPORARY_BLOCK |
+
+There is **no score-based STEP_UP band**. A second proposal with an assumed 90 %
+step-up stop rate derived the same bands: on this world, review beats step-up at every
+score between the two thresholds. STEP_UP therefore comes only from medium-severity rules,
+and none fired in the streams used. **The bands were not hand-edited** to manufacture
+step-ups.
+
+**The test is networked, but on a SINGLE HOST.** It used `scripts/load_test.py`, with each
+component in its own container on Docker networks:
+
+* the load generator on the host;
+* Caddy TLS;
+* fraud-ai with 3 workers, pool 8+4;
+* PostgreSQL 16;
+* Redis 7.
+
+Every hop is real TCP, and the client to Caddy hop is TLS. **All of them share the same 4
+vCPUs.** No multi-machine test was possible here, so these numbers include CPU contention
+between the generator, the service and the database. Synthetic data; not an SLA.
+
+Results: `benchmarks/stage12_load.json`.
+
+| Shape | Requests | Throughput | p50 / p95 / p99 | Errors | Resources (peak) |
+|---|---|---|---|---|---|
+| **steady** (12 clients, target 40 req/s, 90 s) | 3,600 | **39.9 req/s** | 92 / 132 / 187 ms | **0** | fraud-ai 72 % CPU, 586 MiB; PostgreSQL 24 %, 1.1 GiB; 13 DB connections; Redis latency 0.31 ms mean |
+| **burst** (36 clients, unthrottled, 15 s) | 1,975 | **126.5 req/s** | 220 / 609 / 1,315 ms | **0** | fraud-ai 232 % CPU; PostgreSQL 121 %; 37 DB connections; Redis 1.05 ms mean (2.3 max) |
+| **replay attack** (300 accepted requests re-sent verbatim) | 300 | – | 53 / 60 / 64 ms | 300 × `REPLAYED_SIGNATURE` (**0 accepted**) | – |
+| **high review volume** (list, details, resolve every open review with rita's single-use assertion) | 380 | 124 req/s | 47 / 296 / 337 ms | 0 | **76 reviews resolved**, each authenticated |
+| **high step-up volume** | 0 | – | – | – | **not generated**: no STEP_UP decisions under this world's derived policy (above). The step-up paths are covered by the E2E on the 80-user stack and by the test suite |
+
+**Failure under moderate load** (12 clients, about 20 req/s, 100 s, run 2):
+
+| t | Injected | Effect | Recovery |
+|---|---|---|---|
+| 21.6 s | **SIGKILL of one service worker** (confirmed dead) | 1 × `502` from Caddy for the in-flight request | uvicorn respawned the worker; no further errors |
+| 46.6 s | **Redis restart** | 12 × `503 STATE_UNAVAILABLE` over about 2 s: **fail closed**, nothing scored without replay and rate-limit state | full service in the next second |
+| 72.4 s | **every `fraud_service` DB connection terminated** | **0 errors**: the pool's pre-ping reconnected | immediate |
+
+* Overall: 2,004 requests, 1,988 ok, error rate 0.8 %. **No request failed open.**
+* The 3 × `422 INVALID_EVENT` are an artefact of starting mid-stream: events whose earlier
+  events were not replayed. They were correctly routed to MANUAL_REVIEW.
+* **A first attempt (run 1) was invalid, and is reported as such.** Its worker kill never
+  happened: the slim image has no `kill` binary, and the error was swallowed. The script
+  now signals from Python and records `confirmed_dead`. Run 1's burst shape also consumed
+  the whole event budget; it is now sized from throughput.
+* No destructive denial-of-service test was run.
+
+## 34. Image CVEs, image size and the sequence runtime
+
+**CVE review** (Trivy 0.58.1, DB updated 2026-09-29, HIGH/CRITICAL):
+
+| Image | CRITICAL | HIGH | Unique CVEs | Fixable |
+|---|---|---|---|---|
+| `fraud-ai:staging` (torch-less, digest `af1f840b…`) | 0 | 44 | 8 | **0** |
+| `python:3.11-slim` base (`e41613d4…`, built 2026-09-19) | 0 | 46 | 10 | 2 (`wheel` 0.46.2, `jaraco.context` 6.1.0) |
+
+* **The two fixable base findings are absent from our image.** The Dockerfile uninstalls
+  pip, setuptools and wheel after installing (Stage 11). So the image's Python packages
+  have 0 HIGH/CRITICAL findings.
+* **The 8 remaining CVEs are all in Debian 13.7 packages**, and none has a fixed version
+  (status `affected` or `fix_deferred`):
+  * util-linux (4 CVEs: mount helpers, `nsenter`, bind mounts);
+  * ncurses;
+  * systemd-homed (`libsystemd0`/`libudev1`);
+  * acl;
+  * perl Archive::Tar.
+* **Upgrade attempted.** Docker Hub refused a fresh pull (429 rate limit), and
+  `deb.debian.org` is blocked here (403), so `apt-get upgrade` could not run. With no
+  fixed versions published, it would not have changed anything.
+* **Not suppressed.** CI prints them on every run, and a **weekly scheduled CI rebuild**
+  now picks up base-image fixes without waiting for a code change.
+* **Reachability** is unchanged from §26: no mount, nsenter, homed or tar operation runs,
+  and the container is read-only, non-root, with all capabilities dropped.
+
+**Image size review** (the torch-less image, `du` inside it; the release image figures are
+from CI run 36579194568):
+
+| Candidate saving | Size | Share of the 1,395 MB release image | Decision |
+|---|---|---|---|
+| PyTorch (CPU wheel, already the smallest build) | 773 MB | 55 % | kept: the GRU runs in-process (below) |
+| `tests/` directories inside third-party packages | 64 MB | 4.6 % | **not adopted**: small, and deleting package files risks breaking imports |
+| the Stripe SDK (optional extra) | 25 MB | 1.8 % | **not adopted**: needed when `PAYMENT_AUTH_PROVIDER=stripe` |
+| distroless base (Stage 11 measurement) | -107 MB | 7.7 % | **not adopted**: more, and fixable-but-unfixed, CVEs |
+
+No change was adopted: none has a substantial benefit that is safe. The CI container job
+now prints the PyTorch size breakdown on every run, to track it.
+
+**Sequence runtime: in-process (current) versus a separate sequence-model service.**
+
+| | In-process | Separate service |
+|---|---|---|
+| per-event cost | GRU inference median **1.87 ms** (p95 2.69); sequence extraction 8.2 ms (a database read; REALTIME_SCORING.md) | the same, **plus** a network hop and serialisation (≈0.5-1 ms loopback; more across hosts, with a worse tail) |
+| memory | +467 MB RSS per worker with PyTorch | the scoring workers save ~467 MB each; the sequence service needs its own ~650 MB+ per replica |
+| image | one 1,395 MB image | a torch-less scoring image (518 MB) **plus** a ~1.3 GB sequence image |
+| failure modes | the existing fallback (sequence failure → at least STEP_UP) | a new one on every event (timeouts, partial outages), plus a new service-to-service authentication boundary and a second signed-model verification path |
+| operations | one deployable | two, with version skew between the feature, sequence and model versions |
+
+**Decision: do not split.** The inference being moved (1.9 ms) is about the size of the
+hop that would replace it. The memory saving matters only with many workers. The split
+would add a failure mode and a trust boundary to the scoring path.
+
+**Revisit when:**
+
+* workers × 467 MB becomes a real cost (for example more than 8 workers per host);
+* a GPU is needed;
+* sequence models must be released on a different cadence from the scoring service.
+
+## 35. Privacy: export, erasure, retention in staging
+
+* **Export** (PRIVACY.md §5):
+  * `tests/test_privacy_export.py` (2 tests): scoped to one user, allow-list only, no other
+    user's ids, no processor tokens, and a `security_admin` assertion required;
+  * the file is 0600 and never overwritten;
+  * the audit event holds counts only.
+* **Staging run and a finding:**
+  1. Run on the 5,000-user stack for the busiest user, as `sec`: 323 rows. Without an
+     assertion it was refused (`OPERATOR_AUTH_REQUIRED`). The audit event `privacy.exported`
+     holds the row counts, with the user as target. No other user's id appeared (0 of
+     4,999).
+  2. **Finding:** keyed pseudonyms (`network.ip_hash`, `address_hash`) and
+     `token_reference` values **inside the allow-listed JSON columns** (event metadata)
+     were exported. The unit test's world had not contained them.
+  3. **Fixed:** every nested key matching `NESTED_REDACT` is now removed from every
+     exported JSON value, and counted (`redacted_nested_keys`). Two regression tests
+     were added. Re-run on staging with the rebuilt image: **88 nested keys redacted, 0
+     sensitive keys left**.
+* **Erasure:** **not executed**. The design, and the four safeguards still missing, are in
+  PRIVACY.md §6. The dry-run plan is unchanged.
+* **Retention in staging** (PRIVACY.md §7):
+  * the dry run planned 361 `security_events.details` rows;
+  * `retention run --execute` without an operator was refused
+    (`OPERATOR_AUTH_REQUIRED`);
+  * as `sec` it applied 361;
+  * the protected table counts were identical before and after;
+  * `audit verify` OK (27 events), and anchors verified.
+
+  The commands:
+
+  ```bash
+  fraud-ai retention plan
+  fraud-ai retention run --execute --yes                        # refused: no operator
+  fraud-ai retention run --execute --yes --operator-key /operators/sec.pem
+  fraud-ai audit verify ; fraud-ai audit verify-anchor
+  ```
+
+## 36. Local LLM benchmark
+
+LLM_ANALYST.md §12 has the full table.
+
+| Model | Valid outputs | Mean latency | Cause |
+|---|---|---|---|
+| Qwen2.5-3B-Instruct Q4_K_M | **0 / 10** | 334 s | every answer truncated at the 1,200-token default |
+| Llama-3.2-1B-Instruct Q8_0 | **0 / 10** | 133 s | malformed JSON |
+
+* The validator stored nothing invalid.
+* Citation, unsupported-claim and privacy rates **could not be measured**, because no
+  output parsed.
+* **The default stays the reference template.** Neither model was adopted, and the biggest
+  model was not picked by default.
+
+## 37. Security status matrix (Stage 12)
+
+Evidence levels as in §24. "Staging" here means the Stage 12 stack: PostgreSQL roles,
+Vault, RustFS Object Lock, Caddy TLS.
+
+| Control | Implemented | Tested locally | Tested staging | Tested externally | Remaining gap |
+|---|---|---|---|---|---|
+| Least-privilege DB roles in staging | yes | yes (`test_pg_privileges`) | **yes**: each container under its own role; `check-privileges` 6/28/28 probes, 0 unexpected | GitHub CI (PG tests) | the migrator and superuser credentials; the superuser used by `db-init` |
+| Staging E2E as `fraud_service` | yes | yes (`test_staging_e2e`) | yes (80-user stack); not completable on the 5,000-user stack (no STEP_UP) | CI (test job) | – |
+| WORM audit anchors (S3 Object Lock) | yes | yes (fake S3 + **real RustFS**, root cannot delete) | **yes**: scheduled anchor-now; drill detected twice | no | **same-host WORM**: not independent of the host administrator |
+| KMS (Vault transit) | yes | yes (fake + **real Vault**) | yes: models signed through Vault; per-purpose tokens (403 cross-purpose) | no | single-node Vault, one unseal share; no HSM |
+| Purpose separation | yes | yes | yes | no | custody is procedural |
+| Operator authentication | yes | yes (`test_operators`, every refusal code) | yes: approve, activate, review, retention, export, release, key rotation | no | keys are files; no MFA or hardware tokens |
+| Authenticated two-person approval | yes | yes (DB-inserted rows, edited notes, disabled operators do not count) | yes (80-user stack) | no | two stolen approver keys |
+| Admin audit events | yes | yes | yes (`operator.authenticated`, `privacy.exported`, `release.signed`, …) | no | – |
+| Image signing + SLSA provenance + SBOM attestations | yes | yes (fake cosign + real image) | yes: Vault key; good image verified; wrong commit, tampered image and wrong key failed | **CI step added** (ephemeral key unless `COSIGN_PRIVATE_KEY` is set): result in §38 | no transparency log; no deploy-time enforcement |
+| Release manifest v2 (image evidence, anchor key, migration) | yes | yes (`test_release`) | yes: the RC manifest (§38) | no | – |
+| Privacy export | yes | yes (3 tests) | **yes**, with a nested-JSON leak found and fixed | no | human handling of the file |
+| Erasure execution | **no** (design only) | – | – | – | the four safeguards in PRIVACY.md §6.4 |
+| Retention execution | yes | yes | yes (361 rows, protected tables unchanged) | no | – |
+| Demo guard | yes | yes (`test_demo`, 8) | n/a | no | a deliberately forged marker |
+| Real Stripe test | adapter only | contract tests | no | **REAL STRIPE TEST NOT PERFORMED** | everything real about Stripe |
+| Networked load / failure | script | – | **single-host**: steady, burst, replay, reviews, failures | **no multi-host** | multi-machine behaviour; step-up volume |
+| Real local LLM | runtime | yes | – | – | no model passed (§36) |
+
+## 38. Release candidate and CI
+
+The release candidate is tagged **`v0.12.0-rc1`** only after this section's verification.
+It is not `v1.0`. The final verification results are recorded here after the commit.
+
+## 39. Known limitations (Stage 12)
+
+* **Single-host staging.** The WORM store, Vault, the database and the service share one
+  machine and one administrator. The load numbers include CPU contention.
+* **Trust roots are local:**
+  * operator keys are files;
+  * one Vault unseal share;
+  * CI signs with an ephemeral key unless a repository key is configured;
+  * no transparency log.
+* **Data-derived gaps:** the 5,000-user derived policy has no step-up band, so step-up
+  load was not generated.
+* **No real Stripe, no real LLM that passes, no erasure execution, no analyst UI.**
+* **Base-image CVEs** without an upstream fix (§34).
+* Everything in §22 still applies.

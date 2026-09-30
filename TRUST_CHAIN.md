@@ -1,11 +1,11 @@
-# Trust chain (Stage 11)
+# Trust chain (Stages 11-12)
 
 This document explains how fraud-ai establishes **who produced** each thing it trusts, and
 **that nothing changed since**. It covers requests, model artefacts, the audit history,
 policy activation and releases.
 
 It describes a **security-hardened prototype**. The mechanisms below are implemented and
-tested; the evidence levels are in HARDENING.md §24. Nothing here is a certification.
+tested; the evidence levels are in HARDENING.md §24 and §37. Nothing here is a certification.
 No PCI DSS, GDPR, SOC 2 or ISO compliance is claimed.
 
 ## 1. Keys and their separation
@@ -16,6 +16,31 @@ No PCI DSS, GDPR, SOC 2 or ISO compliance is claimed.
 | **Model** | Ed25519 | offline file, `models sign --key` | `MODEL_SIGNING_PUBLIC_KEYS` | model artefacts |
 | **Audit** | Ed25519 | offline file, `audit anchor --key` | `AUDIT_ANCHOR_PUBLIC_KEYS` | audit-chain anchors |
 | **Release** | Ed25519 | offline file, `release manifest --key` | `RELEASE_SIGNING_PUBLIC_KEYS` | release manifests |
+| **Image** (Stage 12) | ECDSA P-256 (cosign) | Vault transit `fraud-ai-image` (non-exportable) or a cosign key | `IMAGE_SIGNING_PUBLIC_KEY_FILE` | container image digests and their attestations |
+| **Operator** (Stage 12) | Ed25519, one key per person | the operator's own file (or a hardware token, not integrated) | `OPERATOR_REGISTRY_FILE` | administrative assertions (AUTHENTICATION.md §6) |
+
+### Key providers (Stage 12)
+
+`KEY_PROVIDER` selects where the model, audit and release private keys live
+(`fraud_ai/trust/kms.py`). Core code sees only a `Signer` (public key, key id, `sign_raw`).
+No vendor is hard-coded.
+
+* **`local`**: PKCS#8 files, as in Stage 11.
+* **`vault`**: HashiCorp Vault **transit** keys: one per purpose (`VAULT_KEY_MODEL`,
+  `…_AUDIT`, `…_RELEASE`, `…_IMAGE`), type `ed25519`, `exportable=false`. The key version is
+  pinned when opened, and every signature returned by Vault is **verified locally**
+  against the trusted public key before use. The staging stack gives each purpose its own
+  Vault policy and token: the model token gets 403 on the audit key.
+* **Fail closed.** `KMS_REQUIRED` defaults to true in production. With it, or with
+  `KEY_PROVIDER=vault`, a `--key` file or `*_PRIVATE_KEY_FILE` setting is **refused**.
+  There is no silent fallback from an unreachable Vault to local files; a Vault error
+  aborts the signing command.
+* **Purpose separation** extends to the image and operator keys. The image key must not
+  be the model, audit, release or API key. Settings refuse identical key names or
+  secrets, and the registry check refuses an operator key that is also a signing key.
+* **Rotation:** `fraud-ai keys rotate --purpose <p>` (Vault only; `security_admin`;
+  audited as `signing_key.rotated`) creates a new key version. Add its public key to the
+  trusted set before relying on it; old versions stay usable for verification.
 
 Separation is enforced in three ways:
 
@@ -165,9 +190,47 @@ rewrite the chain *consistently*.
    previous anchor's hash.
 4. Write it to an `AuditAnchorProvider`.
 
-The bundled provider, `FileAnchorStore`, writes one create-only (`O_EXCL`) JSON file per
-anchor. **Point it at storage the database administrator cannot write**: a WORM or
-object-lock bucket, another host, or an append-only mount.
+Two stores implement it:
+
+* **`file`** (`FileAnchorStore`): one create-only (`O_EXCL`) JSON file per anchor. It
+  suits development and the demo.
+* **`s3`** (Stage 12, `S3ObjectLockAnchorStore`, `AUDIT_ANCHOR_STORE=s3`): an S3 bucket
+  with **versioning and Object Lock in COMPLIANCE mode**. Nobody, including the bucket
+  owner or root, can shorten the retention or delete a locked version before it expires.
+  * The store **refuses** a bucket without versioning or not in COMPLIANCE mode.
+  * Each anchor is written with an explicit retention (`ANCHOR_RETENTION_DAYS`), read
+    back and checked.
+  * Verification reads the **oldest** version of each object and reports any later
+    version, delete marker, stray object or missing lock as a problem.
+  * The writer credential may put and set retention, but not delete. The verifier's
+    credential is read-only.
+  * Staging uses RustFS 1.0.0 with COMPLIANCE enforced. **Honest limit:** that is WORM at
+    the S3 API; the files sit on the same host, so a host administrator could remove
+    them. For real separation, use a different account or provider (S3 in another AWS
+    account, with a least-privilege policy; DEPLOYMENT.md §2c).
+
+**Scheduling.** `fraud-ai audit anchor-now` anchors only when there are new events
+(`--always` forces it) and prints one JSON line:
+
+* the timestamp;
+* the head sequence and hash;
+* the anchor number;
+* the signing key id;
+* the destination.
+
+Run it on a schedule: every 5-15 minutes, or the staging `anchor` service loop
+(`ANCHOR_INTERVAL`). `fraud-ai audit anchor-status --max-age-minutes N` exits non-zero
+when the latest anchor is older than N minutes or the store is unhealthy; alert on it. A
+store failure records `audit.anchor_failed` and exits non-zero.
+
+**The staging drill** (`scripts/audit_tamper_drill.py`, HARDENING.md §29):
+
+1. back up as `fraud_backup`;
+2. restore into a clone;
+3. rewrite event 2 as a superuser and re-chain.
+
+The clone's internal chain **verified OK**, and `verify-anchor` **reported anchors 1-3 as
+rewritten**. The live database was untouched.
 
 `fraud-ai audit verify-anchor` checks:
 
@@ -200,16 +263,22 @@ things:
 * **validity:** each approval is unexpired (`POLICY_APPROVAL_TTL_HOURS`, 72 by default) and
   pinned to the definition's SHA-256.
 
-**Operator identity** is `OPERATOR_ID` from the operator's trusted CLI configuration. It is
-not a login system. `OPERATOR_ALLOWLIST` optionally limits who may approve.
+**Operator identity (Stage 12)** is **authenticated**. Each approval carries a signed,
+single-use assertion from the operator's own key, bound to the policy version, the
+definition hash and the note. Roles come from the registry: only `policy_approver`s
+approve, and only a `policy_activator` activates. At activation every stored assertion is
+re-verified, so rows written straight into the database, disabled operators and expired
+approvals do not count (AUTHENTICATION.md §6). With `OPERATOR_AUTH_REQUIRED=false`
+(development only), `OPERATOR_ID` from the CLI configuration is used as before, and
+`OPERATOR_ALLOWLIST` optionally limits it.
 
 The same operator approving twice is refused twice over: by the code, and by the unique
 constraint `(policy_version, operator)`. Approvals are append-only (with triggers) and
 audited (`policy.approved`); activation records the approvers.
 
-**Limit:** whoever controls `OPERATOR_ID` in two environments, or has direct database
-write access, can impersonate a second approver. The rule stops a single operator acting
-alone *through the tooling*.
+**Limit:** whoever holds two approvers' private keys, or can edit the registry, can act as
+two people. Direct database write access no longer creates valid approvals. It can still
+do anything else the migrator role can do.
 
 ## 7. Releases
 
@@ -224,12 +293,61 @@ alone *through the tooling*.
 
 It is signed with the release key.
 
-`fraud-ai release verify release.json [--sbom …] [--no-database]` checks every hash and
+**Stage 12 (manifest version 2)** adds:
+
+* `image_evidence`: the image digest, the cosign signature reference, the provenance and
+  SBOM attestation references and their predicate digests, and the image-key fingerprint.
+  Built with `--image-evidence image-evidence.json` from `scripts/image_sign.sh`;
+* `audit_anchor`: the latest anchor's number, head sequence and signing key id;
+* the migration revision, as before.
+
+Signing a manifest is a `security_admin` action bound to the manifest's SHA-256, audited
+as `release.signed`.
+
+`fraud-ai release verify release.json [--sbom …] [--image-key cosign.pub] [--no-database]` checks every hash and
 signature available in the environment: signature, commit, SBOM, migration, policy, model
 digests and files, model signatures. Anything it cannot check is reported **skipped**,
-never passed.
+never passed. With `--image-key` it also verifies the image evidence (§8), and it checks
+that the anchor key id is a trusted audit key.
 
-## 8. Key compromise quick reference
+## 8. Container images (Stage 12)
+
+`scripts/image_sign.sh <image> <registry/repo> <key> <pub> <out>` addresses everything by
+**digest**, never by tag:
+
+1. pushes the image and resolves its registry digest;
+2. generates a **CycloneDX SBOM** (Trivy) and a **SLSA v1 provenance** predicate
+   (`scripts/provenance.py`): git commit and ref, workflow and run, builder, base-image
+   digest, SBOM digest as a by-product;
+3. `cosign sign` the digest, then `cosign attest` both predicates, with the dedicated
+   image key;
+4. reads the attestations back, verifies them, and writes `image-evidence.json`.
+
+`fraud-ai release verify-image image-evidence.json --key cosign.pub [--commit C]` checks
+four things. The image fails verification if any one fails:
+
+| Check | Fails when |
+|---|---|
+| `image_key` | the key's fingerprint differs from the one recorded |
+| `image_signature` | no valid signature on that digest (a rebuilt or tampered image has another digest) |
+| `image_provenance` | the attestation is missing or unsigned, its predicate digest differs from the evidence, or its commit differs from `--commit` |
+| `image_sbom` | the SBOM attestation is missing or its digest differs |
+
+Tested locally with a Vault transit image key:
+
+* a correct image passed;
+* a wrong commit, a tampered image (one added label) and a wrong key all **failed**.
+
+CI repeats the sign-and-verify steps and the tampered-image failure on every run.
+
+**Limits:**
+
+* no Rekor transparency-log upload (`--tlog-upload=false`; the registry is private);
+* no admission controller enforcing verification at deploy time;
+* CI uses an **ephemeral** key unless the repository secret `COSIGN_PRIVATE_KEY` is set,
+  so its signatures prove the pipeline works, not a durable identity.
+
+## 9. Key compromise quick reference
 
 The full runbooks are in DISASTER_RECOVERY.md.
 
@@ -238,5 +356,9 @@ The full runbooks are in DISASTER_RECOVERY.md.
 * **Audit key:** rotate it; keep the old public key only to verify old anchors. Re-anchor
   with the new key.
 * **Release key:** rotate it; re-issue the manifests that matter.
+* **Image key:** rotate the Vault key (`keys rotate --purpose image`) or replace the cosign
+  key. Distribute the new public key, and re-sign the images still deployed.
+* **Operator key:** remove or disable the entry in the registry. The operator's future
+  assertions fail, and any approvals they made stop counting at activation.
 * **API signing master key:** see Stage 10 (rotation with previous-key grace; no grace on
   compromise).

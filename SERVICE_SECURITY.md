@@ -1,4 +1,4 @@
-# Service security (Stages 9-11)
+# Service security (Stages 9-12)
 
 This document describes how the HTTP boundary protects the fraud engine and what it
 deliberately does **not** claim. It is a research system on synthetic data. It is not
@@ -265,3 +265,13 @@ The Docker image contains no secrets, `.env` files, databases, models or LLM wei
   cannot drop, alter or truncate tables, disable triggers, create objects or roles, or
   update or delete history rows. This is verified against PostgreSQL by
   `tests/test_pg_privileges.py`.
+* **Stage 12:**
+  * The staging service runs as `fraud_service` (`db check-privileges`: 28 probes, 0
+    unexpected rights). It holds **no** Vault token, S3 credential or private key: signing
+    and anchoring run in separate `ops` and `anchor` containers.
+  * Review resolution needs the reviewer's own signed operator assertion
+    (`X-Fraud-Operator-Assertion`, API.md §7). The API key identifies the calling system,
+    never the person.
+  * The service refuses to start when operator authentication is required and the
+    registry is missing or unreadable.
+  * Not in scope: mTLS, SSO/OIDC, hardware-backed operator keys.

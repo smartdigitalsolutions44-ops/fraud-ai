@@ -29,6 +29,7 @@ from fraud_ai.service.keys import create_key, signing_secret
 from fraud_ai.trust import keys as tk
 from scripts.staging_e2e import SignedClient, run
 from tests.conftest import TEST_KEY
+from tests.operator_helpers import Operators, make_operators
 from tests.service_process import running_service
 
 STAGING_URL = os.environ.get("TEST_STAGING_POSTGRES_URL")
@@ -67,7 +68,11 @@ def test_staging_end_to_end(
     client.close()
     master = secrets.token_hex(32)
     webhook = secrets.token_hex(32)
+    # Stage 12: the staging profile requires operator authentication (a registry of
+    # operator keys with roles); reviewers and approvers sign single-use assertions.
+    ops = make_operators(tmp_path / "operators")
     env = {
+        "OPERATOR_REGISTRY_FILE": str(ops.registry),
         "ENVIRONMENT": "staging",
         "DATABASE_URL": url,
         "PSEUDONYMISATION_KEY": TEST_KEY,
@@ -144,6 +149,9 @@ def test_staging_end_to_end(
                 rp_id=RP_ID,
                 origin=ORIGIN,
                 session_lookup=lookup,
+                reviewer=lambda review_id, resolution: ops.assertion(
+                    "rita", "review.resolve", review_id, resolution=resolution
+                ),
             )
             log = svc.log()
     finally:
@@ -153,18 +161,25 @@ def test_staging_end_to_end(
     assert steps["payment_step_up"]["followup"] == "ALLOW_WITH_MONITORING"
     assert steps["webauthn_step_up"]["followup"] == "ALLOW_WITH_MONITORING"
     assert steps["investigation"]["status"] == 200
+    review = steps["review"]
+    assert review["authenticated"] and tuple(review["unauthenticated"]) == (
+        401,
+        "OPERATOR_AUTH_REQUIRED",
+    )
+    assert review["mismatched_binding"] == "OPERATOR_AUTH_FAILED"
     v2 = steps["signature_v2"]
     assert v2["valid"] == 200 and v2["replay"] == "REPLAYED_SIGNATURE"
     assert v2["method"] == v2["path"] == v2["body"] == "INVALID_SIGNATURE"
     assert tuple(v2["v1_downgrade"]) == (401, "SIGNATURE_VERSION_REJECTED")
     assert master not in log and webhook not in log and credential.split(".")[1] not in log
     assert '"level": "INFO"' in log  # staging logs are structured JSON by default
-    _two_person_activation(env)
+    _two_person_activation(env, ops)
 
 
-def _two_person_activation(service_env: dict[str, str]) -> None:
+def _two_person_activation(service_env: dict[str, str], ops: Operators) -> None:
     """shadow -> evaluation -> candidate -> approval A -> approval B -> activation, through
-    the real CLI in the staging profile; one operator cannot approve twice."""
+    the real CLI in the staging profile, with AUTHENTICATED operators (Stage 12): one
+    operator cannot approve twice, cannot impersonate another, and a role is needed."""
     from click.testing import CliRunner
 
     from fraud_ai.cli.main import cli
@@ -174,37 +189,62 @@ def _two_person_activation(service_env: dict[str, str]) -> None:
     base = {
         k: service_env[k]
         for k in ("ENVIRONMENT", "DATABASE_URL", "PSEUDONYMISATION_KEY", "MODEL_DIRECTORY",
-                  "MODEL_SIGNING_PUBLIC_KEYS")
+                  "MODEL_SIGNING_PUBLIC_KEYS", "OPERATOR_REGISTRY_FILE")
     }  # fmt: skip
     base["POLICY_APPROVALS_REQUIRED"] = "2"
 
     def run(operator: str | None, *args: str) -> Any:
         env = {**base, **({"OPERATOR_ID": operator} if operator else {})}
+        extra = ["--operator-key", str(ops.files[operator])] if operator else []
         get_settings.cache_clear()
         try:
-            return CliRunner().invoke(cli, list(args), env=env)
+            return CliRunner().invoke(cli, [*args, *extra], env=env)
         finally:
             get_settings.cache_clear()
 
-    early = run("alice", "deployment", "activate", P2, "--yes")
+    def plain(*args: str) -> Any:
+        get_settings.cache_clear()
+        try:
+            return CliRunner().invoke(cli, list(args), env=base)
+        finally:
+            get_settings.cache_clear()
+
+    early = run("carol", "deployment", "activate", P2, "--yes")
     assert early.exit_code != 0 and "promoted candidate" in early.output
     for stage, extra in (("shadow", []), ("evaluation", []), ("candidate", ["--approve"])):
-        r = run(
-            "alice", "policy", "promote", P2, "--to", stage, "--note", f"staging {stage}", *extra
-        )
+        r = plain("policy", "promote", P2, "--to", stage, "--note", f"staging {stage}", *extra)
         assert r.exit_code == 0, r.output
+    unauthenticated = plain("policy", "approve", P2, "--note", "who am I")
+    assert unauthenticated.exit_code != 0 and "OPERATOR_AUTH_REQUIRED" in unauthenticated.output
     first = run("alice", "policy", "approve", P2, "--note", "simulation reviewed")
     assert first.exit_code == 0 and "1/2" in first.output, first.output
     twice = run("alice", "policy", "approve", P2, "--note", "again")
     assert twice.exit_code != 0 and "already approved" in twice.output
-    one = run("alice", "deployment", "activate", P2, "--yes")
+    # alice signing an assertion that claims to be bob: refused (IDENTITY_MISMATCH).
+    from fraud_ai.trust.operators import create_assertion
+
+    forged = create_assertion(
+        ops.keys["alice"], "bob", action="policy.approve", target=P2, audience=ops.audience
+    )
+    impersonated = plain(
+        "policy", "approve", P2, "--note", "as bob", "--operator-assertion", forged
+    )
+    assert impersonated.exit_code != 0 and "IDENTITY_MISMATCH" in impersonated.output
+    # carol has no approver role.
+    wrong_role = run("carol", "policy", "approve", P2, "--note", "not mine")
+    assert wrong_role.exit_code != 0 and "FORBIDDEN" in wrong_role.output
+    one = run("carol", "deployment", "activate", P2, "--yes")
     assert one.exit_code != 0 and "needs 2 approvals" in one.output
-    anonymous = run(None, "policy", "approve", P2, "--note", "who am I")
-    assert anonymous.exit_code != 0 and "OPERATOR_ID" in anonymous.output
     second = run("bob", "policy", "approve", P2, "--note", "second review")
     assert second.exit_code == 0 and "2/2" in second.output, second.output
-    done = run("bob", "deployment", "activate", P2, "--yes")
+    # an approver without the activator role cannot activate.
+    not_activator = run("bob", "deployment", "activate", P2, "--yes")
+    assert not_activator.exit_code != 0 and "FORBIDDEN" in not_activator.output
+    done = run("carol", "deployment", "activate", P2, "--yes")
     assert done.exit_code == 0 and "is active" in done.output, done.output
-    log = run(None, "audit", "list")
-    assert "operator:alice" in log.output and "operator:bob" in log.output
-    assert "chain OK" in run(None, "audit", "verify").output
+    log = plain("audit", "list", "--limit", "200")
+    for who in ("operator:alice", "operator:bob", "operator:carol", "operator:rita"):
+        assert who in log.output, who
+    assert "operator.authenticated" in log.output
+    assert "operator.authentication_failed" in log.output
+    assert "chain OK" in plain("audit", "verify").output

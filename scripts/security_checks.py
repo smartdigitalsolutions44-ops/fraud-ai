@@ -8,7 +8,7 @@
     python scripts/security_checks.py sbom --output sbom/fraud-ai.cdx.json
 
 The dependency closure is computed from the *installed* ``fraud-ai`` distribution and its
-declared requirements (extras ``postgres`` and ``stripe``), so the audit and the SBOM
+declared requirements (extras ``postgres``, ``stripe`` and ``anchors``), so the audit and the SBOM
 cover exactly what the service ships with, not every package that happens to be on the
 machine. Ignored advisories live in ``security/pip-audit-ignore.txt`` with a reason each;
 nothing is ignored silently.
@@ -33,7 +33,7 @@ from packaging.utils import canonicalize_name
 ROOT = Path(__file__).resolve().parents[1]
 IGNORE_FILE = ROOT / "security" / "pip-audit-ignore.txt"
 BASELINE = ROOT / ".secrets.baseline"
-EXTRAS = ("postgres", "stripe")
+EXTRAS = ("postgres", "stripe", "anchors")
 
 
 def closure(root: str = "fraud-ai", extras: tuple[str, ...] = EXTRAS) -> dict[str, str]:

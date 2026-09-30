@@ -77,6 +77,7 @@ def resolve(
     *,
     note: str | None = None,
     now: datetime | None = None,
+    reviewer: str | None = None,
 ) -> ReviewOutcome:
     item = session.get(ReviewItem, review_id)
     if item is None:
@@ -97,7 +98,11 @@ def resolve(
             )
     when = now or datetime.now(UTC)
     outcome = ReviewOutcome(
-        review_id=review_id, resolution=resolution, note=note or None, created_at=when
+        review_id=review_id,
+        resolution=resolution,
+        note=note or None,
+        created_at=when,
+        reviewer=reviewer[:120] if reviewer else None,
     )
     session.add(outcome)
     item.outcome = resolution

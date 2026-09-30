@@ -3,7 +3,7 @@
 A locally runnable fraud-prevention software platform written in Python. It is not a web
 application: Stage 9 adds a machine-to-machine HTTP API, not a website.
 
-The current release covers **Stages 1 to 11**:
+The current release covers **Stages 1 to 12** (release candidate `v0.12.0-rc1`):
 
 * **Stage 1:** the software core, the event architecture, the fraud database (PostgreSQL in
   production, SQLite for local use), migrations, synthetic data and the CLI.
@@ -91,6 +91,26 @@ The current release covers **Stages 1 to 11**:
 
   See [TRUST_CHAIN.md](TRUST_CHAIN.md) and [PRIVACY.md](PRIVACY.md). The real Stripe test was
   **not** performed (no test credentials).
+
+* **Stage 12:** makes the existing controls operational in staging, and hands over the
+  portfolio and demo. It adds:
+  * a staging stack running each job under its own least-privilege database role;
+  * **Vault transit** as KMS, with one non-exportable key per purpose and no fallback to
+    key files;
+  * **audit anchors in S3 Object Lock (COMPLIANCE)**, scheduled `audit anchor-now`, and a
+    tamper drill on a restored clone;
+  * **operator authentication**: per-person Ed25519 keys, signed single-use assertions,
+    roles, authenticated two-person approval;
+  * **cosign-signed images** with SLSA provenance and CycloneDX SBOM attestations,
+    verified with `release verify-image`;
+  * a pseudonym-scoped `privacy export`, an erasure-execution design (not implemented),
+    and a retention run in staging;
+  * a 5,000-user load test, a deterministic demo (`fraud-ai demo reset|start|run`), and a
+    real local LLM benchmark.
+
+  See [DEMO.md](DEMO.md), [PORTFOLIO.md](PORTFOLIO.md),
+  [INTERVIEW_GUIDE.md](INTERVIEW_GUIDE.md) and [ANALYST_WORKFLOW.md](ANALYST_WORKFLOW.md).
+  Still **REAL STRIPE TEST NOT PERFORMED**, and still not production software.
 
 Decisions are **internal policy outputs** (`ALLOW`, `ALLOW_WITH_MONITORING`,
 `STEP_UP_AUTHENTICATION`, `MANUAL_REVIEW`, `TEMPORARY_BLOCK`). No payment or authentication
@@ -236,6 +256,17 @@ fraud-ai audit anchor --key /secure/audit.pem --store /mnt/worm ; fraud-ai audit
 fraud-ai release manifest --out release.json --key /secure/release.pem ; fraud-ai release verify release.json
 fraud-ai privacy inventory ; fraud-ai privacy erasure-plan <customer-ref>   # dry run
 fraud-ai db create-roles --database fraud_ai ; fraud-ai db grant-roles      # PostgreSQL least privilege
+
+# Stage 12 - operational controls and the demo (see HARDENING.md §27-39, DEMO.md)
+deploy/staging/stack.sh up                                        # full staging stack
+fraud-ai db check-privileges --expect service                     # probe the connected role
+fraud-ai operators keygen --id alice --out alice.pem              # an operator's own key
+fraud-ai policy approve <version> --note "..." --operator-key alice.pem
+fraud-ai audit anchor-now ; fraud-ai audit anchor-status --max-age-minutes 30
+fraud-ai keys status ; fraud-ai keys rotate --purpose audit --operator-key sec.pem
+fraud-ai privacy export <customer-ref> --out subject.json --operator-key sec.pem
+fraud-ai release verify-image image-evidence.json --key image.pub --commit <sha>
+DEMO_MODE=true fraud-ai demo start ; fraud-ai demo run            # the 9-step walkthrough
 python -m fraud_ai --help        # equivalent entry point
 ```
 

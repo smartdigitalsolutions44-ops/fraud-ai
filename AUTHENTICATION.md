@@ -1,4 +1,4 @@
-# Step-up authentication (Stages 9-11)
+# Step-up and operator authentication (Stages 9-12)
 
 Stage 8 decides *whether* extra authentication is needed: a `STEP_UP_AUTHENTICATION`
 assessment. Stage 9 *executes* the step-up through one of two standard mechanisms, records
@@ -168,9 +168,10 @@ provider would send, for tests and demos.
 
 ### `StripePaymentAuthProvider`: Stripe TEST MODE (Stage 10)
 
-**Status (Stage 11): REAL STRIPE TEST NOT PERFORMED.** No Stripe test-mode credentials were
-available in this environment, so no request reached Stripe and none was faked as a
-success. The versions the adapter targets and was contract-tested with are the SDK `stripe`
+**Status (Stage 12): REAL STRIPE TEST NOT PERFORMED.** This environment has no Stripe
+test-mode credentials (`STRIPE_API_KEY` unset), and its network policy refuses
+`api.stripe.com` (`CONNECT tunnel failed, response 403`). No request reached Stripe, and
+none was faked as a success. The operator checklist below is what remains. The versions the adapter targets and was contract-tested with are the SDK `stripe`
 **15.6.1**, pinned API version **`2026-08-26.dahlia`**.
 
 **Status: implemented, not exercised against Stripe.** The code targets the official
@@ -209,12 +210,60 @@ Install the extra with `pip install -e ".[stripe]"`.
 * declines;
 * test-key enforcement.
 
-**Before relying on it:**
+### Operator checklist for the real Stripe test (not yet run)
 
-1. Run it against a Stripe test account with Stripe's test cards (3DS-required,
-   frictionless, declined).
-2. Configure the webhook endpoint `/v1/callbacks/payment/stripe`.
-3. Repeat the callback tests with real deliveries.
+Run this on a machine that can reach `api.stripe.com`, with a Stripe account in **test
+mode**:
+
+* **Test data only.** Use Stripe's documented test PaymentMethods (`pm_…`). Never type,
+  send or store a card number, CVV or PIN anywhere in fraud-ai. The event contract refuses
+  them, and the adapter only ever sends a `pm_…` token reference.
+* **Live mode is refused.** The settings refuse any key that is not `sk_test_` or
+  `rk_test_`. Do not work around that.
+
+1. **Prerequisites.**
+   * `pip install -e ".[stripe]"`.
+   * The Stripe CLI, logged in to the test account (`stripe login`).
+   * A restricted test key (`rk_test_…`) with write access to PaymentIntents only.
+   * Record the SDK version (`python -c "import stripe; print(stripe.VERSION)"`) and the
+     account's default API version. The adapter pins `2026-08-26.dahlia`.
+2. **Webhook forwarding.** Run
+   `stripe listen --forward-to https://<service>/v1/callbacks/payment/stripe` (or the
+   127.0.0.1 URL). Copy the printed `whsec_…` into `PAYMENT_AUTH_WEBHOOK_SECRET`.
+3. **Configuration.** Set these, then start the service and check that `/v1/ready` is
+   `ready`:
+   * `PAYMENT_AUTH_PROVIDER=stripe`;
+   * `STRIPE_API_KEY=rk_test_…` (from a secret file, not the shell history);
+   * `STRIPE_RETURN_URL` if used.
+4. **Cases.** Score an event that gets `STEP_UP_AUTHENTICATION`, then
+   `POST /v1/step-up/{id}/payment` with `token_reference` set to the test PaymentMethod.
+   Take the PaymentMethod ids from Stripe's current testing page (docs.stripe.com/testing):
+
+   | # | Test PaymentMethod | Expected |
+   |---|---|---|
+   | a | 3-D Secure required, then **completed** in the test challenge page | `pending` with `stripe_authentication`. After the webhook: attempt `SUCCESS`, and a follow-up assessment |
+   | b | 3-D Secure required, then **failed** in the challenge | attempt `FAILED`. Another attempt is allowed; after the maximum, `MANUAL_REVIEW` |
+   | c | frictionless (no challenge) | `pending` `wait`, then success only through the signed webhook |
+   | d | declined card | `failed` (CardError), with no follow-up allow |
+   | e | a `pm_…` id that does not exist | provider error, so `unavailable`; never an allow |
+
+5. **Callback hardening with real deliveries.** Each must be refused and change nothing:
+   * resend an event (`stripe events resend evt_…`): `REPLAYED_SIGNATURE` or
+     `DUPLICATE_CALLBACK`;
+   * change one byte of a captured body: `INVALID_SIGNATURE`;
+   * deliver an event older than `SIGNATURE_MAX_AGE`: `EXPIRED_SIGNATURE`;
+   * deliver `payment_intent.created`: `200 {"accepted": false, "status": "ignored"}`.
+6. **Outage.** Point the service at a blocked network, or set `PAYMENT_AUTH_TIMEOUT=0.01`:
+   the attempt must be `UNAVAILABLE`, and `next_action` must be
+   `authentication_unavailable`.
+7. **Clean-up.** Cancel any uncaptured PaymentIntents, since the adapter uses
+   `capture_method=manual` and never captures. Revoke the restricted key. Delete the
+   `stripe listen` secret.
+8. **Evidence to record** in HARDENING.md, replacing the NOT PERFORMED status:
+   * the date, SDK version and API version;
+   * for each case: the PaymentIntent id, the attempt result and the follow-up decision;
+   * the callback refusal codes;
+   * confirmation that nothing about a card except the `pm_…` reference was sent.
 
 ### Timeouts and failures
 
@@ -271,3 +320,125 @@ Then the attempt is recorded, together with the follow-up if it is terminal. Pol
 * **Not built (by design):** no browser UI. The client ceremony is the integrator's page
   calling `navigator.credentials.*`. The test suite uses a TEST-ONLY software
   authenticator (EC P-256, `"none"` attestation) to drive real verification.
+
+## 6. Operator authentication (Stage 12)
+
+Before Stage 12, `OPERATOR_ID` was plain configuration: anyone who could run the CLI could
+claim to be anyone. Stage 12 adds a **minimal real authentication boundary** for people
+performing administrative actions. **It is not an IAM platform:** it has no user directory,
+no SSO, no sessions and no password store.
+
+### Mechanism: signed operator assertions
+
+* Each operator has their **own Ed25519 key**. They keep the private key; only the public
+  key is registered.
+* The **registry** (`OPERATOR_REGISTRY_FILE`, JSON) lists each operator's id, **roles**
+  and public keys. It is deployed as configuration: in staging, read-only at
+  `/config/operators.json`.
+  * A key belongs to exactly one operator.
+  * Operator keys must differ from the model, audit and release keys
+    (`operators registry-check`).
+* For each action, the operator signs a short-lived **assertion**: a JWT (RFC 7519) signed
+  with EdDSA (RFC 8037), in the manner of `private_key_jwt` (RFC 7523). Its claims:
+
+| Claim | Meaning |
+|---|---|
+| `iss` = `sub` | the operator id; must be the owner of the signing key (`kid`) |
+| `aud` | `OPERATOR_AUDIENCE` (default `fraud-ai-admin`) |
+| `iat`, `nbf`, `exp` | lifetime at most `OPERATOR_ASSERTION_MAX_SECONDS` (default 300), leeway `OPERATOR_ASSERTION_LEEWAY_SECONDS` (30) |
+| `jti` | single use: recorded in the append-only `operator_assertions` table (unique) |
+| `act` | the action |
+| `tgt` | the target (policy version, review id, key id, …) |
+| `bnd` | a binding to the exact content (below) |
+
+**Roles come from the registry, never from the token.** An assertion only proves *who*
+signed it. What they may do is looked up afterwards.
+
+| Action | Role | Target | Binding |
+|---|---|---|---|
+| `review.resolve` (API header `X-Fraud-Operator-Assertion`, or CLI) | `reviewer` | review id | `resolution` |
+| `policy.approve` | `policy_approver` | policy version | `definition_sha256`, `note_sha256` |
+| `policy.activate` | `policy_activator` | policy version | `definition_sha256` |
+| `service_key.manage` (API key create, revoke, rotate) | `security_admin` | key name or id | – |
+| `signing_key.rotate` (`keys rotate`, Vault only) | `security_admin` | purpose | – |
+| `retention.execute` | `security_admin` | `retention` | `mode=execute` |
+| `release.sign` | `security_admin` | git commit | `manifest_sha256` |
+| `privacy.export` | `security_admin` | pseudonym | – |
+| `operator.check` (`operators whoami`) | any role | `whoami` | – |
+
+### Using it
+
+```bash
+fraud-ai operators keygen --id alice --out alice.pem          # prints the registry entry
+fraud-ai operators registry-check                             # schema + key separation
+fraud-ai policy approve risk-policy-1.1.0 --note "reviewed" --operator-key alice.pem
+# or produce the assertion elsewhere (e.g. on a hardware-backed machine) and pass it:
+fraud-ai operators assert --key alice.pem --id alice --action policy.approve \
+    --target risk-policy-1.1.0 --bind definition_sha256=… --bind note_sha256=…
+FRAUD_AI_OPERATOR_ASSERTION=<token> fraud-ai policy approve risk-policy-1.1.0 --note "reviewed"
+```
+
+`OPERATOR_AUTH_REQUIRED` defaults to **true in staging and production**. There, every
+action above without a valid assertion is refused. The service refuses to start if the
+registry is required but unreadable.
+
+### Refusals
+
+Each refusal is a stable code. The API returns 401 `OPERATOR_AUTH_REQUIRED` when the
+assertion is missing. Otherwise it returns `OPERATOR_AUTH_FAILED` with the code in the
+message: HTTP 403 for `FORBIDDEN`, 401 for everything else.
+
+| Code | Cause |
+|---|---|
+| `BAD_ALGORITHM` | not EdDSA (`none`, HS256 and RS256 are refused) |
+| `UNKNOWN_KEY` | the key is not in the registry |
+| `OPERATOR_DISABLED` | the operator is disabled |
+| `IDENTITY_MISMATCH` | the token names a different operator than the key's owner (**impersonation**) |
+| `WRONG_AUDIENCE` | the token is for another audience |
+| `EXPIRED_ASSERTION` | expired |
+| `NOT_YET_VALID` | issued in the future |
+| `LIFETIME_TOO_LONG` | lifetime above the maximum |
+| `WRONG_ACTION`, `WRONG_TARGET`, `WRONG_BINDING` | a token for something else, e.g. approving another policy version or another note |
+| `FORBIDDEN` | the operator lacks the role |
+| `REPLAYED_ASSERTION` | the `jti` was already used |
+| `MALFORMED_ASSERTION`, `INVALID_ASSERTION` | unparsable, or a bad signature |
+
+### Two-person approval with authenticated principals
+
+* An approval stores the verified operator id, the key id, the `jti` (unique index) and the
+  **assertion itself** (`policy_approvals`, append-only).
+* At activation, `EvidenceCheck` **re-verifies every stored assertion**. It checks the
+  signature against the current registry, the action and target, the binding to the
+  definition hash, and validity at the approval's own time. Only approvals that pass
+  count:
+  * two **distinct** operators are required: the same person twice is refused;
+  * rows inserted directly into the database without a valid assertion do not count;
+  * an approval whose operator was later disabled or removed does not count;
+  * an expired approval (`POLICY_APPROVAL_TTL_HOURS`) does not count.
+* The activator needs `policy_activator`. An approver cannot activate unless they hold that
+  role too, which the staging registry does not grant.
+
+### Audit
+
+These events are audited:
+
+* `operator.authenticated`: operator, key id, `jti`, action, target;
+* `operator.authentication_failed`: the action, the target and the refusal code;
+* `policy.approved` and `policy.activated`;
+* `signing_key.rotated`;
+* `audit.anchored` and `audit.anchor_failed`;
+* `retention.executed`;
+* `release.signed`;
+* `privacy.exported`.
+
+**Tokens, private keys and secrets are never logged or audited.** The audit layer refuses
+detail keys that look like secrets.
+
+### Limits
+
+* Key custody is the operator's. A stolen operator key is a stolen identity until it is
+  removed from the registry. Keep keys on hardware tokens where possible; that is not
+  integrated.
+* The registry file is trusted configuration. Whoever can change it can add operators, so
+  protect it like the other public-key configuration (read-only mount, change control).
+* No revocation list beyond editing the registry, no MFA, no SSO or OIDC.

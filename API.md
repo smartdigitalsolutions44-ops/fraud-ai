@@ -355,6 +355,22 @@ POST /v1/reviews/{review_id}/resolve          {"resolution": "legitimate" | "fra
                                                "note": "customer confirmed by phone"}
 ```
 
+* **Stage 12: resolving needs the reviewer's own operator assertion** in the header
+  `X-Fraud-Operator-Assertion`, when `OPERATOR_AUTH_REQUIRED` is on (the default in
+  staging and production). The API key only proves which *system* is calling.
+  * The assertion is a signed, single-use EdDSA JWT from a registry member with the
+    `reviewer` role.
+  * It must have `act=review.resolve`, `tgt=<review_id>` and
+    `bnd={"resolution": "<resolution>"}`.
+  * The outcome records the verified operator id, never a name from the body.
+
+  | Response | When |
+  |---|---|
+  | 401 `OPERATOR_AUTH_REQUIRED` | the header is missing |
+  | 401 `OPERATOR_AUTH_FAILED` | a bad, expired, replayed or mismatched assertion; the message carries the refusal code (AUTHENTICATION.md §6) |
+  | 403 `OPERATOR_AUTH_FAILED` (message: `FORBIDDEN`) | a valid operator without the `reviewer` role |
+  | 401 `OPERATOR_AUTH_UNAVAILABLE` | authentication is required but no registry is loaded (the service normally refuses to start first) |
+
 * Notes that look like personal data or secrets get 422.
 * A resolved item gets 409 `ALREADY_RESOLVED`.
 * Resolving never changes the assessment.
@@ -411,8 +427,8 @@ with its own timeout (`LOCAL_LLM_TIMEOUT` + 10 s). It is never part of scoring.
 | HTTP | Codes |
 |---|---|
 | 400 | `BAD_REQUEST`, `INVALID_JSON`, `INVALID_IDEMPOTENCY_KEY`, `SIGNING_NOT_CONFIGURED` |
-| 401 | `UNAUTHENTICATED`, `MISSING_SIGNATURE`, `INVALID_SIGNATURE`, `EXPIRED_SIGNATURE`, `REPLAYED_SIGNATURE`, `SIGNATURE_VERSION_REJECTED` (Stage 11), `UNKNOWN_PROVIDER`, `INVALID_CALLBACK` |
-| 403 | `INSUFFICIENT_SCOPE` |
+| 401 | `OPERATOR_AUTH_REQUIRED`, `OPERATOR_AUTH_FAILED`, `OPERATOR_AUTH_UNAVAILABLE` (Stage 12), `UNAUTHENTICATED`, `MISSING_SIGNATURE`, `INVALID_SIGNATURE`, `EXPIRED_SIGNATURE`, `REPLAYED_SIGNATURE`, `SIGNATURE_VERSION_REJECTED` (Stage 11), `UNKNOWN_PROVIDER`, `INVALID_CALLBACK` |
+| 403 | `INSUFFICIENT_SCOPE`, `OPERATOR_AUTH_FAILED` (Stage 12: the operator lacks the role) |
 | 404 | `NOT_FOUND` |
 | 409 | `EVENT_CONFLICT`, `IDEMPOTENCY_KEY_REUSED`, `IDEMPOTENCY_IN_PROGRESS`, `CHALLENGE_INVALID`, `STEP_UP_NOT_REQUIRED`, `STEP_UP_ALREADY_COMPLETED`, `ATTEMPTS_EXHAUSTED`, `NO_CREDENTIALS`, `NO_USER`, `SESSION_MISMATCH`, `CREDENTIAL_EXISTS`, `DUPLICATE_CALLBACK`, `ALREADY_RESOLVED`, `INVESTIGATION_NOT_POSSIBLE` |
 | 410 | `CHALLENGE_EXPIRED` (registration) |

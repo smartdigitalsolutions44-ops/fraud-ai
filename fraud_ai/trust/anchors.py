@@ -54,7 +54,7 @@ from sqlalchemy.orm import Session
 from fraud_ai import audit
 from fraud_ai.database.models import AuditEvent
 from fraud_ai.trust import keys as tk
-from fraud_ai.trust.keys import KeyPair, Signature, TrustError
+from fraud_ai.trust.keys import Signature, Signer, TrustError
 
 PURPOSE = "audit"
 CHAIN = "fraud-ai-audit"
@@ -93,11 +93,18 @@ class SignedAnchor:
 
 
 class AuditAnchorProvider(Protocol):
-    """Where anchors live: somewhere the database administrator cannot rewrite."""
+    """Where anchors live: somewhere the database administrator cannot rewrite.
+
+    Implementations: :class:`FileAnchorStore` (a directory) and
+    :class:`fraud_ai.trust.anchor_s3.S3ObjectLockAnchorStore` (write-once Object Lock)."""
 
     def append(self, anchor: SignedAnchor) -> str: ...
 
     def anchors(self) -> list[SignedAnchor]: ...
+
+    def describe(self) -> str: ...
+
+    def integrity_problems(self) -> list[str]: ...
 
 
 class FileAnchorStore:
@@ -105,6 +112,14 @@ class FileAnchorStore:
 
     def __init__(self, directory: Path) -> None:
         self.directory = directory
+
+    def describe(self) -> str:
+        return f"file://{self.directory.resolve()}"
+
+    def integrity_problems(self) -> list[str]:
+        # A plain directory cannot tell whether a file was replaced; only the signatures
+        # and the anchor chain can. Stated, not hidden: see `audit anchor-status`.
+        return []
 
     def append(self, anchor: SignedAnchor) -> str:
         self.directory.mkdir(parents=True, exist_ok=True)
@@ -129,7 +144,7 @@ class FileAnchorStore:
 def create_anchor(
     session: Session,
     store: AuditAnchorProvider,
-    pair: KeyPair,
+    pair: Signer,
     *,
     actor: str,
     trusted: dict[str, Ed25519PublicKey] | None = None,
@@ -154,7 +169,11 @@ def create_anchor(
         "audit.anchored",
         actor=actor,
         target_type="audit",
-        details={"anchor_number": (previous.number + 1) if previous else 1, "key_id": pair.key_id},
+        details={
+            "anchor_number": (previous.number + 1) if previous else 1,
+            "key_id": pair.key_id,
+            "destination": store.describe(),
+        },
         now=now,
     )
     statement = {
@@ -169,7 +188,23 @@ def create_anchor(
     anchor = SignedAnchor(statement, tk.sign(PURPOSE, pair, statement))
     # The anchored event must exist before anything outside the database points at it.
     session.commit()
-    location = store.append(anchor)
+    try:
+        location = store.append(anchor)
+    except TrustError as exc:
+        # Recorded, so `anchor-status` and the audit log show the gap (never silent).
+        audit.record(
+            session,
+            "audit.anchor_failed",
+            actor=actor,
+            target_type="audit",
+            details={
+                "anchor_number": anchor.number,
+                "destination": store.describe(),
+                "error": str(exc)[:200],
+            },
+        )
+        session.commit()
+        raise
     return anchor, location
 
 
@@ -196,6 +231,7 @@ def verify_anchors(
         anchors = store.anchors()
     except TrustError as exc:
         return AnchorReport(False, chain.events, 0, None, [str(exc)])
+    problems.extend(f"store: {p}" for p in store.integrity_problems())
     if not anchors:
         problems.append("no anchors found")
     hashes = {
@@ -239,4 +275,73 @@ def verify_anchors(
         latest_anchored_sequence=latest,
         problems=problems,
         unanchored_events=max(0, top - (latest or 0)),
+    )
+
+
+def store_from_settings(settings: Any, directory: Path | None = None) -> AuditAnchorProvider:
+    """The configured anchor store (``--store`` overrides with a directory)."""
+    if directory is not None:
+        return FileAnchorStore(directory)
+    kind = settings.effective_anchor_store
+    if kind == "file":
+        return FileAnchorStore(settings.audit_anchor_directory)
+    if kind == "s3":
+        from fraud_ai.trust.anchor_s3 import S3Config, S3ObjectLockAnchorStore
+
+        if not settings.anchor_s3_access_key or settings.anchor_s3_secret_key is None:
+            raise TrustError(
+                "the S3 anchor store needs ANCHOR_S3_ACCESS_KEY and ANCHOR_S3_SECRET_KEY(_FILE)"
+            )
+        return S3ObjectLockAnchorStore(
+            S3Config(
+                endpoint=settings.anchor_s3_endpoint,
+                bucket=settings.anchor_s3_bucket,
+                prefix=settings.anchor_s3_prefix,
+                access_key=settings.anchor_s3_access_key,
+                secret_key=settings.anchor_s3_secret_key.get_secret_value(),
+                region=settings.anchor_s3_region,
+                secure=settings.anchor_s3_secure,
+                ca_file=settings.anchor_s3_ca_file,
+                retention_days=settings.anchor_retention_days,
+            )
+        )
+    raise TrustError("no anchor store: set AUDIT_ANCHOR_STORE (file or s3) or give --store")
+
+
+@dataclass(frozen=True)
+class AnchorStatus:
+    """The newest ``audit.anchored`` event: what `audit anchor-status` reports."""
+
+    anchor_number: int
+    sequence: int
+    head_sha256: str
+    key_id: str
+    destination: str | None
+    anchored_at: datetime
+    events_since: int
+
+    def age_minutes(self, now: datetime | None = None) -> float:
+        at = self.anchored_at if self.anchored_at.tzinfo else self.anchored_at.replace(tzinfo=UTC)
+        return ((now or datetime.now(UTC)) - at).total_seconds() / 60.0
+
+
+def latest_status(session: Session) -> AnchorStatus | None:
+    row = session.scalar(
+        select(AuditEvent)
+        .where(AuditEvent.action == "audit.anchored")
+        .order_by(AuditEvent.sequence.desc())
+        .limit(1)
+    )
+    if row is None:
+        return None
+    top = session.scalar(select(AuditEvent.sequence).order_by(AuditEvent.sequence.desc()).limit(1))
+    details = row.details or {}
+    return AnchorStatus(
+        anchor_number=int(details.get("anchor_number", 0)),
+        sequence=row.sequence,
+        head_sha256=row.event_sha256,
+        key_id=str(details.get("key_id", "")),
+        destination=details.get("destination"),
+        anchored_at=row.occurred_at,
+        events_since=max(0, int(top or 0) - row.sequence),
     )

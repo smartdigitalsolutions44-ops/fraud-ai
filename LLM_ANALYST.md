@@ -445,6 +445,55 @@ fraud-ai llm benchmark --model gradient-boosting-1.0.0 --model neural-network-1.
     --model gru-1.0.0 --runtime reference --per-case 3 --score-latest 1500 --score-labelled 300
 ```
 
+### Stage 12: first real local models
+
+Stage 7 never ran a real model. Stage 12 did, on this machine: a 4-vCPU host, CPU only,
+llama.cpp `llama-server` pinned to 3 cores. The setup:
+
+* the same Stage 6/7 synthetic world and stored GB, NN and GRU predictions;
+* `--per-case 1`: 10 cases over 10 of the 11 types (`all_models_uncertain` has no event,
+  as before);
+* the product defaults: temperature 0, seed 0, `LOCAL_LLM_MAX_TOKENS=1200`,
+  `response_format: json_object`;
+* the results are in `benchmarks/stage12_local_llm.json`.
+
+| Runtime / model | Size | Valid | Schema | Latency mean / max | Output | Why it failed |
+|---|---|---|---|---|---|---|
+| reference template | – | 1.000 | 1.000 | 0.001 s | 2,809 chars | – |
+| llama.cpp / **Qwen2.5-3B-Instruct Q4_K_M** | 1.9 GB | **0.000** | **0.000** | 334 s / 359 s | 1,200 tokens every time (3,708 chars) | **truncated**: every answer ran into the 1,200-token cap mid-string (`Unterminated string`) |
+| llama.cpp / **Llama-3.2-1B-Instruct Q8_0** | 1.3 GB | **0.000** | **0.000** | 133 s / 177 s | 864 tokens mean | **malformed JSON**: a missing delimiter, extra data after the object, or no JSON at all |
+
+**Measured throughput:**
+
+* Qwen: prompt about 39 tokens/s (4,197-token prompts, about 107 s), generation 4.4
+  tokens/s.
+* Llama: prompt 93 tokens/s, generation 9 tokens/s.
+
+**Citation, unsupported-claim, privacy and decision-language rates could not be
+measured.** An output that does not parse cannot be checked, so the 0.000 in those
+columns means "no parsable claims", not "no violations". Nothing was stored, because the
+validator refuses unparsable output. The pipeline therefore behaved correctly: **no
+invalid explanation reached an analyst**.
+
+**Model choice.** Neither model qualifies. The rule is to prefer a model that fits the
+hardware, returns structured output reliably and stays grounded, and not simply to take
+the biggest:
+
+* Qwen 3B fits in memory, but at the default cap it never finishes an answer. Each
+  attempt takes 5-6 minutes on this CPU; raising the cap would make it slower still, and
+  it was not tried within Stage 12.
+* Llama 1B is faster, but does not produce valid JSON for this schema.
+
+**The default stays `LOCAL_LLM_RUNTIME=reference`**, and the demo says so.
+
+Recommended next steps, which are configuration or evaluation rather than new features:
+
+1. Constrain the output with the explanation's JSON Schema. llama.cpp accepts a schema in
+   `response_format`, which enforces structure during generation.
+2. Evaluate a 7-8B instruct model on hardware with a GPU or more cores.
+3. Only enable a model that reaches at least 0.95 valid **and** 0 privacy violations on
+   the full `--per-case 3` benchmark.
+
 ## 13. Limitations
 
 * **No real LLM was measured.** Nothing was installed and nothing may be downloaded here.

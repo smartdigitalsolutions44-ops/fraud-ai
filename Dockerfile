@@ -36,10 +36,10 @@ ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
 RUN --mount=type=secret,id=ca_bundle,required=false \
     if [ -f /run/secrets/ca_bundle ]; then export PIP_CERT=/run/secrets/ca_bundle; fi; \
     if [ "$WITH_TORCH" = "1" ]; then \
-        pip wheel --wheel-dir /wheels --extra-index-url "$TORCH_INDEX_URL" ".[postgres,stripe]"; \
+        pip wheel --wheel-dir /wheels --extra-index-url "$TORCH_INDEX_URL" ".[postgres,stripe,anchors]"; \
     else \
         python -c "import tomllib; p = tomllib.load(open('pyproject.toml', 'rb'))['project']; \
-reqs = p['dependencies'] + p['optional-dependencies']['postgres'] + p['optional-dependencies']['stripe']; \
+reqs = p['dependencies'] + p['optional-dependencies']['postgres'] + p['optional-dependencies']['stripe'] + p['optional-dependencies']['anchors']; \
 print('\n'.join(r for r in reqs if not r.startswith('torch')))" > /tmp/requirements.txt \
         && pip wheel --wheel-dir /wheels --no-deps . \
         && pip wheel --wheel-dir /wheels -r /tmp/requirements.txt; \

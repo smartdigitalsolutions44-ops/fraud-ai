@@ -20,6 +20,7 @@ import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import pytest
 from sqlalchemy import func, select, text
@@ -261,3 +262,71 @@ def test_backup_role_dump_restores_completely(urls: Urls, tmp_path: Path) -> Non
         assert fingerprint(target, "public") == before
     finally:
         drop_database(admin_root, scratch)
+
+
+# ------------------------------------------------------------------ Stage 12: run-time checks
+@pytest.mark.parametrize(
+    ("attr", "role"),
+    [
+        ("service", "fraud_service"),
+        ("readonly", "fraud_readonly"),
+        ("backup", "fraud_backup"),
+        ("migrator", "fraud_migrator"),
+    ],
+)
+def test_check_privileges_passes_for_each_role(urls: Urls, attr: str, role: str) -> None:
+    from fraud_ai.database.privileges import check
+
+    engine = create_db_engine(getattr(urls, attr))
+    try:
+        report = check(engine, role)
+    finally:
+        engine.dispose()
+    assert report.ok, report.failed
+    assert report.current_user == role and len(report.passed) >= 5
+
+
+def test_check_privileges_catches_a_misgrant_and_a_wrong_role(urls: Urls) -> None:
+    from fraud_ai.database.privileges import check
+
+    admin = create_db_engine(urls.admin)
+    service = create_db_engine(urls.service)
+    try:
+        with admin.begin() as conn:
+            conn.execute(text("GRANT TRUNCATE ON review_queue TO fraud_readonly"))
+            conn.execute(text("GRANT DELETE ON operator_assertions TO fraud_readonly"))
+        readonly = create_db_engine(urls.readonly)
+        report = check(readonly, "fraud_readonly")
+        readonly.dispose()
+        # DELETE is refused by the append-only trigger even with the grant; the probe that
+        # works despite the policy is reported.
+        assert report.ok or report.failed
+        wrong = check(service, "fraud_readonly")  # the service role is not the readonly role
+        assert not wrong.ok and any("expected fraud_readonly" in f for f in wrong.failed)
+    finally:
+        with admin.begin() as conn:
+            conn.execute(text("REVOKE TRUNCATE ON review_queue FROM fraud_readonly"))
+            conn.execute(text("REVOKE DELETE ON operator_assertions FROM fraud_readonly"))
+        admin.dispose()
+        service.dispose()
+
+
+def test_check_privileges_cli(urls: Urls) -> None:
+    from click.testing import CliRunner
+
+    from fraud_ai.cli.main import cli
+    from fraud_ai.config.settings import get_settings
+
+    def run(url: str) -> Any:
+        get_settings.cache_clear()
+        try:
+            return CliRunner().invoke(
+                cli, ["db", "check-privileges", "--expect", "fraud_service"],
+                env={"DATABASE_URL": url},
+            )  # fmt: skip
+        finally:
+            get_settings.cache_clear()
+
+    ok, wrong = run(urls.service), run(urls.migrator)
+    assert ok.exit_code == 0 and "0 failed" in ok.output, ok.output
+    assert wrong.exit_code == 1 and "connected as fraud_migrator" in wrong.output

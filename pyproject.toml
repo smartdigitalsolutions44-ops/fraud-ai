@@ -32,6 +32,8 @@ dependencies = [
     "cryptography>=43",
     # Stage 10 shared state (distributed rate limits and replay claims).
     "redis>=5",
+    # Stage 12 operator assertions: JWT (RFC 7519) with EdDSA (RFC 8037).
+    "PyJWT>=2.10",
     # Security floors for transitive dependencies (pip-audit, see HARDENING.md).
     "idna>=3.15",
     # Transitive via torch; floor for PYSEC-2026-3447 (found by pip-audit in CI).
@@ -42,6 +44,8 @@ dependencies = [
 postgres = ["psycopg[binary]>=3.1"]
 # Stage 10: the Stripe (test-mode) payment-authentication adapter, official SDK only.
 stripe = ["stripe>=10", "urllib3>=2.7.0"]
+# Stage 12: write-once audit anchors on S3-compatible Object Lock (AWS S3, RustFS, MinIO).
+anchors = ["minio>=7.2"]
 # Stage 10 security tooling (run in CI; see HARDENING.md).
 security = ["pip-audit>=2.7", "bandit>=1.7", "detect-secrets>=1.5", "cyclonedx-bom>=4"]
 dev = [
@@ -101,5 +105,5 @@ packages = ["fraud_ai"]
 
 [[tool.mypy.overrides]]
 # These packages ship no type information (no py.typed / stubs).
-module = ["alembic.*", "sklearn.*", "joblib.*", "threadpoolctl.*", "scipy.*"]
+module = ["alembic.*", "sklearn.*", "joblib.*", "threadpoolctl.*", "scipy.*", "minio.*"]
 ignore_missing_imports = true

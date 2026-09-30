@@ -1,4 +1,4 @@
-# Deployment (Stages 9-11)
+# Deployment (Stages 9-12)
 
 How to run the fraud service locally, in a container, and as the Stage 10 staging stack.
 This is **not** a production runbook. The platform is a *deployment-hardened prototype* on
@@ -196,6 +196,116 @@ mounted into the service); the public key goes to `deploy/staging/.env`. The sta
 The results are in HARDENING.md §24. The stack still connects as a single database user;
 adopting the least-privilege roles there is a Stage 12 item.
 
+## 2c. Stage 12 staging stack: least privilege, Vault, Object Lock, operators
+
+`deploy/staging/stack.sh up` builds the whole staging stack in order and is idempotent.
+The comment at the top of the script lists the steps. Other commands:
+
+* `stack.sh unseal`: after a Vault restart;
+* `stack.sh check`: privilege probes, key status, anchor status;
+* `stack.sh drill`: the audit tamper drill on a restored clone;
+* `stack.sh down`: **deletes** every volume and generated secret.
+
+### Who runs as what
+
+| Container | Database role | Other credentials |
+|---|---|---|
+| `db-init` | PostgreSQL administrator (roles only; the only place it is used) | – |
+| `migrate` | `fraud_migrator` (owner; `db migrate --grant-roles`) | – |
+| `fraud-ai` (service) | **`fraud_service`**: no DDL, no trigger control, no history rewrites, SELECT only on `alembic_version` | **none**: no Vault token, no S3 credential, no private key |
+| `ops` (bootstrap, admin CLI) | `fraud_service` | per-purpose Vault tokens, the anchor **writer** |
+| `anchor` (scheduled `audit anchor-now`) | `fraud_service` | the audit Vault token, the anchor writer |
+| `readonly` | `fraud_readonly` | the anchor **reader** |
+| `backup` | `fraud_backup` (`pg_dump`) | – |
+
+`fraud-ai db check-privileges --expect service|migrator|readonly` probes the connected
+role. It attempts forbidden operations inside transactions that are rolled back, and a
+database it manages to create is dropped at once. It exits non-zero on any unexpected
+right. The staging results are in HARDENING.md §28.
+
+### Vault (staging KMS)
+
+* **Server mode** with file storage, one unseal key, on internal networks only. It is
+  published on `127.0.0.1:8200` for the operator.
+* `vault-init.json` (root token, unseal key) is written to `deploy/staging/secrets/`
+  (0600). **In a real deployment, store it offline and split it** (Shamir, several key
+  holders). The staging stack uses one share for convenience.
+* **Transit keys:**
+  * `fraud-ai-model`, `fraud-ai-audit`, `fraud-ai-release`: `ed25519`,
+    `exportable=false`;
+  * `fraud-ai-image`: ECDSA P-256, created by cosign.
+* **Policies** (`deploy/staging/vault/policies.sh`):
+  * `fraud-ai-sign-<purpose>` allows `transit/sign/<key>` and reading that key only;
+  * `fraud-ai-key-admin` allows create and rotate on those four keys, and **denies**
+    export, backup and configuration changes. Keys are named explicitly: Vault's `+`
+    matches whole path segments only.
+* After any restart Vault is sealed. Signing then **fails closed** until
+  `stack.sh unseal`. The service itself never needs Vault.
+
+### Anchor bucket (Object Lock)
+
+`scripts/staging_anchor_bucket.py` creates the bucket with **versioning, and Object Lock in
+COMPLIANCE mode** (default retention `ANCHOR_RETENTION_DAYS`, 1 day in staging). It also
+creates two users:
+
+* `anchor-writer`: GetObject, ListBucket, PutObject, PutObjectRetention. **No delete, no
+  bucket administration.**
+* `anchor-reader`: GetObject and ListBucket only.
+
+On AWS, the equivalent writer policy is below. Put the bucket in a **separate account**
+from the database operators, create it with Object Lock enabled, and set a COMPLIANCE
+default retention:
+
+```json
+{"Version": "2012-10-17", "Statement": [
+  {"Effect": "Allow", "Action": ["s3:PutObject", "s3:PutObjectRetention", "s3:GetObject",
+     "s3:GetObjectVersion", "s3:GetObjectRetention"],
+   "Resource": "arn:aws:s3:::<bucket>/fraud-ai/audit-anchors/*"},
+  {"Effect": "Allow", "Action": ["s3:ListBucket", "s3:ListBucketVersions",
+     "s3:GetBucketObjectLockConfiguration", "s3:GetBucketVersioning"],
+   "Resource": "arn:aws:s3:::<bucket>"},
+  {"Effect": "Deny", "Action": ["s3:DeleteObject", "s3:DeleteObjectVersion",
+     "s3:BypassGovernanceRetention", "s3:PutBucketObjectLockConfiguration",
+     "s3:PutBucketVersioning", "s3:PutBucketPolicy"],
+   "Resource": ["arn:aws:s3:::<bucket>", "arn:aws:s3:::<bucket>/*"]}]}
+```
+
+The reader gets the Get and List actions only. The anchor store is not vendor-specific:
+any S3 API with Object Lock works (`ANCHOR_S3_ENDPOINT`, `ANCHOR_S3_BUCKET`,
+`ANCHOR_S3_ACCESS_KEY`, `ANCHOR_S3_SECRET_KEY(_FILE)`, `ANCHOR_S3_SECURE`,
+`ANCHOR_S3_CA_FILE`, `ANCHOR_S3_PREFIX`; retention defaults to 400 days outside staging).
+
+### Scheduling the anchor
+
+The `anchor` service runs `fraud-ai audit anchor-now` every `ANCHOR_INTERVAL` seconds
+(default 300). The command skips when nothing new has been logged. Outside compose, use
+cron or a systemd timer:
+
+```cron
+*/5 * * * *  fraud-ai audit anchor-now >> /var/log/fraud-ai/anchor.jsonl
+*/15 * * * * fraud-ai audit anchor-status --max-age-minutes 30 || alert "audit anchor stale"
+```
+
+Each run prints one JSON line with the anchor number, head sequence and hash, key id and
+destination.
+
+### Operators
+
+`generate-secrets.sh` creates one Ed25519 key per staging operator in
+`deploy/staging/operators/` (0600; git-ignored), and the registry
+`config/operators.json`, mounted read-only:
+
+| Operator | Role |
+|---|---|
+| alice, bob | `policy_approver` |
+| carol | `policy_activator` |
+| rita | `reviewer` |
+| sec | `security_admin` |
+
+**In a real deployment, each person generates their own key** (`fraud-ai operators
+keygen`) and hands over only the public entry. Nobody else ever holds their private key.
+`OPERATOR_AUTH_REQUIRED=true` is the staging and production default.
+
 ## 3. TLS and reverse proxies (required outside localhost)
 
 The service speaks plain HTTP. **In any shared or production-like environment, terminate
@@ -280,12 +390,15 @@ without values for secrets.
   1/4/8/16 workers, pool sweep) and `python scripts/model_cache_benchmark.py`. Compare
   against `benchmarks/baseline.json` with `scripts/check_regression.py`.
 
-## 6. Not covered (Stage 12 and beyond)
+## 6. Not covered (after Stage 12)
 
 * encryption at rest and PITR/WAL archiving;
-* least-privilege roles in the compose stacks (the roles exist and are tested);
-* WORM anchor storage wired in; image signing and provenance (cosign, SLSA);
-* a cloud secret-manager SDK integration (platform injection via `*_FILE` is supported);
+* anchor storage that is independent of the host (the staging RustFS is on the same
+  machine);
+* deploy-time enforcement of image signatures (an admission controller);
+* cloud KMS providers other than Vault transit (the `Signer` interface allows them;
+  cosign already accepts `awskms://` and `gcpkms://`);
+* hardware-backed operator keys;
 * mTLS, a WAF and DDoS protection;
 * a penetration test;
 * any compliance programme (PCI DSS, GDPR, SOC 2, ISO or similar). **None is claimed.**

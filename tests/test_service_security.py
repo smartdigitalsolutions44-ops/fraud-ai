@@ -15,6 +15,7 @@ import time
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -698,8 +699,13 @@ def test_production_refuses_development_service_settings() -> None:
         service_require_signatures=True,
         # Stage 11: production requires signed models, hence a trusted model key.
         model_signing_public_keys=encode_public(generate().public),
+        # Stage 12: production requires operator authentication, hence a registry.
+        operator_registry_file=Path("/etc/fraud-ai/operators.json"),
     )
     assert ok.service_problems() == []
+    assert ok.operator_auth_is_required and ok.kms_is_required
+    no_registry = Settings(**{**ok.model_dump(), "operator_registry_file": None})
+    assert any("OPERATOR_REGISTRY_FILE" in p for p in no_registry.service_problems())
     assert ok.requires_model_signatures and ok.effective_signature_min_version == "v2"
     assert ok.effective_policy_approvals == 2
     unsigned = Settings(**{**ok.model_dump(), "model_signing_public_keys": None})

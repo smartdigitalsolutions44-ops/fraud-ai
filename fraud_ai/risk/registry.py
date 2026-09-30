@@ -204,6 +204,7 @@ def activate(
     require_promotion: bool = False,
     approvals_required: int = 0,
     now: datetime | None = None,
+    approval_evidence: Any = None,
 ) -> PolicyDeployment:
     """Validate and append a deployment. It takes effect for events scored afterwards.
 
@@ -230,7 +231,9 @@ def activate(
     if approvals_required:
         from fraud_ai.risk.approvals import ensure_approved
 
-        ensure_approved(session, version, required=approvals_required, now=now)
+        ensure_approved(
+            session, version, required=approvals_required, now=now, evidence=approval_evidence
+        )
     validate_references(session, definition)
     _check_feature_versions(session, definition, shadow_models or [])
     shadows = sorted(set(shadow_models or []))

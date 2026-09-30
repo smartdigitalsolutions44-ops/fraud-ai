@@ -1,4 +1,4 @@
-# Disaster recovery (Stages 10-11)
+# Disaster recovery (Stages 10-12)
 
 These are runbooks for a **deployment-hardened prototype** on synthetic data. The backup
 and restore procedure below **has been restored successfully in tests**
@@ -207,7 +207,54 @@ sign requests for any key whose bearer token they also hold.
   3. Check that the triggers still exist (`\dS audit_events`).
   4. Re-run `fraud-ai db grant-roles`.
 
-## 11. Drills
+## 11. Stage 12: Vault, anchor store, operators
+
+* **Vault sealed** (any restart). Signing fails closed: models, anchors and releases
+  cannot be signed. Scoring is unaffected, because the service never uses Vault. Run
+  `deploy/staging/stack.sh unseal`, or `vault operator unseal` with the unseal share(s).
+  Then run `fraud-ai keys status` to confirm.
+* **Vault data lost.** The transit keys are **non-exportable, so they cannot be
+  restored** from anything but a Vault backup (snapshot of the storage backend).
+  1. Existing signatures stay verifiable, because the public keys are in configuration.
+  2. Create new keys (`stack.sh init-vault` in staging).
+  3. Add their public keys to the trusted sets, re-sign the artefacts still in use, and
+     re-anchor.
+  4. Keep the old public keys for verification.
+* **Vault token leaked.** Revoke it (`vault token revoke`) and issue a new token under the
+  same per-purpose policy. A leaked purpose token can sign **only** for that purpose;
+  treat signatures from the exposure window as untrusted (see §10).
+* **Anchor store unavailable.** `audit anchor-now` records `audit.anchor_failed` and exits
+  non-zero; `anchor-status` alerts. Events keep being logged and chained, but events after
+  the last anchor are unprotected until the store returns. Restore access, then run
+  `audit anchor-now`. Never "fix" it by pointing at a writable bucket without Object Lock:
+  the store refuses one.
+* **Anchor verification fails** (`verify-anchor` reports rewritten or missing history).
+  **This is an incident, not an outage.**
+  1. Stop policy changes.
+  2. Take a backup of the current state as evidence.
+  3. Compare against the last verified backup.
+  4. Identify the rewritten sequences from the report.
+  5. Rotate the migrator and superuser credentials.
+* **Operator key compromised.** Disable the operator in the registry (`"disabled": true`)
+  or remove the key, and redeploy the registry. Their future assertions fail, and their
+  approvals stop counting at the next activation check. Review `operator.authenticated`
+  events for that key id. A new key is a new registry entry.
+* **Registry file tampered.** Treat it like a compromised trust root: restore it from change
+  control, then review every `operator.authenticated`, `policy.approved` and
+  `policy.activated` event since the last known-good version.
+
+## 12. Drills
+
+The Stage 12 staging drill (`stack.sh drill`, `scripts/audit_tamper_drill.py`) is the
+template:
+
+1. back up as `fraud_backup`;
+2. restore into a database whose name contains `clone` (the script refuses any other);
+3. rewrite an audit event as a superuser and re-chain;
+4. confirm that the internal chain is fooled **and** the anchors detect it;
+5. confirm the live database is untouched.
+
+Result on staging: detected (anchors 1-3 reported rewritten); live anchors verified.
 
 Before relying on any of this outside a test environment:
 

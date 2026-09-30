@@ -19,16 +19,16 @@ from fraud_ai.database import migrations as mig
 
 BROKEN = '''"""Deliberately broken test revision.
 
-Revision ID: 0010
-Revises: 0009
+Revision ID: 0011
+Revises: 0010
 Create Date: 2026-12-01 00:00:00
 """
 
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0010"
-down_revision = "0009"
+revision = "0011"
+down_revision = "0010"
 branch_labels = None
 depends_on = None
 
@@ -50,7 +50,7 @@ def broken_migrations(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     shutil.copytree(
         mig.migrations_directory(), target, ignore=shutil.ignore_patterns("__pycache__")
     )
-    (target / "versions" / "20270101_0010_broken.py").write_text(BROKEN)
+    (target / "versions" / "20270201_0011_broken.py").write_text(BROKEN)
     monkeypatch.setenv("FRAUD_AI_MIGRATIONS_DIR", str(target))
     return target
 
@@ -58,18 +58,18 @@ def broken_migrations(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def test_failed_migration_leaves_the_last_good_schema(
     any_engine: Engine, backend_url: str, broken_migrations: Path
 ) -> None:
-    assert mig.current_revision(any_engine) == "0009"  # any_engine migrates the real head
+    assert mig.current_revision(any_engine) == "0010"  # any_engine migrates the real head
     with pytest.raises(RuntimeError, match="simulated migration failure"):
         mig.upgrade(backend_url)
     any_engine.dispose()
     tables = set(inspect(any_engine).get_table_names())
     columns = {c["name"] for c in inspect(any_engine).get_columns("audit_events")}
-    assert mig.current_revision(any_engine) == "0009"
+    assert mig.current_revision(any_engine) == "0010"
     assert "half_applied" not in tables and "broken_column" not in columns
     # Recovery: fix the revision and migrate again.
     fixed = BROKEN.replace('    raise RuntimeError("simulated migration failure")\n', "")
-    (broken_migrations / "versions" / "20270101_0010_broken.py").write_text(fixed)
+    (broken_migrations / "versions" / "20270201_0011_broken.py").write_text(fixed)
     mig.upgrade(backend_url)
     any_engine.dispose()
-    assert mig.current_revision(any_engine) == "0010"
+    assert mig.current_revision(any_engine) == "0011"
     assert "half_applied" in set(inspect(any_engine).get_table_names())

@@ -1,24 +1,31 @@
-# STAGING stack (Stage 10): TLS proxy -> fraud-ai (2 workers) -> PostgreSQL + Redis.
-# Test/synthetic data only. Never use production secrets here.
+# STAGING stack (Stages 10-12). Test/synthetic data only; never production secrets.
 #
-#   deploy/staging/generate-secrets.sh          # random secrets into deploy/staging/secrets/
-#   docker compose -f deploy/staging/docker-compose.staging.yml up --build
+#   TLS proxy -> fraud-ai (2 workers, as fraud_service) -> PostgreSQL + Redis
+#   Vault (KMS: trust-chain signing keys)   RustFS (S3 Object Lock: audit anchors)
+#   one-off jobs: db-init (admin), migrate (fraud_migrator), bootstrap/ops (fraud_service),
+#   anchor (scheduled `audit anchor-now`), backup (fraud_backup), checks (fraud_readonly)
 #
-# Secrets are mounted as files (/run/secrets/*) and read through the *_FILE convention,
-# so they never appear in the environment, `docker inspect` or process listings.
-# The model-signing PRIVATE key (deploy/staging/signing/model.pem) is never mounted into the
-# service; only its public key is configured. Sign models with the one-off `migrate` service:
-#   docker compose ... run --rm -v ./signing:/keys:ro migrate models sign <model> --key /keys/model.pem
-# The DEVELOPMENT FAKE payment provider is enabled explicitly
-# (PAYMENT_AUTH_ALLOW_FAKE_IN_STAGING=true); it is not 3-D Secure and production refuses it.
-# The optional local LLM runs as a separate service (profile "llm"); scoring never needs it.
+# Use deploy/staging/stack.sh (it runs these in the right order):
+#   deploy/staging/generate-secrets.sh && deploy/staging/stack.sh up
+#
+# Stage 12 controls:
+# * Least-privilege database roles. The service connects as fraud_service (no DDL, history
+#   append-only), migrations run as fraud_migrator (owner), backups as fraud_backup and
+#   checks as fraud_readonly. The PostgreSQL superuser is only used by db-init to create
+#   those roles.
+# * Signing keys live in Vault transit (KEY_PROVIDER=vault). Each job gets a token that
+#   can sign with exactly one key. The service holds only public keys.
+# * Audit anchors go to a bucket with versioning and COMPLIANCE Object Lock (RustFS), written
+#   every ANCHOR_INTERVAL seconds by the anchor job.
+# * Operator authentication: OPERATOR_REGISTRY_FILE (public keys and roles). Reviewers,
+#   approvers and admins sign single-use assertions with their own keys.
+# Secrets are files (/run/secrets/*, the *_FILE convention), never environment values.
 
 name: fraud-ai-staging
 
 x-fraud-env: &fraud_env
   ENVIRONMENT: staging
   LOG_FORMAT: json
-  DATABASE_URL_FILE: /run/secrets/database_url
   PSEUDONYMISATION_KEY_FILE: /run/secrets/pseudonymisation_key
   SERVICE_SIGNING_MASTER_KEY_FILE: /run/secrets/signing_master_key
   PAYMENT_AUTH_WEBHOOK_SECRET_FILE: /run/secrets/payment_webhook_secret
@@ -32,21 +39,37 @@ x-fraud-env: &fraud_env
   PAYMENT_AUTH_PROVIDER: fake
   PAYMENT_AUTH_ALLOW_FAKE_IN_STAGING: "true"
   POLICY_REQUIRE_PROMOTION: "true"
-  DB_POOL_SIZE: "5"
-  DB_MAX_OVERFLOW: "5"
+  DB_POOL_SIZE: "${DB_POOL_SIZE:-5}"
+  DB_MAX_OVERFLOW: "${DB_MAX_OVERFLOW:-5}"
+  # Per API key and route group. The load test raises it (it measures the service, not
+  # the limiter; the limiter itself is tested separately).
+  RATE_LIMIT: "${RATE_LIMIT:-120/minute}"
+  RATE_LIMIT_BURST: "${RATE_LIMIT_BURST:-30}"
   RETENTION_ALLOW_DELETE: "false"
-  # Stage 11: v2 request signatures only, signed models only, two-person activation.
   SIGNATURE_MIN_VERSION: v2
   MODEL_SIGNATURES_REQUIRED: "true"
-  MODEL_SIGNING_PUBLIC_KEYS: ${MODEL_SIGNING_PUBLIC_KEYS:?run generate-secrets.sh (writes deploy/staging/.env)}
+  MODEL_SIGNING_PUBLIC_KEYS: ${MODEL_SIGNING_PUBLIC_KEYS:?run deploy/staging/stack.sh init-vault}
+  AUDIT_ANCHOR_PUBLIC_KEYS: ${AUDIT_ANCHOR_PUBLIC_KEYS:?run deploy/staging/stack.sh init-vault}
+  RELEASE_SIGNING_PUBLIC_KEYS: ${RELEASE_SIGNING_PUBLIC_KEYS:?run deploy/staging/stack.sh init-vault}
   POLICY_APPROVALS_REQUIRED: "2"
+  OPERATOR_AUTH_REQUIRED: "true"
+  OPERATOR_REGISTRY_FILE: /config/operators.json
+  KEY_PROVIDER: vault
+  VAULT_ADDR: http://vault:8200
+  AUDIT_ANCHOR_STORE: s3
+  ANCHOR_S3_ENDPOINT: rustfs:9000
+  ANCHOR_S3_SECURE: "false" # internal network (staging); production requires TLS
+  ANCHOR_S3_BUCKET: fraud-ai-audit-anchors
+  ANCHOR_RETENTION_DAYS: "${ANCHOR_RETENTION_DAYS:-1}" # disposable staging data
+  ANCHOR_MAX_AGE_MINUTES: "${ANCHOR_MAX_AGE_MINUTES:-15}"
 
-x-fraud-secrets: &fraud_secrets
-  - database_url
-  - pseudonymisation_key
-  - signing_master_key
-  - payment_webhook_secret
-  - redis_url
+x-writer: &anchor_writer
+  ANCHOR_S3_ACCESS_KEY: anchor-writer
+  ANCHOR_S3_SECRET_KEY_FILE: /run/secrets/anchor_writer_secret
+
+x-reader: &anchor_reader
+  ANCHOR_S3_ACCESS_KEY: anchor-reader
+  ANCHOR_S3_SECRET_KEY_FILE: /run/secrets/anchor_reader_secret
 
 x-hardening: &hardening
   read_only: true
@@ -54,17 +77,23 @@ x-hardening: &hardening
   cap_drop: [ALL]
   security_opt: ["no-new-privileges:true"]
 
+x-app: &app
+  image: fraud-ai:staging
+  <<: *hardening
+  volumes: ["./models:/models", "./config:/config:ro"]
+  networks: [data]
+
 services:
   postgres:
     image: postgres:16-alpine
     environment:
       POSTGRES_DB: fraud_ai
-      POSTGRES_USER: fraud_ai
+      POSTGRES_USER: postgres
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
     secrets: [postgres_password]
     volumes: [pgdata:/var/lib/postgresql/data]
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U fraud_ai -d fraud_ai"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d fraud_ai"]
       interval: 5s
       retries: 20
     networks: [data]
@@ -79,30 +108,142 @@ services:
       retries: 20
     networks: [data]
 
+  vault:
+    image: hashicorp/vault:1.18
+    command: ["vault", "server", "-config=/vault/config/config.hcl"]
+    cap_add: [IPC_LOCK]
+    volumes: ["./vault:/vault/config:ro", "vaultdata:/vault/file"]
+    ports: ["127.0.0.1:8200:8200"] # host-only: setup, cosign image signing
+    networks: [data, admin]
+
+  # The anchor store: a separate service with its own credentials (the database
+  # administrator has none), versioning and COMPLIANCE Object Lock on the bucket.
+  rustfs:
+    image: rustfs/rustfs:1.0.0
+    environment:
+      RUSTFS_ACCESS_KEY: anchor-root
+      RUSTFS_SECRET_KEY_FILE: /run/secrets/anchor_root_secret
+    secrets: [anchor_root_secret]
+    volumes: [anchors:/data]
+    networks: [data]
+
+  anchor-init:
+    <<: *app
+    profiles: ["jobs"]
+    entrypoint: ["python", "/scripts/staging_anchor_bucket.py"]
+    volumes: ["../../scripts:/scripts:ro"]
+    environment:
+      ANCHOR_S3_ENDPOINT: rustfs:9000
+      ANCHOR_S3_BUCKET: fraud-ai-audit-anchors
+      ANCHOR_ROOT_ACCESS_KEY: anchor-root
+      ANCHOR_ROOT_SECRET_FILE: /run/secrets/anchor_root_secret
+      ANCHOR_WRITER_SECRET_FILE: /run/secrets/anchor_writer_secret
+      ANCHOR_READER_SECRET_FILE: /run/secrets/anchor_reader_secret
+      ANCHOR_RETENTION_DAYS: "${ANCHOR_RETENTION_DAYS:-1}"
+    secrets: [anchor_root_secret, anchor_writer_secret, anchor_reader_secret]
+
+  db-init:
+    <<: *app
+    profiles: ["jobs"]
+    command: ["db", "create-roles", "--database", "fraud_ai"]
+    environment:
+      <<: *fraud_env
+      DATABASE_URL_FILE: /run/secrets/admin_database_url
+      FRAUD_MIGRATOR_PASSWORD_FILE: /run/secrets/migrator_password
+      FRAUD_SERVICE_PASSWORD_FILE: /run/secrets/service_password
+      FRAUD_READONLY_PASSWORD_FILE: /run/secrets/readonly_password
+      FRAUD_BACKUP_PASSWORD_FILE: /run/secrets/backup_password
+    secrets: [admin_database_url, migrator_password, service_password, readonly_password,
+              backup_password, pseudonymisation_key, signing_master_key, payment_webhook_secret,
+              redis_url]
+
   migrate:
+    <<: *app
+    profiles: ["jobs"]
     build:
       context: ../..
       # WITH_TORCH=0 builds the torch-less VERIFICATION variant (scikit-learn models only).
       args: { WITH_TORCH: "${WITH_TORCH:-1}" }
-    image: fraud-ai:staging
-    command: ["db", "migrate"]
-    environment: *fraud_env
-    secrets: *fraud_secrets
-    depends_on:
-      postgres: { condition: service_healthy }
-    <<: *hardening
+    command: ["db", "migrate", "--grant-roles"]
+    environment:
+      <<: *fraud_env
+      DATABASE_URL_FILE: /run/secrets/migrator_database_url
+    secrets: [migrator_database_url, pseudonymisation_key, signing_master_key,
+              payment_webhook_secret, redis_url]
+
+  # Operational CLI as the SERVICE role (policies, approvals, reviews, retention, exports,
+  # model signing). Signing uses the matching Vault token; operators authenticate with
+  # their own keys (mounted read-only from deploy/staging/operators for this demo).
+  ops:
+    <<: *app
+    profiles: ["jobs"]
+    volumes: ["./models:/models", "./config:/config:ro", "./operators:/operators:ro",
+              "./out:/out", "../../scripts:/scripts:ro"]
+    environment:
+      <<: [*fraud_env, *anchor_writer]
+      DATABASE_URL_FILE: /run/secrets/service_database_url
+    secrets: [service_database_url, pseudonymisation_key, signing_master_key,
+              payment_webhook_secret, redis_url, anchor_writer_secret, vault_token_model,
+              vault_token_release, vault_token_audit]
+
+  readonly:
+    <<: *app
+    profiles: ["jobs"]
+    environment:
+      <<: [*fraud_env, *anchor_reader]
+      DATABASE_URL_FILE: /run/secrets/readonly_database_url
+    secrets: [readonly_database_url, pseudonymisation_key, signing_master_key,
+              payment_webhook_secret, redis_url, anchor_reader_secret]
+
+  # Scheduled external anchoring (every ANCHOR_INTERVAL seconds). In production use the
+  # platform scheduler (CronJob/systemd timer) and alert on `audit anchor-status`.
+  anchor:
+    <<: *app
+    profiles: ["ops"]
+    entrypoint: ["sh", "-c", "while true; do fraud-ai audit anchor-now || echo 'ANCHOR FAILED' >&2; sleep $${ANCHOR_INTERVAL:-300}; done"]
+    environment:
+      <<: [*fraud_env, *anchor_writer]
+      DATABASE_URL_FILE: /run/secrets/service_database_url
+      VAULT_TOKEN_FILE: /run/secrets/vault_token_audit
+      ANCHOR_INTERVAL: "${ANCHOR_INTERVAL:-300}"
+    secrets: [service_database_url, pseudonymisation_key, signing_master_key,
+              payment_webhook_secret, redis_url, anchor_writer_secret, vault_token_audit]
+    depends_on: [vault, rustfs]
+
+  # The audit tamper drill: plays a database superuser against a RESTORED CLONE only.
+  drill:
+    <<: *app
+    profiles: ["jobs"]
+    entrypoint: ["python", "/scripts/audit_tamper_drill.py", "--admin-url-file",
+                 "/run/secrets/admin_database_url", "--clone", "fraud_ai_drill_clone"]
+    volumes: ["../../scripts:/scripts:ro"]
+    environment:
+      <<: [*fraud_env, *anchor_reader]
+      DATABASE_URL_FILE: /run/secrets/admin_database_url
+    secrets: [admin_database_url, anchor_reader_secret, pseudonymisation_key,
+              signing_master_key, payment_webhook_secret, redis_url]
+
+  backup:
+    image: postgres:16-alpine
+    profiles: ["jobs"]
+    entrypoint: ["sh", "-c", "pg_dump --format=custom --no-owner --dbname=\"$$(cat /run/secrets/backup_libpq_url)\" --file=/backups/fraud_ai-$$(date -u +%Y%m%dT%H%M%SZ).dump && ls -l /backups"]
+    user: "10001:10001"
+    volumes: ["./backups:/backups"]
+    secrets: [backup_libpq_url]
     networks: [data]
 
   fraud-ai:
-    image: fraud-ai:staging
-    command: ["service", "run", "--workers", "2"]
-    environment: *fraud_env
-    secrets: *fraud_secrets
-    volumes: ["./models:/models:ro"]
+    <<: *app
+    command: ["service", "run", "--workers", "${SERVICE_WORKERS:-2}"]
+    volumes: ["./models:/models:ro", "./config:/config:ro"]
+    environment:
+      <<: *fraud_env
+      DATABASE_URL_FILE: /run/secrets/service_database_url
+    secrets: [service_database_url, pseudonymisation_key, signing_master_key,
+              payment_webhook_secret, redis_url]
     depends_on:
-      migrate: { condition: service_completed_successfully }
+      postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
-    <<: *hardening
     networks:
       data: {}
       edge: { ipv4_address: 172.30.10.20 }
@@ -126,21 +267,38 @@ services:
     networks: [data]
 
 secrets:
-  database_url: { file: ./secrets/database_url }
+  admin_database_url: { file: ./secrets/admin_database_url }
+  migrator_database_url: { file: ./secrets/migrator_database_url }
+  service_database_url: { file: ./secrets/service_database_url }
+  readonly_database_url: { file: ./secrets/readonly_database_url }
+  backup_libpq_url: { file: ./secrets/backup_libpq_url }
   postgres_password: { file: ./secrets/postgres_password }
+  migrator_password: { file: ./secrets/migrator_password }
+  service_password: { file: ./secrets/service_password }
+  readonly_password: { file: ./secrets/readonly_password }
+  backup_password: { file: ./secrets/backup_password }
   pseudonymisation_key: { file: ./secrets/pseudonymisation_key }
   signing_master_key: { file: ./secrets/signing_master_key }
   payment_webhook_secret: { file: ./secrets/payment_webhook_secret }
   redis_password: { file: ./secrets/redis_password }
   redis_url: { file: ./secrets/redis_url }
+  anchor_root_secret: { file: ./secrets/anchor_root_secret }
+  anchor_writer_secret: { file: ./secrets/anchor_writer_secret }
+  anchor_reader_secret: { file: ./secrets/anchor_reader_secret }
+  vault_token_model: { file: ./secrets/vault_token_model }
+  vault_token_audit: { file: ./secrets/vault_token_audit }
+  vault_token_release: { file: ./secrets/vault_token_release }
 
 volumes:
   pgdata:
+  vaultdata:
+  anchors:
   ollama:
 
 networks:
   data:
     internal: true
+  admin: {} # Vault's loopback-only host port (a published port needs a non-internal network)
   edge:
     ipam:
       config: [{ subnet: 172.30.10.0/24 }]

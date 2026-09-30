@@ -1,4 +1,4 @@
-# Threat model (Stages 10-11)
+# Threat model (Stages 10-12)
 
 This is the threat model for the fraud-ai service, a **deployment-hardened prototype**, as
 deployed in `deploy/staging/`. Stage 11 revisions are marked **(S11)**; the trust
@@ -80,15 +80,26 @@ The Stage 10 rows above describe the Stage 10 state. Stage 11 changes these rows
 | T15 (S11) | **Supply chain** | pip-audit (a setuptools floor added after CI found PYSEC-2026-3447), bandit, detect-secrets, gitleaks, SBOM; **signed release manifest** pinning commit, migration, policy, model digests and signatures, SBOM hash and image digest (`release verify`); CI builds and scans the real PyTorch image | The manifest is only as good as the release key's custody; there is no image signing (Sigstore/cosign) or SLSA provenance yet; the Debian base CVEs remain until patched |
 | new | **Key confusion:** one key used for several purposes | Settings refuse a key trusted for two purposes; domain-separated messages; signing commands check purpose membership | Operators can still store several private keys carelessly; key custody is procedural |
 
-## Open items for Stage 12
+## Stage 12 revisit
 
-1. Hardware-backed or SSO-bound operator identity for approvals, instead of a configured
-   `OPERATOR_ID`.
-2. Image signing and provenance (cosign / SLSA), verified at deploy time against the
-   release manifest.
+| # | Threat | Stage 12 mitigation | Remaining risk |
+|---|---|---|---|
+| T8 (S12) | **Operator impersonation**, or one rogue operator | **Operator authentication**: per-person Ed25519 keys in a registry; signed, single-use, short-lived assertions (EdDSA JWT) bound to the action, the target and the exact content. **Roles from the registry**, never from the token: reviewer, policy_approver, policy_activator, security_admin. Two distinct authenticated approvers, re-verified at activation from their stored assertions. Rows inserted directly into the database do not count | Operator keys are files: a stolen key is a stolen identity until it is removed from the registry. The registry file itself is trusted configuration. No MFA, SSO or hardware tokens |
+| T8b (S12) | **Service credential used for administration** | Staging runs the service as `fraud_service`. It cannot migrate, ALTER, TRUNCATE, disable triggers, rewrite history, change `alembic_version` or create roles or databases (`db check-privileges`, 28 probes, run on the stack). Migrations run as `fraud_migrator`, backups as `fraud_backup` | The migrator and PostgreSQL superuser credentials remain all-powerful. The superuser is used only by `db-init` |
+| T9 (S12) | **Anchor store tampering**: deleting or overwriting the newest anchors | Anchors go to **S3 Object Lock in COMPLIANCE mode** with versioning. The writer credential can put but not delete; the verifier reads the oldest version and reports extra versions and delete markers. Drill: a DBA rewrite on a restored clone passed the internal chain check and was **caught by the anchors** | RustFS enforces WORM at the API only, on the same host: a host or storage administrator can delete the files. Events after the latest anchor (scheduled every `ANCHOR_INTERVAL`; `audit anchor-status` alerts on staleness) |
+| T15 (S12) | **Image substitution** | cosign signature over the image **digest** with a dedicated image key (Vault transit, non-exportable), SLSA v1 provenance and CycloneDX SBOM attestations; `release verify-image` checks all four, and the manifest pins the digest. A tampered image fails (tested locally; a CI step repeats it on every run) | No transparency log (`--tlog-upload=false`), no admission controller enforcing verification at deploy, and CI signs with an ephemeral key unless a repository key is configured |
+| new (S12) | **Key exfiltration from disk** | `KEY_PROVIDER=vault`: model, audit, release and image keys in Vault transit, non-exportable, one policy and token per purpose (a model token gets 403 on the audit key). `KMS_REQUIRED` refuses key files; there is **no fallback** to local keys | Vault is a single node with one unseal key (staging). Tokens are files. Vault's own root token and unseal key must be stored offline |
+| new (S12) | **Data export leaking other users or secrets** | `privacy export`: one pseudonym, a per-column allow-list, stated exclusions, `security_admin` authentication, a 0600 file, never overwritten, audited by counts | Human handling of the exported file |
+| new (S12) | **Demo reset hitting a real database** | Guard: `DEMO_MODE=true`, the development or test profile, a `*_demo` database name, and the first audit event must be the demo marker (tested) | A deliberately faked marker in a non-demo database |
+
+## Open items after Stage 12
+
+1. Hardware-backed operator keys (FIDO2, a smartcard or a cloud HSM) and revocation beyond
+   editing the registry.
+2. An independent WORM store (a separate account or provider) for the anchors, and
+   deploy-time enforcement of image signatures (an admission policy).
 3. Non-executable model formats for the scikit-learn models, or sandboxed loading.
-4. WORM anchor storage wired in (object lock), and anchoring on a schedule with alerting on
-   a stale anchor.
-5. Pseudonymisation-key rotation and an audited erasure *execution* path, once the legal
-   retention rules are defined.
-6. An independent penetration test.
+4. Pseudonymisation-key rotation and an audited erasure *execution* path (PRIVACY.md §6).
+5. A real Stripe test-mode run (AUTHENTICATION.md §3 checklist).
+6. Multi-host load and failure testing.
+7. An independent penetration test.

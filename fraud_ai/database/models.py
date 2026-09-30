@@ -710,6 +710,9 @@ class ReviewOutcome(Base):
     )
     note: Mapped[str | None] = mapped_column(String(500))
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
+    # Stage 12: who resolved it ("operator:<id>" when authenticated, else "api_key:<id>"
+    # or "cli:<user>"). NULL for earlier rows.
+    reviewer: Mapped[str | None] = mapped_column(String(120))
 
 
 class FraudLabel(Base):
@@ -1117,6 +1120,7 @@ class PolicyApproval(Base):
     __table_args__ = (
         UniqueConstraint("policy_version", "operator", name="uq_policy_approval_operator"),
         Index("ix_policy_approvals_policy", "policy_version"),
+        Index("ux_policy_approvals_assertion_jti", "assertion_jti", unique=True),
     )
 
     approval_id: Mapped[uuid.UUID] = _uuid_pk()
@@ -1126,6 +1130,36 @@ class PolicyApproval(Base):
     note: Mapped[str] = mapped_column(String(500))
     approved_at: Mapped[datetime] = mapped_column(default=utcnow)
     expires_at: Mapped[datetime | None]
+    # Stage 12: the operator's consumed, action-bound assertion (evidence re-verified at
+    # activation), its key and its jti. NULL for Stage 11 (configuration-only) approvals,
+    # which do not count when operator authentication is required.
+    operator_key_id: Mapped[str | None] = mapped_column(String(40))
+    assertion_jti: Mapped[str | None] = mapped_column(String(64))
+    assertion: Mapped[str | None] = mapped_column(Text)
+
+
+class OperatorAssertion(Base):
+    """A consumed operator assertion (Stage 12): single use by ``jti``. Append-only.
+
+    Stores who, with which key, for what action and target, and when. The token itself is
+    not stored here (only its SHA-256)."""
+
+    __tablename__ = "operator_assertions"
+    __table_args__ = (
+        UniqueConstraint("jti", name="uq_operator_assertions_jti"),
+        Index("ix_operator_assertions_operator", "operator_id"),
+    )
+
+    assertion_id: Mapped[uuid.UUID] = _uuid_pk()
+    jti: Mapped[str] = mapped_column(String(64))
+    operator_id: Mapped[str] = mapped_column(String(64))
+    key_id: Mapped[str] = mapped_column(String(40))
+    action: Mapped[str] = mapped_column(String(40))
+    target: Mapped[str] = mapped_column(String(200))
+    issued_at: Mapped[datetime]
+    expires_at: Mapped[datetime]
+    used_at: Mapped[datetime] = mapped_column(default=utcnow)
+    token_sha256: Mapped[str] = mapped_column(String(64))
 
 
 ALL_TABLES = sorted(Base.metadata.tables)

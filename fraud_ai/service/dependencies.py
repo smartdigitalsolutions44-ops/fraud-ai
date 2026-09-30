@@ -73,6 +73,8 @@ class ServiceContainer:
     signing_keys: tuple[SigningKey, ...] = ()
     state: SharedState = field(default_factory=MemoryState)
     extras: dict[str, Any] = field(default_factory=dict)
+    # Stage 12: the trusted operator registry (reviewer assertions on review resolution).
+    operator_registry: Any = None
 
     @property
     def signing_master_key(self) -> str | None:

@@ -3,8 +3,11 @@
 Standard cryptography only: Ed25519 (RFC 8032) through ``cryptography``. Nothing here is
 home-made except the framing of what gets signed.
 
-**Purposes and key separation.** There are three purposes: ``model`` (model artefacts),
-``audit`` (audit-chain anchors) and ``release`` (release manifests).
+**Purposes and key separation.** There are three statement purposes: ``model`` (model
+artefacts), ``audit`` (audit-chain anchors) and ``release`` (release manifests). Stage 12
+adds two more key purposes that do not sign these statements: ``image`` (container images,
+signed with cosign) and ``operator`` (administrators' own keys, which sign their login
+assertions; :mod:`fraud_ai.trust.operators`).
 
 * **Distinct keys:** each purpose has its own key pair, and a trusted key set per purpose.
   Configuration refuses a public key that is trusted for more than one purpose
@@ -15,9 +18,11 @@ home-made except the framing of what gets signed.
 * **Not the API signing key:** request signing (HMAC) keys are symmetric and separate by
   construction.
 
-**Private keys are never stored in the repository or the database.** They live in files
-(PEM, PKCS#8, unencrypted, mode 0600), given to the signing commands with ``--key`` or a
-``*_PRIVATE_KEY_FILE`` setting. The service itself only ever holds *public* keys.
+**Private keys are never stored in the repository or the database.** They live either in
+files (PEM, PKCS#8, unencrypted, mode 0600, given with ``--key`` or ``*_PRIVATE_KEY_FILE``;
+development) or in a key-management service that signs without releasing them
+(:mod:`fraud_ai.trust.kms`, Stage 12). The service itself only ever holds *public* keys.
+Anything that can sign implements :class:`Signer`.
 
 **Key ids** are ``ed25519:`` plus the first 16 hex characters of SHA-256 over the raw
 32-byte public key.
@@ -35,7 +40,7 @@ import os
 import stat
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
@@ -118,8 +123,23 @@ def check_separation(sets: dict[str, dict[str, Ed25519PublicKey]]) -> None:
             seen[kid] = purpose
 
 
+@runtime_checkable
+class Signer(Protocol):
+    """An Ed25519 signing key, wherever it lives (a local file, a KMS/HSM)."""
+
+    @property
+    def public(self) -> Ed25519PublicKey: ...
+
+    @property
+    def key_id(self) -> str: ...
+
+    def sign_raw(self, data: bytes) -> bytes: ...
+
+
 @dataclass(frozen=True)
 class KeyPair:
+    """A local private key (development, or keys generated for a KMS import)."""
+
     private: Ed25519PrivateKey
 
     @property
@@ -129,6 +149,9 @@ class KeyPair:
     @property
     def key_id(self) -> str:
         return key_id(self.public)
+
+    def sign_raw(self, data: bytes) -> bytes:
+        return self.private.sign(data)
 
 
 def generate() -> KeyPair:
@@ -202,10 +225,17 @@ class Signature:
             raise TrustError("malformed signature record") from None
 
 
-def sign(purpose: str, pair: KeyPair, statement: dict[str, Any]) -> Signature:
-    raw = pair.private.sign(message(purpose, statement))
+def sign(purpose: str, signer: Signer, statement: dict[str, Any]) -> Signature:
+    data = message(purpose, statement)
+    raw = signer.sign_raw(data)
+    # A remote signer is checked like any other: a KMS returning a signature from another
+    # key (or garbage) must never produce a record that claims to be from this key.
+    try:
+        signer.public.verify(raw, data)
+    except InvalidSignature:
+        raise TrustError(f"the {purpose} signer returned an invalid signature") from None
     return Signature(
-        purpose, pair.key_id, ALGORITHM, base64.urlsafe_b64encode(raw).decode().rstrip("=")
+        purpose, signer.key_id, ALGORITHM, base64.urlsafe_b64encode(raw).decode().rstrip("=")
     )
 
 

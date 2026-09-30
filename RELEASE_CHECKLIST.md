@@ -1,4 +1,4 @@
-# Release checklist (Stages 10-11)
+# Release checklist (Stages 10-12)
 
 Use this for any build that leaves a developer machine (staging or a test deployment).
 Every item needs its **evidence**: the command output or CI run link, recorded in the
@@ -13,7 +13,7 @@ and it is not a PCI DSS, GDPR or SOC 2 assessment.
       `test_multiprocess`, `test_backup_restore`, `test_migration_recovery`, `test_chaos`
       and `test_staging_e2e`. Coverage ≥ 95 %.
 - [ ] No test skipped, disabled or quarantined to get green.
-- [ ] Migration head recorded (currently `0009`); `fraud-ai db migrate` on a copy of the
+- [ ] Migration head recorded (currently `0010`); `fraud-ai db migrate` on a copy of the
       target database succeeds; a backup was taken before migrating.
 
 ## 2. Security
@@ -55,6 +55,34 @@ and it is not a PCI DSS, GDPR or SOC 2 assessment.
       unsigned models refused); the Trivy HIGH/CRITICAL list reviewed.
 - [ ] `fraud-ai privacy inventory` reviewed for new fields; retention settings chosen.
 
+## 2b. Stage 12
+
+- [ ] **Image:** signed by digest with the dedicated image key (`scripts/image_sign.sh`),
+      and `fraud-ai release verify-image image-evidence.json --key <image.pub> --commit
+      <sha>` passes all four checks: key, signature, provenance, SBOM. CI's tampered-image
+      step failed as expected.
+- [ ] The release manifest (version 2) includes `image_evidence` and `audit_anchor`.
+      `release verify … --image-key <image.pub>` has no `FAILED` rows.
+- [ ] The manifest was signed by an authenticated `security_admin` (`release.signed` in the
+      audit log).
+- [ ] **Keys:** `KEY_PROVIDER=vault` (or another KMS) with `KMS_REQUIRED=true`; `fraud-ai
+      keys status` shows each purpose on its own non-exportable key; no private-key files
+      on service hosts.
+- [ ] **Operators:** `OPERATOR_AUTH_REQUIRED=true`; `fraud-ai operators registry-check`
+      OK; the registry was reviewed (who holds which role, nobody both approving and
+      activating unless intended, leavers removed).
+- [ ] The policy approvals being relied on show as **valid** (not `unverified`) in
+      `fraud-ai policy approvals <version>`.
+- [ ] **Anchors:** `AUDIT_ANCHOR_STORE=s3` pointing at an Object Lock COMPLIANCE bucket
+      outside the database operators' control; `audit anchor-status` OK; the scheduled
+      job is running.
+- [ ] **Privileges:** `fraud-ai db check-privileges --expect service` run **as the service's
+      credential** in the target environment exits 0.
+- [ ] Stripe: either the AUTHENTICATION.md §3 checklist was run and recorded, or the
+      release notes say **REAL STRIPE TEST NOT PERFORMED**.
+- [ ] The tag is a release candidate (`v0.X.Y-rcN`) unless every item above has evidence.
+      Never `v1.0` for this project without a production readiness review.
+
 ## 3. Configuration
 
 - [ ] `ENVIRONMENT=staging` (or `production`) and `fraud-ai config check` pass with the
@@ -89,4 +117,4 @@ and it is not a PCI DSS, GDPR or SOC 2 assessment.
 ## 5. Communication
 
 - [ ] Release notes state: synthetic evaluation only; no fraud-reduction or savings
-      claims; no compliance claims; known limitations (HARDENING.md section 22).
+      claims; no compliance claims; known limitations (HARDENING.md sections 22 and 39).

@@ -55,6 +55,7 @@ APPEND_ONLY = frozenset(
         "model_artifact_signatures",
         "model_calibrations",
         "model_predictions",
+        "operator_assertions",
         "policy_approvals",
         "policy_deployments",
         "policy_lifecycle_events",
@@ -65,6 +66,11 @@ APPEND_ONLY = frozenset(
 
 # Column-level exceptions: telemetry written after the immutable row (never the decision).
 COLUMN_UPDATES: dict[str, tuple[str, ...]] = {"risk_assessments": ("latency_ms",)}
+
+# Read-only for the service (Stage 12, found by `db check-privileges`): the migration
+# revision is written by the migrator only. A service that could UPDATE it could make
+# readiness and release verification report a schema version that is not there.
+SERVICE_READ_ONLY = frozenset({"alembic_version"})
 
 
 @dataclass(frozen=True)
@@ -158,7 +164,12 @@ def grant_statements(schema: str, tables: Iterable[str]) -> list[sql.Composed]:
     for table in sorted(tables):
         ident = sql.Identifier(schema, table)
         out.append(sql.SQL("REVOKE ALL ON {} FROM {}").format(ident, service))
-        privileges = "SELECT, INSERT" if table in APPEND_ONLY else "SELECT, INSERT, UPDATE, DELETE"
+        if table in SERVICE_READ_ONLY:
+            privileges = "SELECT"
+        elif table in APPEND_ONLY:
+            privileges = "SELECT, INSERT"
+        else:
+            privileges = "SELECT, INSERT, UPDATE, DELETE"
         out.append(sql.SQL("GRANT " + privileges + " ON {} TO {}").format(ident, service))
         columns = COLUMN_UPDATES.get(table)
         if columns:

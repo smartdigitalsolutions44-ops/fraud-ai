@@ -256,6 +256,52 @@ class Settings(BaseSettings):
     # Readiness re-hashes the primary artefact at least this often (and on any change).
     readiness_reverify_seconds: float = Field(default=300.0, ge=0, le=86_400)
 
+    # Stage 12 key management (fraud_ai.trust.kms). "local" = PEM files (development);
+    # "vault" = HashiCorp Vault transit: keys never leave Vault. No fallback between them.
+    key_provider: Literal["local", "vault"] = "local"
+    # Unset: required in production (KEY_PROVIDER=local is then refused for signing).
+    kms_required: bool | None = None
+    vault_addr: str | None = None
+    vault_token: SecretStr | None = None
+    vault_namespace: str | None = None
+    vault_transit_mount: str = Field(default="transit", pattern=r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
+    vault_cacert: Path | None = None
+    vault_timeout: float = Field(default=5.0, gt=0, le=60)
+    vault_key_model: str = "fraud-ai-model"
+    vault_key_audit: str = "fraud-ai-audit"
+    vault_key_release: str = "fraud-ai-release"
+    vault_key_image: str = "fraud-ai-image"  # used by cosign (hashivault://)
+    # Container image signatures (cosign): the public key (PEM) images are verified with.
+    image_signing_public_key_file: Path | None = None
+
+    # Stage 12 external audit-anchor store: "file" (a directory) or "s3" (an S3-compatible
+    # bucket with versioning and Object Lock in COMPLIANCE mode; refused without them).
+    # Unset: "file" when AUDIT_ANCHOR_DIRECTORY is set.
+    audit_anchor_store: Literal["file", "s3"] | None = None
+    anchor_s3_endpoint: str | None = None  # host[:port], e.g. s3.eu-west-2.amazonaws.com
+    anchor_s3_bucket: str | None = None
+    anchor_s3_prefix: str = Field(default="fraud-ai/audit-anchors/", max_length=200)
+    anchor_s3_access_key: str | None = None
+    anchor_s3_secret_key: SecretStr | None = None
+    anchor_s3_region: str | None = None
+    anchor_s3_secure: bool = True
+    anchor_s3_ca_file: Path | None = None
+    # Object Lock retention given to every anchor (COMPLIANCE: nobody can shorten it).
+    anchor_retention_days: int = Field(default=400, ge=1, le=36_500)
+    # `audit anchor-status` fails when the newest anchor is older than this.
+    anchor_max_age_minutes: float = Field(default=60.0, gt=0, le=10_080)
+
+    # Stage 12 operator authentication (fraud_ai.trust.operators): administrative actions
+    # need an EdDSA-signed, short-lived, single-use assertion from a registered operator
+    # key with the right role. Unset: required in staging and production.
+    operator_auth_required: bool | None = None
+    operator_registry_file: Path | None = None
+    operator_audience: str = Field(default="fraud-ai-admin", pattern=r"^[A-Za-z0-9._:-]{3,100}$")
+    operator_assertion_max_seconds: int = Field(default=300, ge=30, le=3600)
+    operator_assertion_leeway_seconds: int = Field(default=30, ge=0, le=300)
+    # Stage 12: `fraud-ai demo` refuses to run without this explicit opt-in.
+    demo_mode: bool = False
+
     @field_validator("log_level")
     @classmethod
     def _validate_log_level(cls, value: str) -> str:
@@ -411,6 +457,95 @@ class Settings(BaseSettings):
             raise ValueError(str(exc)) from None
         if self.operator_id is not None and not _OPERATOR.fullmatch(self.operator_id):
             raise ValueError("OPERATOR_ID must be 2-64 characters of [a-z0-9._@-]")
+        self._validate_key_management()
+        self._validate_anchor_store()
+        self._validate_secret_reuse()
+
+    def _validate_secret_reuse(self) -> None:
+        """One secret, one purpose: the API request-signing key (HMAC), the
+        pseudonymisation key, the webhook secret, the Vault token and the anchor-store
+        credential must all differ (Stage 12 purpose separation)."""
+        seen: dict[str, str] = {}
+        for name, value in self._secret_values().items():
+            if name == "REDIS_URL password":
+                continue
+            if value in seen:
+                raise ValueError(
+                    f"{name} reuses the value of {seen[value]}; each purpose needs its own secret"
+                )
+            seen[value] = name
+
+    def _validate_key_management(self) -> None:
+        names = self.vault_key_names | {"image": self.vault_key_image}
+        if len(set(names.values())) != len(names):
+            raise ValueError(
+                "VAULT_KEY_MODEL/AUDIT/RELEASE/IMAGE must name different keys (one key per purpose)"
+            )
+        if self.key_provider != "vault":
+            return
+        if not self.vault_addr:
+            raise ValueError("KEY_PROVIDER=vault needs VAULT_ADDR")
+        # VAULT_TOKEN is checked when a signer is created: only signing jobs hold a token
+        # (the service verifies with public keys and never gets one).
+        if self.environment is Environment.PRODUCTION and not self.vault_addr.startswith(
+            "https://"
+        ):
+            raise ValueError("production requires an https VAULT_ADDR")
+        files = {
+            "MODEL_SIGNING_PRIVATE_KEY_FILE": self.model_signing_private_key_file,
+            "AUDIT_ANCHOR_PRIVATE_KEY_FILE": self.audit_anchor_private_key_file,
+            "RELEASE_SIGNING_PRIVATE_KEY_FILE": self.release_signing_private_key_file,
+        }
+        present = [name for name, value in files.items() if value is not None]
+        if present:
+            raise ValueError(
+                f"KEY_PROVIDER=vault: remove {', '.join(present)} (local key files are never "
+                "used as a fallback for the KMS)"
+            )
+
+    def _validate_anchor_store(self) -> None:
+        if self.effective_anchor_store != "s3":
+            return
+        # Credentials are checked when the store is opened: only the anchor job and
+        # checking tools hold them, not the service.
+        missing = [
+            name
+            for name, value in (
+                ("ANCHOR_S3_ENDPOINT", self.anchor_s3_endpoint),
+                ("ANCHOR_S3_BUCKET", self.anchor_s3_bucket),
+            )
+            if not value
+        ]
+        if missing:
+            raise ValueError(f"AUDIT_ANCHOR_STORE=s3 needs {', '.join(missing)}")
+        if self.environment is Environment.PRODUCTION and not self.anchor_s3_secure:
+            raise ValueError("production requires ANCHOR_S3_SECURE=true (TLS)")
+
+    @property
+    def vault_key_names(self) -> dict[str, str]:
+        return {
+            "model": self.vault_key_model,
+            "audit": self.vault_key_audit,
+            "release": self.vault_key_release,
+        }
+
+    @property
+    def kms_is_required(self) -> bool:
+        if self.kms_required is not None:
+            return self.kms_required
+        return self.environment is Environment.PRODUCTION
+
+    @property
+    def effective_anchor_store(self) -> str | None:
+        if self.audit_anchor_store is not None:
+            return self.audit_anchor_store
+        return "file" if self.audit_anchor_directory is not None else None
+
+    @property
+    def operator_auth_is_required(self) -> bool:
+        if self.operator_auth_required is not None:
+            return self.operator_auth_required
+        return self.environment in {Environment.STAGING, Environment.PRODUCTION}
 
     @property
     def requires_model_signatures(self) -> bool:
@@ -453,6 +588,10 @@ class Settings(BaseSettings):
             problems.append(
                 "model signatures are required but MODEL_SIGNING_PUBLIC_KEYS is not set"
             )
+        if self.operator_auth_is_required and self.operator_registry_file is None:
+            problems.append(
+                "operator authentication is required but OPERATOR_REGISTRY_FILE is not set"
+            )
         if self.environment is Environment.PRODUCTION:
             if self.local_llm_runtime == "reference" and not self.allow_reference_llm:
                 problems.append(
@@ -469,6 +608,8 @@ class Settings(BaseSettings):
             "SERVICE_SIGNING_PREVIOUS_KEY": self.service_signing_previous_key,
             "PAYMENT_AUTH_WEBHOOK_SECRET": self.payment_auth_webhook_secret,
             "STRIPE_API_KEY": self.stripe_api_key,
+            "VAULT_TOKEN": self.vault_token,
+            "ANCHOR_S3_SECRET_KEY": self.anchor_s3_secret_key,
         }
         out = {k: v.get_secret_value() for k, v in values.items() if v is not None}
         if self.redis_url is not None:

@@ -1,0 +1,503 @@
+{
+ "failures": {
+  "injected": [
+   {
+    "confirmed_dead": true,
+    "event": "SIGKILL worker pid 10",
+    "t": 21.6
+   },
+   {
+    "event": "redis restart begins",
+    "t": 46.6
+   },
+   {
+    "event": "redis restarted",
+    "t": 47.1
+   },
+   {
+    "event": "terminated every fraud_service DB connection",
+    "t": 72.4
+   }
+  ],
+  "summary": {
+   "codes": {
+    "422:INVALID_EVENT": 3,
+    "502:-": 1,
+    "503:STATE_UNAVAILABLE": 12,
+    "ok": 1988
+   },
+   "error_rate": 0.008,
+   "latency_ms": {
+    "p50": 168.2,
+    "p95": 367.1,
+    "p99": 436.0
+   },
+   "requests": 2004,
+   "requests_per_second": 19.9,
+   "seconds": 100.64
+  },
+  "timeline": {
+   "0": {
+    "ok": 10
+   },
+   "1": {
+    "ok": 20
+   },
+   "10": {
+    "ok": 19
+   },
+   "100": {
+    "ok": 12
+   },
+   "11": {
+    "ok": 17
+   },
+   "12": {
+    "ok": 24
+   },
+   "13": {
+    "ok": 16
+   },
+   "14": {
+    "ok": 20
+   },
+   "15": {
+    "ok": 24
+   },
+   "16": {
+    "ok": 18
+   },
+   "17": {
+    "ok": 18
+   },
+   "18": {
+    "ok": 24
+   },
+   "19": {
+    "ok": 18
+   },
+   "2": {
+    "ok": 18
+   },
+   "20": {
+    "502:-": 1,
+    "ok": 17
+   },
+   "21": {
+    "422:INVALID_EVENT": 1,
+    "ok": 23
+   },
+   "22": {
+    "ok": 13
+   },
+   "23": {
+    "ok": 23
+   },
+   "24": {
+    "ok": 24
+   },
+   "25": {
+    "ok": 16
+   },
+   "26": {
+    "ok": 20
+   },
+   "27": {
+    "ok": 24
+   },
+   "28": {
+    "ok": 18
+   },
+   "29": {
+    "ok": 18
+   },
+   "3": {
+    "ok": 24
+   },
+   "30": {
+    "ok": 24
+   },
+   "31": {
+    "ok": 13
+   },
+   "32": {
+    "ok": 23
+   },
+   "33": {
+    "ok": 24
+   },
+   "34": {
+    "ok": 18
+   },
+   "35": {
+    "ok": 18
+   },
+   "36": {
+    "ok": 24
+   },
+   "37": {
+    "ok": 15
+   },
+   "38": {
+    "ok": 21
+   },
+   "39": {
+    "ok": 22
+   },
+   "4": {
+    "ok": 18
+   },
+   "40": {
+    "ok": 18
+   },
+   "41": {
+    "ok": 20
+   },
+   "42": {
+    "ok": 24
+   },
+   "43": {
+    "ok": 16
+   },
+   "44": {
+    "ok": 20
+   },
+   "45": {
+    "ok": 24
+   },
+   "46": {
+    "503:STATE_UNAVAILABLE": 6,
+    "ok": 12
+   },
+   "47": {
+    "422:INVALID_EVENT": 2,
+    "503:STATE_UNAVAILABLE": 6,
+    "ok": 10
+   },
+   "48": {
+    "ok": 24
+   },
+   "49": {
+    "ok": 14
+   },
+   "5": {
+    "ok": 18
+   },
+   "50": {
+    "ok": 22
+   },
+   "51": {
+    "ok": 21
+   },
+   "52": {
+    "ok": 20
+   },
+   "53": {
+    "ok": 19
+   },
+   "54": {
+    "ok": 20
+   },
+   "55": {
+    "ok": 22
+   },
+   "56": {
+    "ok": 18
+   },
+   "57": {
+    "ok": 24
+   },
+   "58": {
+    "ok": 18
+   },
+   "59": {
+    "ok": 18
+   },
+   "6": {
+    "ok": 24
+   },
+   "60": {
+    "ok": 22
+   },
+   "61": {
+    "ok": 19
+   },
+   "62": {
+    "ok": 19
+   },
+   "63": {
+    "ok": 24
+   },
+   "64": {
+    "ok": 21
+   },
+   "65": {
+    "ok": 15
+   },
+   "66": {
+    "ok": 18
+   },
+   "67": {
+    "ok": 21
+   },
+   "68": {
+    "ok": 21
+   },
+   "69": {
+    "ok": 24
+   },
+   "7": {
+    "ok": 15
+   },
+   "70": {
+    "ok": 16
+   },
+   "71": {
+    "ok": 20
+   },
+   "72": {
+    "ok": 19
+   },
+   "73": {
+    "ok": 20
+   },
+   "74": {
+    "ok": 21
+   },
+   "75": {
+    "ok": 24
+   },
+   "76": {
+    "ok": 20
+   },
+   "77": {
+    "ok": 16
+   },
+   "78": {
+    "ok": 24
+   },
+   "79": {
+    "ok": 16
+   },
+   "8": {
+    "ok": 21
+   },
+   "80": {
+    "ok": 20
+   },
+   "81": {
+    "ok": 24
+   },
+   "82": {
+    "ok": 15
+   },
+   "83": {
+    "ok": 21
+   },
+   "84": {
+    "ok": 24
+   },
+   "85": {
+    "ok": 14
+   },
+   "86": {
+    "ok": 22
+   },
+   "87": {
+    "ok": 24
+   },
+   "88": {
+    "ok": 15
+   },
+   "89": {
+    "ok": 21
+   },
+   "9": {
+    "ok": 24
+   },
+   "90": {
+    "ok": 24
+   },
+   "91": {
+    "ok": 17
+   },
+   "92": {
+    "ok": 19
+   },
+   "93": {
+    "ok": 24
+   },
+   "94": {
+    "ok": 19
+   },
+   "95": {
+    "ok": 17
+   },
+   "96": {
+    "ok": 24
+   },
+   "97": {
+    "ok": 13
+   },
+   "98": {
+    "ok": 23
+   },
+   "99": {
+    "ok": 24
+   }
+  }
+ },
+ "failures_first_attempt_invalid": "run1's worker kill never happened (no kill binary in the slim image); fixed and rerun (run2)",
+ "kind": "stage12_staging_load_test",
+ "note": "SYNTHETIC. ONE 4-vCPU host: load generator, Caddy TLS, fraud-ai (3 workers), PostgreSQL 16, Redis 7 in separate containers on Docker networks (real TCP/TLS, shared CPUs). Not a multi-machine test and not an SLA.",
+ "service": {
+  "db_max_overflow": 4,
+  "db_pool_size": 8,
+  "rate_limit": "600000/minute",
+  "signatures": "v2",
+  "workers": 3
+ },
+ "shapes": {
+  "burst": {
+   "clients": 36,
+   "codes": {
+    "ok": 1975
+   },
+   "error_rate": 0.0,
+   "latency_ms": {
+    "p50": 219.6,
+    "p95": 608.6,
+    "p99": 1315.2
+   },
+   "requests": 1975,
+   "requests_per_second": 126.5,
+   "resources": {
+    "db_connections": {
+     "mean": 32.7,
+     "peak": 37
+    },
+    "last_mem": {
+     "fraud-ai": [
+      "604.7MiB"
+     ],
+     "postgres": [
+      "1.232GiB"
+     ],
+     "proxy": [
+      "26.38MiB"
+     ],
+     "redis": [
+      "9.008MiB"
+     ]
+    },
+    "peak_cpu_pct": {
+     "fraud-ai": 232.36,
+     "postgres": 120.74,
+     "proxy": 18.22,
+     "redis": 7.62
+    },
+    "redis_latency_ms_avg": {
+     "max": 2.31,
+     "mean": 1.05
+    },
+    "samples": 3
+   },
+   "seconds": 15.62
+  },
+  "replay": {
+   "accepted_replays": 0,
+   "codes": {
+    "401:REPLAYED_SIGNATURE": 300
+   },
+   "error_rate": 1.0,
+   "latency_ms": {
+    "p50": 52.7,
+    "p95": 59.8,
+    "p99": 63.9
+   },
+   "requests": 300,
+   "requests_per_second": 18.4,
+   "seconds": 16.27
+  },
+  "reviews": {
+   "codes": {
+    "ok": 380
+   },
+   "error_rate": 0.0,
+   "latency_ms": {
+    "p50": 47.0,
+    "p95": 296.1,
+    "p99": 337.1
+   },
+   "open_reviews_resolved": 76,
+   "requests": 380,
+   "requests_per_second": 124.4,
+   "seconds": 3.05
+  },
+  "steady": {
+   "codes": {
+    "ok": 3600
+   },
+   "error_rate": 0.0,
+   "latency_ms": {
+    "p50": 91.8,
+    "p95": 131.9,
+    "p99": 187.3
+   },
+   "requests": 3600,
+   "requests_per_second": 39.9,
+   "resources": {
+    "db_connections": {
+     "mean": 12.1,
+     "peak": 13
+    },
+    "last_mem": {
+     "fraud-ai": [
+      "585.6MiB"
+     ],
+     "postgres": [
+      "1.123GiB"
+     ],
+     "proxy": [
+      "22.47MiB"
+     ],
+     "redis": [
+      "8.242MiB"
+     ]
+    },
+    "peak_cpu_pct": {
+     "fraud-ai": 72.46,
+     "postgres": 23.51,
+     "proxy": 6.45,
+     "redis": 5.0
+    },
+    "redis_latency_ms_avg": {
+     "max": 0.47,
+     "mean": 0.31
+    },
+    "samples": 14
+   },
+   "seconds": 90.17,
+   "target_rps": 40.0
+  },
+  "stepups": {
+   "codes": {},
+   "error_rate": null,
+   "latency_ms": {
+    "p50": null,
+    "p95": null,
+    "p99": null
+   },
+   "requests": 0,
+   "requests_per_second": 0.0,
+   "seconds": 0.0,
+   "step_ups": 0
+  }
+ },
+ "world": {
+  "events": 402029,
+  "live_stream_events": 22556,
+  "policy": "risk-policy-1.0.0 (derived bands: ALLOW <0.04, MANUAL_REVIEW, TEMPORARY_BLOCK >=0.91; no score-based STEP_UP band)",
+  "users": 5000
+ }
+}

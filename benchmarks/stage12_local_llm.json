@@ -1,0 +1,216 @@
+{
+ "kind": "stage12_local_llm_benchmark",
+ "note": "SYNTHETIC evidence packets (Stage 6/7 world, 10 case types, 1 case each). llama.cpp llama-server (CPU, 3 threads pinned, 4-vCPU host), temperature 0, seed 0, LOCAL_LLM_MAX_TOKENS default 1200 (Qwen) / 1200 (Llama), response_format json_object. Explanation layer only; not a fraud metric.",
+ "runs": {
+  "llama": {
+   "case_types": [
+    "normal",
+    "vpn_user",
+    "house_mover",
+    "large_purchase",
+    "shared_network",
+    "account_takeover",
+    "stealth_takeover",
+    "high_velocity",
+    "friendly_fraud",
+    "model_disagreement",
+    "all_models_uncertain"
+   ],
+   "missing_case_types": [
+    "all_models_uncertain"
+   ],
+   "prompt_version": "analyst-prompt-1.0.0",
+   "reports": [
+    {
+     "available": true,
+     "errors": [
+      [],
+      [],
+      [],
+      [],
+      [],
+      [],
+      [],
+      [],
+      [],
+      []
+     ],
+     "metrics": {
+      "completion_tokens_mean": null,
+      "evidence_coverage_mean": 0.7442,
+      "forbidden_action_rate": 0.0,
+      "generation_failure_rate": 0.0,
+      "invalid_citation_rate": 0.0,
+      "latency_max_seconds": 0.0012,
+      "latency_mean_seconds": 0.0011,
+      "outputs": 10,
+      "privacy_violation_rate": 0.0,
+      "response_chars_mean": 2809.1,
+      "schema_compliance": 1.0,
+      "unsupported_claim_rate": 0.0,
+      "valid_rate": 1.0
+     },
+     "model": "reference-template-1.0.0",
+     "runtime": "reference"
+    },
+    {
+     "available": true,
+     "errors": [
+      [
+       "not valid JSON: Expecting value: line 1 column 1 (char 0)"
+      ],
+      [
+       "not valid JSON: Expecting ',' delimiter: line 1 column 1608 (char 1607)"
+      ],
+      [
+       "not valid JSON: Expecting ',' delimiter: line 1 column 1608 (char 1607)"
+      ],
+      [
+       "not valid JSON: Expecting ',' delimiter: line 1 column 1608 (char 1607)"
+      ],
+      [
+       "not valid JSON: Expecting ',' delimiter: line 1 column 1608 (char 1607)"
+      ],
+      [
+       "not valid JSON: Extra data: line 3 column 1 (char 2369)"
+      ],
+      [
+       "not valid JSON: Expecting value: line 1 column 1 (char 0)"
+      ],
+      [
+       "not valid JSON: Expecting value: line 1 column 1 (char 0)"
+      ],
+      [
+       "not valid JSON: Expecting value: line 1 column 1 (char 0)"
+      ],
+      [
+       "not valid JSON: Expecting value: line 1 column 1 (char 0)"
+      ]
+     ],
+     "metrics": {
+      "completion_tokens_mean": 863.6,
+      "evidence_coverage_mean": null,
+      "forbidden_action_rate": 0.0,
+      "generation_failure_rate": 0.0,
+      "invalid_citation_rate": 0.0,
+      "latency_max_seconds": 177.3377,
+      "latency_mean_seconds": 133.0248,
+      "outputs": 10,
+      "privacy_violation_rate": 0.0,
+      "response_chars_mean": 2726.2,
+      "schema_compliance": 0.0,
+      "unsupported_claim_rate": 0.0,
+      "valid_rate": 0.0
+     },
+     "model": "llama3.2-1b-instruct-q8_0",
+     "runtime": "llamacpp-server"
+    }
+   ]
+  },
+  "qwen": {
+   "case_types": [
+    "normal",
+    "vpn_user",
+    "house_mover",
+    "large_purchase",
+    "shared_network",
+    "account_takeover",
+    "stealth_takeover",
+    "high_velocity",
+    "friendly_fraud",
+    "model_disagreement",
+    "all_models_uncertain"
+   ],
+   "missing_case_types": [
+    "all_models_uncertain"
+   ],
+   "prompt_version": "analyst-prompt-1.0.0",
+   "reports": [
+    {
+     "available": true,
+     "errors": [
+      [],
+      [],
+      [],
+      [],
+      [],
+      [],
+      [],
+      [],
+      [],
+      []
+     ],
+     "metrics": {
+      "completion_tokens_mean": null,
+      "evidence_coverage_mean": 0.7442,
+      "forbidden_action_rate": 0.0,
+      "generation_failure_rate": 0.0,
+      "invalid_citation_rate": 0.0,
+      "latency_max_seconds": 0.0009,
+      "latency_mean_seconds": 0.0008,
+      "outputs": 10,
+      "privacy_violation_rate": 0.0,
+      "response_chars_mean": 2809.1,
+      "schema_compliance": 1.0,
+      "unsupported_claim_rate": 0.0,
+      "valid_rate": 1.0
+     },
+     "model": "reference-template-1.0.0",
+     "runtime": "reference"
+    },
+    {
+     "available": true,
+     "errors": [
+      [
+       "not valid JSON: Unterminated string starting at: line 168 column 11 (char 4257)"
+      ],
+      [
+       "not valid JSON: Unterminated string starting at: line 30 column 110 (char 3460)"
+      ],
+      [
+       "not valid JSON: Unterminated string starting at: line 151 column 11 (char 4176)"
+      ],
+      [
+       "not valid JSON: Unterminated string starting at: line 162 column 11 (char 4664)"
+      ],
+      [
+       "not valid JSON: Unterminated string starting at: line 22 column 99 (char 2667)"
+      ],
+      [
+       "not valid JSON: Unterminated string starting at: line 14 column 700 (char 2231)"
+      ],
+      [
+       "not valid JSON: Unterminated string starting at: line 155 column 22 (char 4266)"
+      ],
+      [
+       "not valid JSON: Expecting value: line 137 column 1 (char 4675)"
+      ],
+      [
+       "not valid JSON: Unterminated string starting at: line 21 column 21 (char 2499)"
+      ],
+      [
+       "not valid JSON: Expecting value: line 166 column 1 (char 3961)"
+      ]
+     ],
+     "metrics": {
+      "completion_tokens_mean": 1200.0,
+      "evidence_coverage_mean": null,
+      "forbidden_action_rate": 0.0,
+      "generation_failure_rate": 0.0,
+      "invalid_citation_rate": 0.0,
+      "latency_max_seconds": 358.6148,
+      "latency_mean_seconds": 333.7768,
+      "outputs": 10,
+      "privacy_violation_rate": 0.0,
+      "response_chars_mean": 3708.1,
+      "schema_compliance": 0.0,
+      "unsupported_claim_rate": 0.0,
+      "valid_rate": 0.0
+     },
+     "model": "qwen2.5-3b-instruct-q4_k_m",
+     "runtime": "llamacpp-server"
+    }
+   ]
+  }
+ }
+}

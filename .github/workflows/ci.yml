@@ -1,4 +1,4 @@
-# fraud-ai CI (Stages 10-11). Benchmarks are NOT run here (they need a quiet, comparable
+# fraud-ai CI (Stages 10-12). Benchmarks are NOT run here (they need a quiet, comparable
 # machine); see scripts/check_regression.py and HARDENING.md.
 # Artefacts: coverage, SBOM, security summary, container scan and smoke results. Never
 # uploaded: .env files, secrets, signing keys or test credentials (the smoke test's keys are
@@ -9,6 +9,10 @@ on:
   push:
     branches: ["**"]
   pull_request:
+  schedule:
+    # Weekly rebuild from a fresh base image and rescan (HARDENING.md §34): Debian fixes for
+    # the open base-image CVEs are picked up without waiting for a code change.
+    - cron: "23 4 * * 1"
 
 permissions:
   contents: read
@@ -31,7 +35,7 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
-      - run: pip install -e ".[dev,postgres,stripe]"
+      - run: pip install -e ".[dev,postgres,stripe,anchors]"
       - run: python -m ruff check .
       - run: python -m ruff format --check fraud_ai tests migrations
       - run: python -m mypy
@@ -58,7 +62,7 @@ jobs:
           cache: pip
       - name: System packages (redis-server for the shared-state tests, pg tools)
         run: sudo apt-get update && sudo apt-get install -y redis-server postgresql-client
-      - run: pip install -e ".[dev,postgres,stripe]"
+      - run: pip install -e ".[dev,postgres,stripe,anchors]"
       - name: Staging-profile database role (non-default password, for the staging E2E)
         run: |
           STAGING_PW="$(python -c 'import secrets; print(secrets.token_hex(16))')"
@@ -95,7 +99,7 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
-      - run: pip install -e ".[postgres,stripe,security]"
+      - run: pip install -e ".[postgres,stripe,anchors,security]"
       - name: Dependency audit (known vulnerabilities; see security/pip-audit-ignore.txt)
         run: python scripts/security_checks.py pip-audit | tee security-pip-audit.txt
       - name: Static analysis (bandit, config in pyproject.toml)
@@ -134,6 +138,9 @@ jobs:
     timeout-minutes: 90
     needs: [lint]
     services:
+      registry: # a private, run-local registry: cosign signs by digest in a registry
+        image: registry:2
+        ports: ["5000:5000"]
       postgres:
         image: postgres:16
         env:
@@ -165,6 +172,13 @@ jobs:
             done
             docker run --rm --entrypoint sh fraud-ai:ci -c \
               'du -sm /usr/local/lib/python3.11/site-packages/* | sort -rn | head -15'
+            # Stage 12 size review: what inside PyTorch could be pruned without changing
+            # what the service runs (headers, static libraries, test fixtures, cmake files).
+            docker run --rm --entrypoint sh fraud-ai:ci -c \
+              'cd /usr/local/lib/python3.11/site-packages/torch && du -sm lib include bin share \
+                 testing _inductor utils distributed 2>/dev/null | sort -rn; \
+               echo "static .a: $(find . -name "*.a" -exec du -cm {} + | tail -1)"; \
+               echo "largest libs:"; ls -S lib | head -5 | while read f; do du -sm "lib/$f"; done'
           } | tee container-results/sizes.txt
       - name: Vulnerability scan (Trivy 0.58.1; HIGH/CRITICAL are reported, never hidden)
         run: |
@@ -177,6 +191,52 @@ jobs:
               image --scanners vuln --severity HIGH,CRITICAL --format table "$image" \
               | tee "container-results/trivy-${tag}.txt"
           done
+      - name: Install cosign (checksum-verified)
+        run: |
+          curl -sSL -o cosign https://github.com/sigstore/cosign/releases/download/v2.4.1/cosign-linux-amd64
+          curl -sSL -o cosign_checksums.txt https://github.com/sigstore/cosign/releases/download/v2.4.1/cosign_checksums.txt
+          grep " cosign-linux-amd64$" cosign_checksums.txt | awk '{print $1"  cosign"}' | sha256sum -c -
+          sudo install -m 0755 cosign /usr/local/bin/cosign && rm cosign cosign_checksums.txt
+      - name: Sign the image, attach SLSA provenance and SBOM (dedicated image key)
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+        run: |
+          # A repository secret COSIGN_PRIVATE_KEY (the dedicated image key) gives persistent
+          # trust. Without it an EPHEMERAL key is generated for this run: it demonstrates the
+          # mechanism only, and is deleted afterwards (its public key is kept as evidence).
+          keydir="$(mktemp -d)"
+          if [ -n "${COSIGN_PRIVATE_KEY:-}" ]; then
+            printf '%s' "$COSIGN_PRIVATE_KEY" > "$keydir/cosign.key"
+            cosign public-key --key "$keydir/cosign.key" > "$keydir/cosign.pub"
+            echo "image key: repository secret" | tee container-results/image-key.txt
+          else
+            (cd "$keydir" && COSIGN_PASSWORD= cosign generate-key-pair >/dev/null)
+            export COSIGN_PASSWORD=
+            echo "image key: EPHEMERAL (mechanism demonstration only)" | tee container-results/image-key.txt
+          fi
+          GIT_REF="$GITHUB_REF" bash scripts/image_sign.sh fraud-ai:ci localhost:5000/fraud-ai \
+            "$keydir/cosign.key" "$keydir/cosign.pub" container-results/image
+          cp "$keydir/cosign.pub" container-results/image/cosign.pub
+          rm -rf "$keydir"
+      - name: Verify image signature, digest, provenance and SBOM; a tampered image must fail
+        run: |
+          verify() {
+            docker run --rm --network host --read-only --tmpfs /tmp -e HOME=/tmp \
+              -v /usr/local/bin/cosign:/usr/local/bin/cosign:ro \
+              -v "$PWD/container-results/image:/r:ro" fraud-ai:ci \
+              release verify-image /r/image-evidence.json --key /r/cosign.pub --commit "$GITHUB_SHA" "$@"
+          }
+          verify | tee container-results/image-verify.txt
+          printf 'FROM fraud-ai:ci\nLABEL tampered="yes"\n' | docker build -q -t fraud-ai:tampered - >/dev/null
+          docker tag fraud-ai:tampered localhost:5000/fraud-ai:tampered
+          docker push -q localhost:5000/fraud-ai:tampered >/dev/null
+          tampered="$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' \
+            localhost:5000/fraud-ai:tampered | grep '^localhost:5000/fraud-ai@' | head -1)"
+          if verify --image "$tampered" | tee container-results/image-verify-tampered.txt; then
+            echo "FAIL: a tampered image verified" >&2; exit 1
+          fi
+          echo "tampered image refused (expected)" | tee -a container-results/image-verify-tampered.txt
       - name: Summary
         if: always()
         run: |
@@ -184,6 +244,8 @@ jobs:
             echo "## Container"
             echo '```'; cat container-results/sizes.txt 2>/dev/null || true; echo '```'
             echo '```'; cat container-results/container-smoke.json 2>/dev/null || true; echo '```'
+            echo '```'; cat container-results/image-key.txt container-results/image-verify.txt \
+              container-results/image-verify-tampered.txt 2>/dev/null || true; echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         if: always()

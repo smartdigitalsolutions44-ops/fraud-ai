@@ -44,7 +44,7 @@ from fraud_ai.core.exceptions import FraudAIError
 from fraud_ai.database.models import ModelArtifactSignature, ModelVersion
 from fraud_ai.models.artifact_io import ArtifactBytes, ArtifactReadError
 from fraud_ai.trust import keys as trust_keys
-from fraud_ai.trust.keys import KeyPair, Signature, TrustError
+from fraud_ai.trust.keys import Signature, Signer, TrustError
 
 PURPOSE = "model"
 
@@ -95,7 +95,7 @@ def _read(model: ModelVersion) -> ArtifactBytes:
 def sign_model(
     session: Session,
     model: ModelVersion,
-    pair: KeyPair,
+    pair: Signer,
     *,
     actor: str,
     trusted: dict[str, Ed25519PublicKey] | None = None,

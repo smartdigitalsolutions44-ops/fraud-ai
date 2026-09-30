@@ -148,6 +148,14 @@ def build_container(
         auth_limiter = InMemoryRateLimiter(count, period, settings.rate_limit_burst)
     _instrument(engine, metrics)
     trust = ModelTrust.from_settings(settings)
+    registry = None
+    if settings.operator_auth_is_required or settings.operator_registry_file is not None:
+        from fraud_ai.trust.operators import OperatorAuthError, registry_from_settings
+
+        try:
+            registry = registry_from_settings(settings)
+        except OperatorAuthError as exc:
+            raise ServiceConfigurationError(f"operator registry: {exc}") from None
     return ServiceContainer(
         settings=settings,
         engine=engine,
@@ -181,6 +189,7 @@ def build_container(
         llm_pool=concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="llm"),
         signing_keys=signing_keys(settings),
         state=state,
+        operator_registry=registry,
     )
 
 

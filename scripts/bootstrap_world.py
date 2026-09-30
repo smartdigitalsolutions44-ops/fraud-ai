@@ -41,12 +41,19 @@ def main() -> None:
     parser.add_argument("--models", type=Path, required=True)
     parser.add_argument("--kinds", default="gradient-boosting,logistic")
     parser.add_argument("--users", type=int, default=80)
+    parser.add_argument("--activity-days", type=int, default=120)
+    parser.add_argument("--live-days", type=int, default=7)
     parser.add_argument(
         "--sign-key",
         type=Path,
         default=None,
         help="Ed25519 model key: sign every trained model before the policies are proposed "
         "(needed where MODEL_SIGNATURES_REQUIRED is on)",
+    )
+    parser.add_argument(
+        "--sign-with-provider",
+        action="store_true",
+        help="Stage 12: sign with the configured key provider (e.g. Vault transit) instead",
     )
     args = parser.parse_args()
     kinds = [k.strip() for k in args.kinds.split(",") if k.strip()]
@@ -61,8 +68,8 @@ def main() -> None:
             n_users=args.users,
             seed=13,
             reference_time=datetime(2026, 7, 1, tzinfo=UTC),
-            activity_days=120,
-            live_days=7,
+            activity_days=args.activity_days,
+            live_days=args.live_days,
             fraud_multiplier=2.0,
             late_fraction=0.05,
         )
@@ -71,14 +78,14 @@ def main() -> None:
     config = TrainingConfig(maturity=timedelta(days=14), hyperparameters=FAST)
     with session_scope(factory) as s:
         run_training(s, kinds, config, args.models)
-    if args.sign_key is not None:
+    if args.sign_key is not None or args.sign_with_provider:
         from sqlalchemy import select
 
         from fraud_ai.database.models import ModelVersion
         from fraud_ai.models.signing import sign_model
-        from fraud_ai.trust.keys import load_private_key
+        from fraud_ai.trust.kms import signer_for
 
-        pair = load_private_key(args.sign_key)
+        pair = signer_for(settings, "model", key_file=args.sign_key)
         with session_scope(factory) as s:
             for model in s.scalars(select(ModelVersion)):
                 sign_model(s, model, pair, actor="cli:bootstrap")
