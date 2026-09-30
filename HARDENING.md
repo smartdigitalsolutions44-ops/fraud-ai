@@ -1346,8 +1346,50 @@ Vault, RustFS Object Lock, Caddy TLS.
 
 ## 38. Release candidate and CI
 
-The release candidate is tagged **`v0.12.0-rc1`** only after this section's verification.
-It is not `v1.0`. The final verification results are recorded here after the commit.
+The release candidate is tagged **`v0.12.0-rc1`**, on commit **`eee3d7e`**, only after the
+verification below. It is not `v1.0`. The signed manifest is
+`release/v0.12.0-rc1.json`.
+
+**Final local suite on the committed code:**
+
+| Check | Result |
+|---|---|
+| pytest (SQLite + PostgreSQL 16 + Redis, least-privilege roles, staging E2E, multi-process, and the live Vault, RustFS Object Lock and signed-image tests) | **1,109 passed, 0 skipped**, coverage **96.56 %** (gate 95 %). After the anchor-status fix: the anchor, trust-chain and CLI tests re-run, 32 passed |
+| ruff, `ruff format --check`, mypy strict | clean (171 files) |
+| pip-audit | 0 findings, 75 dependencies; the `anchors` extra (minio) is now in the audited closure, which it was not before |
+| bandit | 0 findings (one documented `nosec B105`: the demo's synthetic token id) |
+| detect-secrets | 0 new; one reviewed false positive added (`${{ secrets.COSIGN_PASSWORD }}` in ci.yml) |
+| gitleaks (full history) | no leaks; the working-tree hits are git-ignored runtime staging secrets only |
+| SBOM | CycloneDX 1.6, 75 components (`sbom/fraud-ai.cdx.json`) |
+| container build and scan | the torch-less image at `eee3d7e`: 0 CRITICAL, 44 HIGH (8 CVEs, 0 fixable, 0 in Python packages) |
+
+**RC verification on the 5,000-user staging stack:**
+
+| Item | Evidence |
+|---|---|
+| git commit | `eee3d7e5b7c3…`: `release verify` git_commit **ok** (on the host) |
+| image | `localhost:5000/fraud-ai@sha256:24876e73…`, torch-less, built from `eee3d7e`. The **deployed container runs exactly this digest** |
+| image signature, provenance, SBOM | `release verify-image … --commit eee3d7e`: key, signature, SLSA provenance naming the commit, and CycloneDX SBOM all **ok**. Vault transit key `fraud-ai-image` |
+| manifest | v2, signed through Vault (`fraud-ai-release`, `ed25519:f8c5a75d…`) by authenticated operator `sec`; signature **ok** |
+| model signatures | GB and LR: digests, files and signatures **ok** (verified in the stack, where the artefacts live) |
+| audit anchor | anchor 6 in Object Lock, key `ed25519:a6060…` trusted: **ok** |
+| SBOM | hash **ok** |
+| migration | `0010`, **ok** |
+| policy | active `risk-policy-1.0.0`, definition hash **ok** |
+| staging E2E | passed on the 80-user stack (§28) and in the suite; not completable on the 5,000-user world (no STEP_UP decisions, §33) |
+
+`release verify` needs both git (for the commit) and the artefact paths (for the models).
+It was therefore run twice, on the host and in the `ops` container. Each reported the other's
+checks as `skipped`, never as passed, and together they cover every row.
+
+**Disk incident during the RC build.** The host disk filled up (115 MB free). Trivy's
+SBOM step then failed with "unable to get uncompressed layer", and signing stopped with
+nothing published. Build caches and obsolete images were removed, the image was rebuilt,
+and signing was repeated. The database and the service were unaffected, and the audit
+chain was unchanged at 168 events.
+
+**GitHub CI for `eee3d7e`:** run 36732640528; the result is recorded in the section below.
+
 
 ## 39. Known limitations (Stage 12)
 

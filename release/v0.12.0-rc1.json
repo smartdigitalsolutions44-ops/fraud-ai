@@ -1,0 +1,79 @@
+{
+  "manifest": {
+    "api_version": "fraud-api-1.0.0",
+    "audit_anchor": {
+      "anchor_number": 6,
+      "anchored_at": "2026-09-30T14:59:53.539085+00:00",
+      "destination": "s3://fraud-ai-audit-anchors/fraud-ai/audit-anchors/",
+      "head_sha256": "eb223273177263a3c97566f79068ad562a5b4fdf30919cd23ec4c6390dd7f043",
+      "key_id": "ed25519:a60636049bc21345",
+      "sequence": 169
+    },
+    "code_head_revision": "0010",
+    "container_image": {
+      "digest": "sha256:24876e735c224d6e96d89915b895ae86a7dc295d114ad9bda67d1c9806e3bc7b"
+    },
+    "created_at": "2026-09-30T14:59:56+00:00",
+    "feature_version": "fraud-features-1.0.0",
+    "git_commit": "eee3d7e5b7c38db07bfbfcf824927b59eded779a",
+    "image_evidence": {
+      "digest": "sha256:24876e735c224d6e96d89915b895ae86a7dc295d114ad9bda67d1c9806e3bc7b",
+      "image": "localhost:5000/fraud-ai",
+      "provenance_predicate_type": "https://slsa.dev/provenance/v1",
+      "provenance_ref": "localhost:5000/fraud-ai:sha256-24876e735c224d6e96d89915b895ae86a7dc295d114ad9bda67d1c9806e3bc7b.att",
+      "provenance_sha256": "d707596b34d91da52b9990ecace36175e8d1e68f71a0b407a2536133aa59c091",
+      "sbom_ref": "localhost:5000/fraud-ai:sha256-24876e735c224d6e96d89915b895ae86a7dc295d114ad9bda67d1c9806e3bc7b.att",
+      "sbom_sha256": "04a041b9a2a31ad21e352826635c7aaba09cdf71d9d357c077133506b583017c",
+      "signature_ref": "localhost:5000/fraud-ai:sha256-24876e735c224d6e96d89915b895ae86a7dc295d114ad9bda67d1c9806e3bc7b.sig",
+      "signing_key_fingerprint": "sha256:7102b3e8b548ccf2ce4c3157139ebed0e7899cef6613f105db50036eae6d1b5d",
+      "signing_key_ref": "hashivault://fraud-ai-image"
+    },
+    "manifest_version": 2,
+    "migration_revision": "0010",
+    "models": [
+      {
+        "artifact_sha256": "9c1a677cf4e30d1dfef226dab35b500af894ed8562752d869ebe2447671040a4",
+        "feature_version": "fraud-features-1.0.0",
+        "model_id": "703ecb4b-04ce-48f2-a9c8-1d69ebf883fc",
+        "ref": "gradient-boosting-1.0.0",
+        "signature": {
+          "algorithm": "ed25519",
+          "key_id": "ed25519:0faa92798218a66a",
+          "signature": "ZQk8oOdnUoMkmrsoWXwE0Wvtqjk8YXTyrOn0wnZ0v3he92f6ztbGvUVweLz-rmh4KBKxZDM2ZDBdw-HY6D8TAg"
+        }
+      },
+      {
+        "artifact_sha256": "b98bbdf26d8ce4bc7d9d959e9271ee771a68f3cb65805c8f9b11deb8554f6fb7",
+        "feature_version": "fraud-features-1.0.0",
+        "model_id": "af5cb479-281a-45fc-b299-4bc5b3e8b8cb",
+        "ref": "logistic-regression-1.0.0",
+        "signature": {
+          "algorithm": "ed25519",
+          "key_id": "ed25519:0faa92798218a66a",
+          "signature": "omGcPOaDN0nKlTh1GT-tkxOzjRt2gqzTLJBrLFU_yHit2jHTeM0SrOzDgv0407iAzuNtQtISVmbwRh85T8RICA"
+        }
+      }
+    ],
+    "package_version": "0.1.0",
+    "policy": {
+      "definition_sha256": "07587d7d4b05890a20b20c02d2e7c821a3e8347e96fa9c0d3647023aa1f322d4",
+      "deployment": 1,
+      "policy_version": "risk-policy-1.0.0",
+      "shadow_policies": [
+        "risk-policy-1.1.0"
+      ]
+    },
+    "product": "fraud-ai",
+    "sbom": {
+      "path": "fraud-ai.cdx.json",
+      "sha256": "ccde3045019c73b5787ce7e7035cf8e596034854a9a31c14fc10d62c54b271cc"
+    },
+    "sequence_version": "fraud-sequence-1.0.0"
+  },
+  "signature": {
+    "algorithm": "ed25519",
+    "key_id": "ed25519:f8c5a75d57420bc0",
+    "purpose": "release",
+    "signature": "orxKjXUB_UYpvqtuECvstNAeYoBgandrOA4Q6CPZoTmv1uvFHKds_EvPYPCfvqr-P27T9a1sQzwCt0ARyS4TBA"
+  }
+}
