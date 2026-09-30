@@ -17,6 +17,13 @@ on:
 permissions:
   contents: read
 
+# `shell: bash` makes GitHub run every step with `bash -eo pipefail`. The implicit default
+# is `bash -e` WITHOUT pipefail, under which `scanner | tee log` passes even when the
+# scanner fails (found by the Stage 12 tampered-image check).
+defaults:
+  run:
+    shell: bash
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -221,6 +228,9 @@ jobs:
           rm -rf "$keydir"
       - name: Verify image signature, digest, provenance and SBOM; a tampered image must fail
         run: |
+          # Explicit (as well as the workflow default): without pipefail, `verify | tee`
+          # returns tee's status, so a refused tampered image would look accepted.
+          set -o pipefail
           verify() {
             docker run --rm --network host --read-only --tmpfs /tmp -e HOME=/tmp \
               -v /usr/local/bin/cosign:/usr/local/bin/cosign:ro \
@@ -232,7 +242,7 @@ jobs:
           docker tag fraud-ai:tampered localhost:5000/fraud-ai:tampered
           docker push -q localhost:5000/fraud-ai:tampered >/dev/null
           tampered="$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' \
-            localhost:5000/fraud-ai:tampered | grep '^localhost:5000/fraud-ai@' | head -1)"
+            localhost:5000/fraud-ai:tampered | grep -m1 '^localhost:5000/fraud-ai@')"
           if verify --image "$tampered" | tee container-results/image-verify-tampered.txt; then
             echo "FAIL: a tampered image verified" >&2; exit 1
           fi

@@ -1388,7 +1388,29 @@ nothing published. Build caches and obsolete images were removed, the image was 
 and signing was repeated. The database and the service were unaffected, and the audit
 chain was unchanged at 168 events.
 
-**GitHub CI for `eee3d7e`:** run 36732640528; the result is recorded in the section below.
+**GitHub CI.** Run 36732640528 (`eee3d7e`) was cancelled by the next push. Run
+36733557148 (`7c338e0`, the same code plus docs) had these results:
+
+* lint and security: green;
+* container job:
+  * the full PyTorch image was built, checked and smoke-tested, and Trivy ran;
+  * the image was signed with an **ephemeral** cosign key (no repository key is
+    configured), with SLSA provenance and SBOM attestations;
+  * the genuine image **verified**: key, signature, provenance and SBOM ok;
+  * the tampered image was **refused**: digest, signature, provenance and SBOM all
+    `FAILED`;
+  * **the step still failed:** it printed "FAIL: a tampered image verified".
+
+**Cause: a CI shell bug, not a verification bug.** GitHub runs steps as `bash -e`
+*without* `pipefail` unless a shell is named, so `verify … | tee log` returned `tee`'s
+status. The same flaw meant that `pip-audit | tee`, `bandit | tee`, `detect-secrets | tee`
+and `gitleaks | tee` in the security job **could not have failed the build**. Their
+findings were genuinely zero here, and the local runs agree, but the gate was weaker than
+documented since Stage 10.
+
+**Fixed:** a workflow-wide `defaults.run.shell: bash` (GitHub then uses `bash -eo
+pipefail`), an explicit `set -o pipefail` in the verify step, and `grep -m1` instead of
+`grep | head -1`. The result of the run with the fix follows.
 
 
 ## 39. Known limitations (Stage 12)
