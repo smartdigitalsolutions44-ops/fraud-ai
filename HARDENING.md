@@ -1410,7 +1410,20 @@ documented since Stage 10.
 
 **Fixed:** a workflow-wide `defaults.run.shell: bash` (GitHub then uses `bash -eo
 pipefail`), an explicit `set -o pipefail` in the verify step, and `grep -m1` instead of
-`grep | head -1`. The result of the run with the fix follows.
+`grep | head -1`.
+
+**Run 36736566495 (`e5d28a3`, with the fix):**
+
+* test, lint and container: **green**. The genuine image verified, and the tampered
+  image was refused on digest, signature, provenance and SBOM. The step now reports this
+  correctly.
+* security: **failed at detect-secrets**. This was the first time the gate *could* fail.
+  It flagged 11 high-entropy strings in `release/v0.12.0-rc1.json`, committed after the
+  local scan: SHA-256 digests, Ed25519 signatures and ids, all public. Each was reviewed;
+  no key or credential is present. They were added to `.secrets.baseline` (11 added, 0
+  removed), and the scan exits 0.
+
+The result of the next run follows.
 
 
 ## 39. Known limitations (Stage 12)
