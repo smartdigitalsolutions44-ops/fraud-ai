@@ -1423,7 +1423,21 @@ pipefail`), an explicit `set -o pipefail` in the verify step, and `grep -m1` ins
   no key or credential is present. They were added to `.secrets.baseline` (11 added, 0
   removed), and the scan exits 0.
 
-The result of the next run follows.
+**Run 36743427409 (`7724b7f`): all four jobs green**, with every step now gating
+(`pipefail`):
+
+* lint: ruff, format, mypy;
+* security: pip-audit, bandit, detect-secrets and gitleaks (full history), plus the SBOM;
+* container: the full PyTorch image built, checked and smoke-tested with the GRU; Trivy
+  ran; cosign sign + SLSA provenance + SBOM attestations with an ephemeral key; the
+  genuine image **verified**, the tampered image **refused**;
+* test: SQLite, PostgreSQL and Redis, least-privilege roles and the staging E2E, with
+  the 95 % coverage gate.
+
+The commits after `eee3d7e` (`7c338e0`, `e5d28a3`, `7724b7f`) change only CI
+configuration, the reviewed secrets baseline and documentation; the application code is
+identical. **`v0.12.0-rc1` is therefore tagged on `eee3d7e`**, the commit that the signed
+manifest and the image provenance name.
 
 
 ## 39. Known limitations (Stage 12)
