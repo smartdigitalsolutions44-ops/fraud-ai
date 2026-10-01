@@ -208,18 +208,13 @@ export function ReviewQueue() {
             </table>
           </div>
         ) : (
-          <Empty>
-            {filtered ? (
-              "No items match these filters."
-            ) : status === "open" ? (
-              <>
-                <div className="label" style={{ color: "var(--text-1)", marginBottom: 6 }}>No cases require review</div>
-                System monitoring remains active.
-              </>
-            ) : (
-              "No items."
-            )}
-          </Empty>
+          filtered ? (
+            <Empty title="No items match these filters">Clear a filter to see the rest of the queue.</Empty>
+          ) : status === "open" ? (
+            <Empty title="No cases require review">Monitoring remains active. New review items appear here within seconds.</Empty>
+          ) : (
+            <Empty title="No items">Nothing with this status.</Empty>
+          )
         )}
       </Panel>
     </div>

@@ -47,20 +47,24 @@ Routes:
   scores the catalogue case through the real service, server-side. `reset` needs the typed
   `RESET DEMO` phrase and goes to the supervisor.
 
-## 3. The demo supervisor (`scripts/demo.mjs`)
+## 3. The supervisor (Stage 14: `scripts/localrun/`)
 
 RESET DEMO has to stop the service, rebuild the database and start the service again. A
-web server should not do that itself. The supervisor is a small Node process started by
-`npm run demo`. It:
+web server should not do that itself. Since Stage 14 one supervisor serves `sentinel-start`,
+`npm run demo` (now a thin wrapper, `scripts/demo.mjs`) and the end-to-end tests. It:
 
-* starts `fraud-ai demo start` and the console;
-* serves `GET /status` and `POST /reset` on 127.0.0.1, on a random port, behind a random
-  bearer token that only the console server knows;
+* starts the service and the console, each under a lifeline that stops it if the supervisor
+  disappears, and records each with its PID and creation time;
+* serves `GET /status` and `POST /reset` (Demo only), plus `POST /shutdown`, on 127.0.0.1,
+  on a random port, behind a random bearer token that only the console server and the local
+  tooling (a 0600 file) know. The `/status` and `/reset` protocol is unchanged from Stage 13;
 * runs a reset as stop → `fraud-ai demo reset` → start. `fraud-ai demo reset` is the
   existing guarded command: it refuses unless DEMO_MODE, the development profile, a
   `*_demo.db` database and the demo marker all hold;
 * rewrites the credential files after a reset, because the demo world issues a new key;
-* redacts API keys from everything it logs.
+* redacts API keys from everything it logs (`.runtime/logs/`).
+
+See [../LOCAL_SETUP.md](../LOCAL_SETUP.md) and the repository's ARCHITECTURE.md §19.
 
 ## 4. Client side (`src/lib/api`, `src/features`, `src/components`)
 

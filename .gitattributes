@@ -1,0 +1,3 @@
+# Stage 14: shell scripts must keep LF line endings (Windows checkouts included);
+# PowerShell scripts work with either.
+*.sh text eol=lf

@@ -11,12 +11,12 @@ export function StatusBar({ session, system }: { session?: SessionT; system?: Sy
   return (
     <footer className="statusbar" aria-label="Status">
       <LiveIndicator state={live.state} ageMs={live.ageMs} />
-      <span>console {session?.console_version ?? "—"}</span>
-      <span>api {health.data?.api_version ?? system?.api_version ?? "—"}</span>
+      <span className="sb-optional">console {session?.console_version ?? "—"}</span>
+      <span className="sb-optional">api {health.data?.api_version ?? system?.api_version ?? "—"}</span>
       <span>policy {system?.policy?.policy_version ?? "—"}</span>
       <span>model {system?.policy?.primary_model ?? "—"}</span>
-      <span style={{ marginLeft: "auto" }}>
-        <kbd>J</kbd>/<kbd>K</kbd> move · <kbd>Enter</kbd> open · <kbd>Esc</kbd> close · <kbd>R</kbd> refresh / investigate · <kbd>Ctrl K</kbd> commands
+      <span className="sb-hints">
+        <kbd>J</kbd>/<kbd>K</kbd> move · <kbd>Enter</kbd> open · <kbd>Esc</kbd> close · <kbd>R</kbd> resolve (in a case) / refresh · <kbd>Ctrl K</kbd> commands
       </span>
     </footer>
   );

@@ -5,7 +5,34 @@ is not a web application: Stage 9 adds a machine-to-machine HTTP API. Stage 13 a
 **SENTINEL**, a separate analyst console (`sentinel-console/`) that is a *client* of that
 API.
 
-The current release covers **Stages 1 to 13** (Stage 12 release candidate `v0.12.0-rc1`):
+## Quick start (synthetic demo, no Docker needed)
+
+Windows 11 (PowerShell):
+
+```powershell
+git clone https://github.com/smartdigitalsolutions44-ops/fraud-ai.git
+cd fraud-ai
+.\scripts\setup-local.ps1
+.\scripts\sentinel-start.ps1 -Mode Demo     # opens http://127.0.0.1:3000
+.\scripts\sentinel-stop.ps1
+```
+
+Linux / macOS:
+
+```bash
+git clone https://github.com/smartdigitalsolutions44-ops/fraud-ai.git
+cd fraud-ai
+./scripts/setup-local.sh
+./scripts/sentinel-start.sh --mode demo        # opens http://127.0.0.1:3000
+./scripts/sentinel-stop.sh
+```
+
+Needs Python 3.11+, Node.js 22 LTS and Git. The first start builds the synthetic demo world
+(a few minutes); later starts take seconds. Status, reset, Dev mode (Docker PostgreSQL and
+Redis), logs and troubleshooting: [LOCAL_SETUP.md](LOCAL_SETUP.md). A timed interview
+walkthrough: [DEMO.md](DEMO.md#interview-walkthrough).
+
+The current release covers **Stages 1 to 14** (Stage 12 release candidate `v0.12.0-rc1`):
 
 * **Stage 1:** the software core, the event architecture, the fraud database (PostgreSQL in
   production, SQLite for local use), migrations, synthetic data and the CLI.
@@ -128,6 +155,18 @@ The current release covers **Stages 1 to 13** (Stage 12 release candidate `v0.12
   scoring, policy or review logic changed.
 
   ![SENTINEL case workspace](sentinel-console/docs/screenshots/04-case.png)
+
+* **Stage 14: local installation and product polish.**
+  * One setup command and one start command on Windows (PowerShell) and Linux/macOS, with
+    Demo, Dev and StagingLike modes, status, stop and a guarded demo reset
+    ([LOCAL_SETUP.md](LOCAL_SETUP.md)). The tooling only ever stops what it started.
+  * Pre-launch checks (database, migrations, signed models, ports) and a console start-up
+    sequence tied line by line to real readiness data.
+  * A polished case workspace, System and Metrics pages, presentation mode, accessibility
+    (WCAG 2.1 AA audit in the end-to-end test), and failure and recovery handling.
+  * Native Windows support needed two narrow, Windows-only branches in key and model-file
+    loading; the trade-off is documented in [TRUST_CHAIN.md](TRUST_CHAIN.md#windows).
+    No scoring, policy, decision or API changes.
 
 Decisions are **internal policy outputs** (`ALLOW`, `ALLOW_WITH_MONITORING`,
 `STEP_UP_AUTHENTICATION`, `MANUAL_REVIEW`, `TEMPORARY_BLOCK`). No payment or authentication
@@ -285,8 +324,9 @@ fraud-ai privacy export <customer-ref> --out subject.json --operator-key sec.pem
 fraud-ai release verify-image image-evidence.json --key image.pub --commit <sha>
 DEMO_MODE=true fraud-ai demo start ; fraud-ai demo run            # the 9-step walkthrough
 
-# Stage 13 - the SENTINEL analyst console (see sentinel-console/README.md)
-cd sentinel-console && npm ci && npm run demo                     # demo world + service + console on :3000
+# Stages 13-14 - the SENTINEL analyst console (LOCAL_SETUP.md, sentinel-console/README.md)
+./scripts/setup-local.sh && ./scripts/sentinel-start.sh           # demo world + service + console on :3000
+./scripts/sentinel-status.sh ; ./scripts/sentinel-stop.sh         # Windows: the .ps1 equivalents
 python -m fraud_ai --help        # equivalent entry point
 ```
 

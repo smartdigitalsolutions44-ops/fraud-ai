@@ -575,8 +575,49 @@ worker 1..N ─┬─► PostgreSQL  durable: events, assessments, reviews, labe
   (`fraud_ai/service/analyst.py`, scope `analyst:read`) join what the console needs. They
   write nothing and return pseudonymous references only. They describe reasons only from
   the service's own catalogue and never compute a combined model score.
-* **Demo reset** goes through a local supervisor (`scripts/demo.mjs`) that runs the
-  existing guarded `fraud-ai demo reset`. The console never touches a database.
+* **Demo reset** goes through the local supervisor (Stage 14: `scripts/localrun/`), which
+  runs the existing guarded `fraud-ai demo reset`. The console never touches a database.
 
 Details: [sentinel-console/ARCHITECTURE.md](sentinel-console/ARCHITECTURE.md) and
 [sentinel-console/DESIGN_SYSTEM.md](sentinel-console/DESIGN_SYSTEM.md).
+
+## 19. The local runtime (Stage 14)
+
+```
+ Browser
+   │  http://127.0.0.1:3000 (same origin only)
+   ▼
+ SENTINEL console server (Next.js) ── holds the API key and v2 signing secret (0600 files)
+   │  signed v2 requests, allow-listed routes
+   ▼
+ Fraud API (fraud-ai service run) ── 127.0.0.1:8080
+   │
+   ├── Demo: SQLite demo world (data/demo) · in-memory state · signed models
+   ├── Dev:  PostgreSQL 16 + Redis 7 (Docker, compose.local.yml) · signed models
+   └── optional local LLM (analyst assistance only)
+
+ sentinel-start ─► supervisor (scripts/localrun/supervisor.py, detached)
+                     ├─ lifeline ─► fraud API      .runtime/logs/api.log
+                     ├─ lifeline ─► console        .runtime/logs/console.log
+                     └─ control endpoint 127.0.0.1:<random>, 256-bit token (0600)
+                          GET /status · POST /shutdown · POST /reset (Demo only)
+```
+
+* **One implementation.** The PowerShell and shell wrappers in `scripts/` only find the
+  interpreter; `scripts/localrun/` (Python, standard library plus `psutil`) does the work:
+  configuration (`sentinel.local.env`), dependency fingerprints, the pre-launch checks
+  (`preflight.py` reuses the service's own migration, policy and verified model loading),
+  ports, process records and logs. `npm run demo` and the Playwright tests use it too.
+* **Ownership.** Every process it starts is recorded with its PID and creation time in
+  `.runtime/pids/`; only a record whose process still has that creation time is ever
+  signalled. Containers are addressed only by their compose project. Each service runs
+  under a lifeline that stops it if the supervisor disappears.
+* **Modes** set the service environment explicitly (`modes.py`) and scrub inherited
+  `DATABASE_URL`, `REDIS_URL`, `STATE_BACKEND`, `DEMO_MODE` and `ENVIRONMENT`, so a stray
+  variable can never point a demo at another database. StagingLike runs the unchanged
+  `deploy/staging/stack.sh`.
+* **Backend change for Windows.** Key and model-file loading gained Windows-only branches
+  (`fraud_ai/utils/winfs.py`); see [TRUST_CHAIN.md](TRUST_CHAIN.md#windows). Nothing else in
+  the backend changed in Stage 14.
+
+Details: [LOCAL_SETUP.md](LOCAL_SETUP.md).

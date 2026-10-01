@@ -80,3 +80,25 @@ export function money(minor: number, currency: string): string {
     return `${(minor / 100).toFixed(2)} ${currency}`;
   }
 }
+
+/**
+ * Signed offset of ``iso`` from ``ref`` for timelines: "−6d 2h", "−4h 12m", "−3m", "+40s".
+ * Zero is "same time". Both are stored event times; nothing is estimated.
+ */
+export function offset(iso: string, ref: string): string {
+  const diff = Math.round((Date.parse(iso) - Date.parse(ref)) / 1000);
+  if (!Number.isFinite(diff)) return "";
+  if (diff === 0) return "same time";
+  const sign = diff < 0 ? "−" : "+";
+  let s = Math.abs(diff);
+  const d = Math.floor(s / 86_400);
+  s -= d * 86_400;
+  const h = Math.floor(s / 3_600);
+  s -= h * 3_600;
+  const m = Math.floor(s / 60);
+  s -= m * 60;
+  if (d) return `${sign}${d}d${h ? ` ${h}h` : ""}`;
+  if (h) return `${sign}${h}h${m ? ` ${m}m` : ""}`;
+  if (m) return `${sign}${m}m`;
+  return `${sign}${s}s`;
+}

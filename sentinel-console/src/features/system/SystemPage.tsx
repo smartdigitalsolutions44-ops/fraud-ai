@@ -6,13 +6,32 @@ import { LiveIndicator } from "@/components/LiveIndicator";
 import { Panel } from "@/components/Panel";
 import { RiskBadge } from "@/components/RiskBadge";
 import { ErrorState, Notice, SkeletonRows } from "@/components/States";
+import { StatusBadge } from "@/components/StatusBadge";
 import { SystemStatus } from "@/components/SystemStatus";
 import { POLL } from "@/lib/api/queries";
 import type { SystemT } from "@/lib/api/schemas";
 import { shortId, utcDateTime } from "@/lib/format";
 import { useLiveness } from "@/lib/hooks/useLiveness";
 
+import type { HealthGroup } from "./groups";
 import { useSystemStatus } from "./useSystemStatus";
+
+/** The seven operational groups, each with its state and the reason for it. */
+function GroupRail({ groups }: { groups: HealthGroup[] }) {
+  return (
+    <ul className="ops-rail" aria-label="System groups" data-testid="ops-rail">
+      {groups.map((g) => (
+        <li key={g.id} className="ops-tile" data-group={g.id} data-state={g.state}>
+          <div className="ops-tile-head">
+            <span className="ops-title">{g.title}</span>
+            <StatusBadge kind="check" state={g.state} />
+          </div>
+          <p className="ops-cause">{g.cause}</p>
+        </li>
+      ))}
+    </ul>
+  );
+}
 
 function YesNo({ value, good = true }: { value: boolean | null | undefined; good?: boolean }) {
   if (value === null || value === undefined) return <Badge tone="neutral">Unknown</Badge>;
@@ -109,7 +128,7 @@ export function SystemPage() {
       <div className="page-head">
         <div>
           <h2>System</h2>
-          <p>Service readiness, models, the active risk policy and audit integrity, as reported by the fraud service.</p>
+          <p>Security operations view: every state below is what the fraud service reported. The console cannot change policy, models or keys.</p>
         </div>
         <LiveIndicator state={live.state} ageMs={live.ageMs} />
       </div>
@@ -119,11 +138,12 @@ export function SystemPage() {
           {session.problems.join("; ")}
         </Notice>
       ) : null}
+      <GroupRail groups={status.groups} />
       <div className="grid grid-3">
-        <Panel title="Health" flush meta={ready ? <Badge tone={ready.status === "ready" ? "green" : "red"}>{ready.status}</Badge> : null}>
+        <Panel title="Readiness checks" flush meta={ready ? <Badge tone={ready.status === "ready" ? "green" : "red"}>{ready.status}</Badge> : null}>
           <SystemStatus checks={status.checks} />
         </Panel>
-        <Panel title="Service">
+        <Panel title="Service and data">
           {sys && ready ? (
             <dl className="kv">
               <Pair k="API">
@@ -162,7 +182,7 @@ export function SystemPage() {
             <SkeletonRows rows={6} />
           )}
         </Panel>
-        <Panel title="Security controls">
+        <Panel title="Trust controls">
           {sys ? (
             <dl className="kv">
               <Pair k="Signed requests">
@@ -268,7 +288,7 @@ export function SystemPage() {
           )}
         </Panel>
         <div className="grid" style={{ alignContent: "start" }}>
-          <Panel title="Audit integrity">
+          <Panel title="Audit">
             {sys ? (
               <dl className="kv">
                 <Pair k="Hash chain">
@@ -308,7 +328,7 @@ export function SystemPage() {
               <SkeletonRows rows={4} />
             )}
           </Panel>
-          <Panel title="Analyst assistance (LLM)" note={sys?.llm.note}>
+          <Panel title="Analyst layer: assistance" note={sys?.llm.note}>
             {sys ? (
               <dl className="kv">
                 <Pair k="Runtime">

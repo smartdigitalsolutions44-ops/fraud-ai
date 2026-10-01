@@ -13,7 +13,16 @@ deserialise. Someone able to write to the model directory could swap a file in b
 3. the loaders deserialise from the same in-memory bytes (``io.BytesIO``). Nothing is read
    from disk again.
 
-Symlinks, sub-directories, device files and oversized artefacts are refused. The digest
+Symlinks, sub-directories, device files and oversized artefacts are refused.
+
+**Windows** (Stage 14) cannot open a directory handle or open relative to one, so
+:meth:`ArtifactBytes.read` takes :func:`_read_windows` there instead: links, junctions and
+hard links are refused (:mod:`fraud_ai.utils.winfs`), each file is opened by path and
+checked to be the file inspected, and a file that changes while being read is refused.
+Step 2 and 3 are identical. The weaker guarantee is the check-to-open window; see
+TRUST_CHAIN.md (Windows). POSIX systems never take this path.
+
+The digest
 formula is unchanged: ``sha256("".join(f"{name}:{sha256(file)}\\n" for name in names))``.
 Digests recorded before Stage 11 therefore still verify.
 """
@@ -30,6 +39,7 @@ from pathlib import Path
 from typing import Any
 
 from fraud_ai.core.exceptions import FraudAIError
+from fraud_ai.utils import winfs
 
 MAX_ARTIFACT_BYTES = 1024 * 1024 * 1024  # 1 GiB per artefact directory
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
@@ -48,6 +58,8 @@ class ArtifactBytes:
 
     @classmethod
     def read(cls, directory: Path, *, limit: int = MAX_ARTIFACT_BYTES) -> ArtifactBytes:
+        if winfs.IS_WINDOWS:
+            return cls(directory, _read_windows(directory, limit))
         try:
             dir_fd = os.open(directory, os.O_RDONLY | _DIRECTORY | _NOFOLLOW)
         except OSError as exc:
@@ -122,6 +134,34 @@ class ArtifactBytes:
             raise ArtifactDigestError(
                 f"{self.directory}: digest {actual[:12]} != recorded {expected[:12]}"
             )
+
+
+def _read_windows(directory: Path, limit: int) -> dict[str, bytes]:
+    """The Windows equivalent of the POSIX read in :meth:`ArtifactBytes.read`."""
+    try:
+        winfs.check_directory(directory)
+        names = sorted(os.listdir(directory))
+    except OSError as exc:
+        raise ArtifactReadError(f"cannot open artefact directory {directory}: {exc}") from None
+    files: dict[str, bytes] = {}
+    total = 0
+    for name in names:
+        path = directory / name
+        try:
+            handle, info = winfs.open_checked(path)
+        except OSError as exc:
+            raise ArtifactReadError(
+                f"{path}: refused ({exc}); artefacts contain regular files only"
+            ) from None
+        with handle:
+            total += info.st_size
+            if total > limit:
+                raise ArtifactReadError(f"{directory} exceeds {limit} bytes")
+            data = handle.read(limit - total + info.st_size + 1)
+        if len(data) != info.st_size or not winfs.unchanged_since(path, info):
+            raise ArtifactReadError(f"{path} changed while being read")
+        files[name] = data
+    return files
 
 
 class ArtifactDigestError(ArtifactReadError):

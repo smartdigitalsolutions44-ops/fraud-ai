@@ -121,7 +121,7 @@ export function Investigations() {
             </table>
           </div>
         ) : (
-          <Empty>No review items yet.</Empty>
+          <Empty title="No review items yet">Cases the policy sends for review are listed here.</Empty>
         )}
       </Panel>
     </div>

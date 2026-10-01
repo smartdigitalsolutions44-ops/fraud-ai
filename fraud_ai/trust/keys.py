@@ -50,6 +50,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 )
 
 from fraud_ai.core.exceptions import FraudAIError
+from fraud_ai.utils import winfs
 
 PURPOSES = ("model", "audit", "release")
 ALGORITHM = "ed25519"
@@ -172,7 +173,25 @@ def write_private_key(pair: KeyPair, path: Path) -> None:
 
 def load_private_key(path: Path) -> KeyPair:
     """A private key file: a regular file (no symlink), at most 4 KiB, not readable by group
-    or others, holding an Ed25519 PKCS#8 PEM."""
+    or others, holding an Ed25519 PKCS#8 PEM.
+
+    On Windows (Stage 14) the permission bits Python reports do not describe NTFS access
+    control, so that one check is skipped there; NTFS permissions (normally the user
+    profile) are the control instead. Links, junctions and hard links are refused, and
+    the size and format checks are unchanged. See TRUST_CHAIN.md (Windows)."""
+    data = _read_key_windows(path) if winfs.IS_WINDOWS else _read_key_posix(path)
+    if len(data) > MAX_KEY_FILE_BYTES:
+        raise TrustError(f"{path} is too large for a private key")
+    try:
+        key = serialization.load_pem_private_key(data, password=None)
+    except (ValueError, TypeError):
+        raise TrustError(f"{path} is not an unencrypted PKCS#8 PEM private key") from None
+    if not isinstance(key, Ed25519PrivateKey):
+        raise TrustError(f"{path} is not an Ed25519 key")
+    return KeyPair(key)
+
+
+def _read_key_posix(path: Path) -> bytes:
     try:
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     except OSError as exc:
@@ -183,16 +202,16 @@ def load_private_key(path: Path) -> KeyPair:
             raise TrustError(f"{path} is not a regular file")
         if info.st_mode & 0o077:
             raise TrustError(f"{path} must not be readable by group or others (chmod 600)")
-        data = handle.read(MAX_KEY_FILE_BYTES + 1)
-    if len(data) > MAX_KEY_FILE_BYTES:
-        raise TrustError(f"{path} is too large for a private key")
+        return handle.read(MAX_KEY_FILE_BYTES + 1)
+
+
+def _read_key_windows(path: Path) -> bytes:
     try:
-        key = serialization.load_pem_private_key(data, password=None)
-    except (ValueError, TypeError):
-        raise TrustError(f"{path} is not an unencrypted PKCS#8 PEM private key") from None
-    if not isinstance(key, Ed25519PrivateKey):
-        raise TrustError(f"{path} is not an Ed25519 key")
-    return KeyPair(key)
+        handle, _ = winfs.open_checked(path)
+    except OSError as exc:
+        raise TrustError(f"cannot open private key file {path}: {exc}") from None
+    with handle:
+        return handle.read(MAX_KEY_FILE_BYTES + 1)
 
 
 @dataclass(frozen=True)

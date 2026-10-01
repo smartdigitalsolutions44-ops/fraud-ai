@@ -1,6 +1,9 @@
 # SENTINEL — Fraud Intelligence & Response
 
-**SENTINEL // Analyst Console** is the analyst interface for the `fraud-ai` service (Stage 13).
+**SENTINEL // Analyst Console** is the analyst interface for the `fraud-ai` service (Stages
+13 and 14). To run the whole product on your machine, use the repository's one-command
+setup and start ([LOCAL_SETUP.md](../LOCAL_SETUP.md)); this README is for working on the
+console itself.
 It is a Next.js, React and TypeScript application. It is a **client** of the existing
 `/v1` API and duplicates none of the backend's logic: no scoring, risk policy, model
 inference, review logic or authentication happens in the console.
@@ -22,14 +25,14 @@ test (`npm run screenshots`).
 
 | Page | What it shows | Source |
 |---|---|---|
-| Start-up | the seven readiness checks: CHECKING, then ONLINE / DEGRADED / OFFLINE (or NOT USED) | `/v1/ready`, `/v1/analyst/system` |
+| Start-up | seven lines (fraud service, trust chain, data plane, model signatures, risk policy, audit chain, analyst console), each CHECKING until its real check answers, then ONLINE / DEGRADED / OFFLINE (or NOT USED); leaves by itself only when everything is online | `/v1/ready`, `/v1/analyst/system`, `/api/session` |
 | Overview | assessments, review queue, step-up, temporary blocks, fallbacks, latency, primary model, decision distribution, recent flagged assessments, model disagreement, backlog, system health | `/v1/analyst/summary`, `/feed`, `/system` |
 | Live Feed | every assessment, newest first; polled every 5 s; can be paused | `/v1/analyst/feed` |
 | Review Queue | filters (decision, reason, age, step-up, safe ID) and sorts (priority, newest, oldest); opens the case workspace | `/v1/analyst/reviews` |
-| Case workspace | timeline (left), evidence, models, indicators and investigation (centre), analyst decision, step-up and audit trail (right) | `/v1/analyst/cases/{id}` |
+| Case workspace | a one-line case summary; timeline with day separators, offsets from the case event and marked signals (left); reasons with title, severity, description and evidence, primary vs shadow models, indicators, and the investigation in three parts (observed evidence, interpretation, limitations) (centre); analyst decision, step-up and audit trail (right) | `/v1/analyst/cases/{id}` |
 | Investigations | lookup by case, assessment or event ID; recent cases | `/v1/analyst/search` |
 | Metrics | operational metrics and an accessible hourly chart | `/v1/analyst/summary` |
-| System | readiness, models and signatures, active policy and bands, security controls, audit chain and anchor, LLM runtime | `/v1/analyst/system`, `/v1/ready` |
+| System | seven groups (Service, Trust, Data, Models, Policy, Audit, Analyst layer) with state and cause; readiness, models and signatures, active policy and bands, trust controls, audit chain and anchor, LLM runtime | `/v1/analyst/system`, `/v1/ready` |
 | Demo (DEMO MODE only) | the ten deterministic scenarios, scoring them, and a guarded RESET DEMO | the demo catalogue, `/v1/score` (server-side), `fraud-ai demo reset` |
 
 What it deliberately does **not** do:
@@ -46,25 +49,25 @@ What it deliberately does **not** do:
 
 ## Running it
 
+From the repository root, after `setup-local` (see [LOCAL_SETUP.md](../LOCAL_SETUP.md)):
+
 ```bash
-# The demo: the synthetic world, the real service and the console in DEMO MODE
-cd sentinel-console
-npm ci
-npm run demo            # needs the Python package: pip install -e ".[dev]" at the repo root
-# → http://127.0.0.1:3000
+./scripts/sentinel-start.sh --mode demo     # production build, DEMO MODE  (Windows: .\scripts\sentinel-start.ps1)
+./scripts/sentinel-start.sh --mode dev      # next dev with hot reload, Docker PostgreSQL + Redis
+cd sentinel-console && npm run demo         # Demo mode attached to this terminal (Ctrl+C stops it)
 ```
 
-`npm run demo` runs `scripts/demo.mjs`, which:
+`npm run demo` runs `scripts/demo.mjs`, a thin wrapper over the shared tooling
+(`scripts/sentinel.py start --mode demo --foreground`). It accepts the Stage 13 options:
+`DEMO_ROOT`, `PYTHON`, `FRAUD_API_PORT`, `CONSOLE_PORT`, `CONSOLE_MODE=start` and
+`DEMO_RESET_ON_START=true`. The supervisor:
 
 1. runs the existing, guarded `fraud-ai demo reset` if no demo world exists;
-2. starts `fraud-ai demo start` on 127.0.0.1:8080;
+2. starts the service on 127.0.0.1:8080 with the demo world's configuration;
 3. starts the console in DEMO MODE on 127.0.0.1:3000, passing the demo API key through
    0600 files that only the console server reads;
-4. listens on a local control endpoint (random port, random bearer token). RESET DEMO
-   reaches it through the console server.
-
-Options: `DEMO_ROOT`, `PYTHON`, `FRAUD_API_PORT`, `CONSOLE_PORT`, `CONSOLE_MODE=start`
-(serves `npm run build` output) and `DEMO_RESET_ON_START=true`.
+4. serves a local control endpoint (random port, random bearer token) that RESET DEMO
+   reaches through the console server.
 
 Against any other fraud-ai service:
 
@@ -119,14 +122,33 @@ refuses to rewrite a resolved outcome. The console shows that outcome as final.
 
 | Key | Action |
 |---|---|
-| <kbd>Ctrl</kbd>/<kbd>⌘</kbd> <kbd>K</kbd> | command palette: go to a page, look up an ID, refresh, density |
+| <kbd>Ctrl</kbd>/<kbd>⌘</kbd> <kbd>K</kbd> | command palette: go to a page, look up an ID, the demo scenarios (they open the Demo page), system status, refresh, compact density, presentation mode |
 | <kbd>J</kbd> / <kbd>K</kbd> | next / previous row. Inside a queue case: next / previous case |
 | <kbd>Enter</kbd> | open the selected row |
 | <kbd>Esc</kbd> | close a dialog, clear the selection, or return to the queue |
-| <kbd>R</kbd> | inside a case: run the investigation (analyst assistance; changes no decision). Elsewhere: refresh the data |
+| <kbd>R</kbd> | inside a case: open the resolve panel (brings the outcomes into view and focuses the first; **never** chooses or submits). Elsewhere: refresh the data |
 
 No single key performs an irreversible action. Resolutions and RESET DEMO always need a
-button and a confirmation. RESET DEMO also needs the typed phrase.
+button and a confirmation that says what will happen. RESET DEMO also needs the typed
+phrase. The investigation runs from its button only.
+
+## View preferences
+
+* **Compact density** (palette): tighter rows and spacing for long working sessions.
+* **Presentation mode** (palette): slightly larger text, build versions and keyboard hints
+  hidden, for a shared screen. System state (the status badge, DEMO MODE, every check) is
+  never hidden. "Presentation · exit" in the top bar turns it off.
+
+Both are remembered in this browser only.
+
+## Resilience
+
+* Polls pause in hidden tabs. A failing poll backs off (doubling, capped at 30 s, with
+  jitter); when the health check recovers, only the views that failed are re-run once.
+* Stale data is labelled stale; nothing old is shown as live.
+* Errors name what failed (fraud service, database, Redis, policy, scoring, permission,
+  rate limit with the retry time, missing case). An unavailable LLM never blocks case
+  review.
 
 ## Development
 
@@ -159,6 +181,21 @@ The tests (`tests/`) cover:
   * confirmation is required and a resolution submits once;
   * a resolved case is final;
   * the command palette holds no dangerous commands.
+* **Stage 14 (`tests/stage14.test.tsx`):**
+  * the seven health groups: CHECKING before any answer, causes from the service, Redis
+    and relaxed trust settings as DEGRADED, a signature mismatch as OFFLINE, and an
+    unreachable service never shown healthy from an older answer;
+  * readable reason titles, severity only as stored ("Not graded" otherwise);
+  * primary vs shadow models, no vote; the case summary; timeline offsets;
+  * polling backoff (capped, jittered);
+  * R opens the resolve panel and sends nothing; the confirmation says what will happen;
+  * analyst assistance split into observed evidence, interpretation and limitations.
+* **Bundle:** after a build, no credential, signing code, private key, database or Redis
+  URL, Vault token or demo/Dev credential file name is in the browser bundle.
+* **End to end (`e2e/`):** the analyst flow on a freshly reset demo world against the real
+  service, with an axe-core WCAG 2.1 A/AA audit of five screens, the R key, and a clean
+  browser console (no errors or warnings) throughout. CI runs it in the `local-scripts`
+  job.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for how the console is built and
 [DESIGN_SYSTEM.md](DESIGN_SYSTEM.md) for the visual language.

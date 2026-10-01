@@ -3,6 +3,7 @@
 import { DECISION_ORDER, decisionLabel } from "@/lib/domain";
 import type { SummaryT } from "@/lib/api/schemas";
 import { utcDate, utcTime } from "@/lib/format";
+import { useWidth } from "@/lib/hooks/useWidth";
 
 const COLOR: Record<string, string> = {
   ALLOW: "var(--green)",
@@ -25,15 +26,17 @@ export function HourlyChart({ series: reported, hours, end }: { series: SummaryT
     const h = endHour - hours + 1 + i;
     return byHour.get(h) ?? { hour: new Date(h * 3_600_000).toISOString(), by_decision: {} };
   });
-  const W = 960;
-  const H = 220;
+  const { ref, width } = useWidth<HTMLElement>(960);
+  const W = Math.max(320, width);
+  const H = 200;
   const pad = { l: 36, r: 8, t: 8, b: 24 };
   const totals = series.map((s) => Object.values(s.by_decision).reduce((a, b) => a + b, 0));
   const max = Math.max(1, ...totals);
   const n = Math.max(1, series.length);
   const bw = (W - pad.l - pad.r) / n;
   const y = (v: number) => pad.t + (H - pad.t - pad.b) * (1 - v / max);
-  const ticks = [0, Math.round(max / 2), max];
+  const ticks = [...new Set([0, Math.round(max / 2), max])];
+  const every = Math.max(1, Math.ceil(n / Math.max(2, Math.floor((W - pad.l) / 80)))); // a label per ~80 px
   const total = totals.reduce((a, b) => a + b, 0);
   const peak = series[totals.indexOf(Math.max(...totals))];
   const label = total
@@ -41,8 +44,8 @@ export function HourlyChart({ series: reported, hours, end }: { series: SummaryT
     : "No assessments in this window.";
   const decisions = [...DECISION_ORDER, ...new Set(series.flatMap((s) => Object.keys(s.by_decision)).filter((k) => !DECISION_ORDER.includes(k)))];
   return (
-    <figure style={{ margin: 0 }}>
-      <svg className="chart" viewBox={`0 0 ${W} ${H}`} role="img" aria-label={label}>
+    <figure style={{ margin: 0 }} ref={ref}>
+      <svg className="chart" width={W} height={H} viewBox={`0 0 ${W} ${H}`} role="img" aria-label={label}>
         {ticks.map((t) => (
           <g key={t}>
             <line className="gridline" x1={pad.l} x2={W - pad.r} y1={y(t)} y2={y(t)} />
@@ -52,7 +55,7 @@ export function HourlyChart({ series: reported, hours, end }: { series: SummaryT
           </g>
         ))}
         {series.map((s, i) => {
-          if (!totals[i]) return i % Math.ceil(n / 8) === 0 ? <text key={s.hour} x={pad.l + i * bw + bw / 2} y={H - 6} textAnchor="middle">{utcTime(s.hour, false)}</text> : null;
+          if (!totals[i]) return i % every === 0 ? <text key={s.hour} x={pad.l + i * bw + bw / 2} y={H - 6} textAnchor="middle">{utcTime(s.hour, false)}</text> : null;
           let acc = 0;
           return (
             <g key={s.hour}>
@@ -65,7 +68,7 @@ export function HourlyChart({ series: reported, hours, end }: { series: SummaryT
                 acc += v;
                 return <rect key={d} x={pad.l + i * bw + 1} y={y0} width={Math.max(1, bw - 2)} height={Math.max(0.5, h)} fill={COLOR[d] ?? "var(--neutral)"} rx={1} />;
               })}
-              {i % Math.ceil(n / 8) === 0 ? (
+              {i % every === 0 ? (
                 <text x={pad.l + i * bw + bw / 2} y={H - 6} textAnchor="middle">
                   {utcTime(s.hour, false)}
                 </text>

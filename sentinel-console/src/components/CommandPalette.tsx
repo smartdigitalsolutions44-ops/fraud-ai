@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 
 import { NAV } from "@/components/shell/nav";
-import { SEARCH_PATTERN, useSearch } from "@/lib/api/queries";
+import { SEARCH_PATTERN, useDemoScenarios, useSearch } from "@/lib/api/queries";
 import { shortId } from "@/lib/format";
 
 import { Icon, type IconName } from "./Icon";
@@ -20,17 +20,20 @@ interface Command {
 }
 
 /**
- * Ctrl/Cmd+K. Navigation, lookup by case / assessment / event id, and harmless view actions.
- * Deliberately contains no consequential action: no resolutions, no demo reset.
+ * Ctrl/Cmd+K. Navigation, lookup by case / assessment / event id, the demo scenarios (they
+ * open the Demo page; nothing is played from here), system status, and view preferences.
+ * Deliberately contains no consequential action: no resolutions, no demo reset, no scoring.
  */
 export function CommandPalette({
   onClose,
   demoMode,
   onToggleDensity,
+  onTogglePresentation,
 }: {
   onClose: () => void;
   demoMode: boolean;
   onToggleDensity: () => void;
+  onTogglePresentation?: () => void;
 }) {
   const router = useRouter();
   const qc = useQueryClient();
@@ -39,6 +42,7 @@ export function CommandPalette({
   const input = useRef<HTMLInputElement>(null);
   const listId = useId();
   const search = useSearch(q);
+  const scenarios = useDemoScenarios(demoMode);
 
   // mounted only while open: focus the input, and give focus back when closed
   useEffect(() => {
@@ -71,8 +75,22 @@ export function CommandPalette({
           onClose();
         },
       },
+      { id: "status", group: "View", label: "System status (all groups)", icon: "system", run: go("/system") },
       { id: "density", group: "View", label: "Toggle compact density", icon: "queue", run: () => (onToggleDensity(), onClose()) },
+      ...(onTogglePresentation
+        ? [{ id: "presentation", group: "View", label: "Toggle presentation mode", icon: "overview" as IconName, run: () => (onTogglePresentation(), onClose()) }]
+        : []),
     ];
+    const demo: Command[] = demoMode
+      ? (scenarios.data?.scenarios ?? []).map((sc) => ({
+          id: `scenario:${sc.label}`,
+          group: "Demo scenarios",
+          label: `Scenario: ${sc.title}`,
+          hint: "opens the Demo page",
+          icon: "demo" as IconName,
+          run: go(`/demo#scenario-${sc.label}`),
+        }))
+      : [];
     const found: Command[] = (search.data?.matches ?? []).map((m) => ({
       id: `match:${m.kind}:${m.id}`,
       group: "Matches",
@@ -82,9 +100,10 @@ export function CommandPalette({
       run: go(`/investigations/${m.assessment_id}`),
     }));
     const needle = q.trim().toLowerCase();
-    const filtered = needle && !SEARCH_PATTERN.test(needle) ? [...nav, ...view].filter((c) => c.label.toLowerCase().includes(needle)) : [...nav, ...view];
+    const all = [...nav, ...view, ...demo];
+    const filtered = needle && !SEARCH_PATTERN.test(needle) ? all.filter((c) => c.label.toLowerCase().includes(needle)) : all;
     return [...found, ...filtered];
-  }, [router, onClose, demoMode, qc, onToggleDensity, search.data, q]);
+  }, [router, onClose, demoMode, qc, onToggleDensity, onTogglePresentation, scenarios.data, search.data, q]);
 
   const active = commands[Math.min(index, commands.length - 1)];
   const idLike = SEARCH_PATTERN.test(q.trim()) && q.replace(/-/g, "").trim().length >= 8;

@@ -1,4 +1,10 @@
-# Demo walkthrough (Stage 12)
+# Demo walkthrough (Stages 12 to 14)
+
+**Fastest way in (Stage 14):** `.\scripts\setup-local.ps1` then
+`.\scripts\sentinel-start.ps1 -Mode Demo` on Windows, or `./scripts/setup-local.sh` then
+`./scripts/sentinel-start.sh` on Linux/macOS; see [LOCAL_SETUP.md](LOCAL_SETUP.md). The
+console version of the walkthrough is [the interview walkthrough](#interview-walkthrough)
+below. The CLI walkthrough in sections 1 to 4 still works unchanged.
 
 A 5-10 minute walkthrough of the system on a **deterministic, synthetic** world. Every
 decision shown is the running service's live answer, not a slide. Every expected decision
@@ -130,18 +136,25 @@ The run writes `walkthrough.json`. The Stage 12 run on the default world:
 `tests/test_demo.py` repeats this end to end on a 200-user world against the real service
 process.
 
-## 5. The same demo in the SENTINEL console (Stage 13)
+## 5. The same demo in the SENTINEL console (Stages 13 and 14)
 
-```bash
-cd sentinel-console && npm ci && npm run demo      # → http://127.0.0.1:3000
+```powershell
+.\scripts\sentinel-start.ps1 -Mode Demo                  # Windows → http://127.0.0.1:3000
 ```
 
-* **What `npm run demo` starts.** It builds the world if needed, starts
-  `fraud-ai demo start` and serves the console in **DEMO MODE**. The top bar says so
-  (DEMO MODE · SYNTHETIC DATA).
-* **Start-up.** The start-up screen shows the real readiness checks. On a fresh world the
-  audit chain shows DEGRADED, because no external anchor exists until
-  `fraud-ai audit anchor-now` (or the walkthrough's step 8) runs.
+```bash
+./scripts/sentinel-start.sh --mode demo                    # Linux/macOS
+cd sentinel-console && npm run demo                        # the same, attached to the terminal
+```
+
+* **What starts.** The world is built if needed (through the guarded reset); then the
+  service runs with the demo world's own configuration and the console's production build
+  runs in **DEMO MODE**. The top bar says so (DEMO MODE · SYNTHETIC DATA).
+* **Start-up.** The start-up sequence has seven lines (contacting the fraud service, trust
+  chain, data plane, model signatures, risk policy, audit chain, analyst console), each
+  resolved by real readiness data. On a fresh world the audit chain shows DEGRADED, because
+  no external anchor exists until `fraud-ai audit anchor-now` (or the walkthrough's step 8)
+  runs.
 * **Demo page.** It lists the ten cases with their measured decision and a developer note,
   kept separate from model output. **Score this scenario** sends the case's events
   through the real service (server-side, signed); the page then shows the service's
@@ -155,6 +168,51 @@ cd sentinel-console && npm ci && npm run demo      # → http://127.0.0.1:3000
 
 The Playwright test (`sentinel-console/e2e/`) runs exactly this flow on a freshly reset
 world, and captures the screenshots in `sentinel-console/docs/screenshots/`.
+
+## Interview walkthrough
+
+Seven to eight minutes in the console, from a running demo (`sentinel-start`). Optional:
+Ctrl+K → "Toggle presentation mode" for larger text on a shared screen; it hides build
+details only, never system state.
+
+| Time | Screen | Show | Say |
+|---|---|---|---|
+| 0:00 | Terminal | `sentinel-start -Mode Demo`; the browser opens | One command: the fraud service, the console, signed models, a synthetic world. Nothing else on the machine is touched. |
+| 0:30 | Start-up | The seven lines resolve; audit shows DEGRADED | Every line is a real check, not an animation. The audit chain is verified but has no external anchor yet, so the console says DEGRADED instead of pretending. Enter the console. |
+| 1:00 | Overview | Metric cards, flagged assessments, decision distribution, system health | Live numbers from the service. A flag is a risk signal for review, not a fraud finding. |
+| 2:00 | Review Queue → a case | Open the manual-review case (Enter, or the Demo page's "Score this scenario" first) | The header line says what happened and why in one sentence: decision, the leading reason, rules matched, model agreement. |
+| 3:00 | Timeline | Day separators, offsets from the case event, marked events | Chronology at a glance: what happened before the event, and after the decision. Marked events carry a stored signal (new device, VPN, account change), not proof. |
+| 4:00 | Model assessment | Primary vs shadow; agree or disagree | The primary model drives the policy through its calibrated score; shadow models are recorded and never decide. No consensus score: it is not a vote. |
+| 5:00 | Investigation | Run investigation | Analyst assistance: observed evidence, interpretation, limitations. It cites the stored evidence and never decides. With no local model it is the reference template, and says so. |
+| 6:00 | Analyst decision | Press R (opens the panel, never submits); choose an outcome; read the confirmation | The confirmation says what will happen. Submit once: the outcome is recorded with the verified reviewer and is final; the original assessment never changes. Reload to show it comes from the service. |
+| 7:00 | System | The seven-group rail, models table, policy bands, audit | The security operations view: signed requests, signed models, operator authentication, the audit chain, each with its state and cause. The console cannot change any of it. |
+
+Close with `sentinel-stop`, and `sentinel-reset-demo` before the next run (it rebuilds the
+world through the guarded reset; type RESET DEMO).
+
+### Recording a 2-4 minute demo video (shot list)
+
+No video tooling is needed; record the screen at 1920x1080 with presentation mode on.
+
+1. **0:00-0:15:** terminal, `sentinel-start -Mode Demo`, the "SENTINEL is ready" banner.
+2. **0:15-0:35:** the start-up sequence resolving; pause on the DEGRADED audit line.
+3. **0:35-1:00:** Overview, slow pan across the metric cards and the flagged list.
+4. **1:00-1:40:** open the manual-review case; header summary, then the timeline.
+5. **1:40-2:15:** model panel (primary vs shadow), then run the investigation; scroll
+   through observed evidence, interpretation, limitations.
+6. **2:15-2:50:** R, choose "Resolve as legitimate", read the confirmation, submit, reload.
+7. **2:50-3:20:** System page rail; end on the models table with "Verified".
+8. **3:20-3:40:** terminal, `sentinel-status`, then `sentinel-stop`.
+
+### Time to demo
+
+| | Linux container (local) | Linux (CI, fresh checkout) | Windows (CI, fresh checkout) |
+|---|---|---|---|
+| `setup-local` | 66-79 s (Python packages cached) | see the CI summary | see the CI summary |
+| First start (builds the world) | 201-223 s | see the CI summary | see the CI summary |
+| Start with the world present | 6-14 s | see the CI summary | see the CI summary |
+
+The CI jobs `local-scripts` and `local-windows` record their timings in the run summary.
 
 ## 6. Talking points and honest limits
 

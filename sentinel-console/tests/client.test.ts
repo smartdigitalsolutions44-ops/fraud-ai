@@ -66,7 +66,7 @@ describe("API client", () => {
     vi.stubGlobal("fetch", vi.fn(async () => respond(429, { error: { code: "RATE_LIMITED", message: "slow down" } }, { "Retry-After": "7" })));
     const err = (await apiGet("/api/x", Shape).catch((e: unknown) => e)) as ApiError;
     expect(err.kind).toBe("rate_limited");
-    expect(describeError(err).detail).toContain("retry in 7s");
+    expect(describeError(err).detail).toContain("retrying in 7s");
   });
 
   it.each([

@@ -3,7 +3,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useState, type ReactNode } from "react";
 
-import { ApiError } from "@/lib/api/client";
 
 export function Providers({ children }: { children: ReactNode }) {
   const [client] = useState(
@@ -11,8 +10,9 @@ export function Providers({ children }: { children: ReactNode }) {
       new QueryClient({
         defaultOptions: {
           queries: {
-            // the API client already retries transient failures; don't multiply them
-            retry: (count, err) => err instanceof ApiError && err.transient && count < 1,
+            // the API client already retries transient failures (twice, with delays); retrying
+            // again here would multiply requests during an outage, so polls back off instead
+            retry: false,
             refetchOnWindowFocus: true,
             staleTime: 2_000,
             // polling responses are structurally shared: unchanged rows keep their identity,

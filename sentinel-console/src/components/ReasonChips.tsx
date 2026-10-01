@@ -1,10 +1,12 @@
 "use client";
 
 import { useSystem } from "@/lib/api/queries";
+import { reasonTitle } from "@/lib/reasons";
 
 /**
- * Reason codes exactly as the service returned them. The description (tooltip) comes from the
- * service's own reason catalogue; an unknown code is shown without one, never explained here.
+ * Reason codes as readable titles (Stage 14); the exact code and the service's own catalogue
+ * description are in the tooltip. An unknown code gets a title from its own name, never an
+ * explanation.
  */
 export function ReasonChips({ codes, max = 2 }: { codes: string[]; max?: number }) {
   const catalogue = useSystem().data?.reason_catalogue;
@@ -14,12 +16,12 @@ export function ReasonChips({ codes, max = 2 }: { codes: string[]; max?: number 
   return (
     <span className="chips">
       {shown.map((c) => (
-        <span key={c} className="chip" title={catalogue?.[c] ?? c}>
-          {c}
+        <span key={c} className="chip chip-title" title={`${c}${catalogue?.[c] ? `: ${catalogue[c]}` : ""}`} data-code={c}>
+          {reasonTitle(c)}
         </span>
       ))}
       {rest > 0 ? (
-        <span className="chip" title={codes.slice(max).join(", ")} aria-label={`${rest} more reason codes`}>
+        <span className="chip" title={codes.slice(max).map(reasonTitle).join(", ")} aria-label={`${rest} more reason codes`}>
           +{rest}
         </span>
       ) : null}

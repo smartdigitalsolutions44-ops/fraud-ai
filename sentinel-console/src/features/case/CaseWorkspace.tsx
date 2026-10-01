@@ -46,7 +46,7 @@ export function CaseWorkspace({ assessmentId }: { assessmentId: string }) {
           <Timeline items={data.timeline} />
         </div>
         <div className="workspace-col">
-          <EvidencePanel reasons={data.reasons} rules={data.rules} />
+          <EvidencePanel reasons={data.reasons} rules={data.rules} models={data.models} />
           <Panel title="Model assessment" id="models" flush note={data.models.note}>
             <ModelComparison models={data.models} />
           </Panel>

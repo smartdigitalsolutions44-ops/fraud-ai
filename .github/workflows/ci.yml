@@ -1,4 +1,4 @@
-# fraud-ai CI (Stages 10-13). Benchmarks are NOT run here (they need a quiet, comparable
+# fraud-ai CI (Stages 10-14). Benchmarks are NOT run here (they need a quiet, comparable
 # machine); see scripts/check_regression.py and HARDENING.md.
 # Artefacts: coverage, SBOM, security summary, container scan and smoke results. Never
 # uploaded: .env files, secrets, signing keys or test credentials (the smoke test's keys are
@@ -48,8 +48,8 @@ jobs:
       - run: python -m mypy
 
   # Stage 13: the SENTINEL analyst console (sentinel-console/). The Playwright end-to-end
-  # test needs the Python service and a freshly built demo world; it runs locally
-  # (`npm run e2e`), not here.
+  # test needs the Python service and a freshly built demo world; since Stage 14 it runs in
+  # the local-scripts job below, which sets all of that up.
   console:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -70,6 +70,176 @@ jobs:
       - run: npm run typecheck
       - run: npm run build
       - run: npm test   # after the build, so the client-bundle secret check runs too
+
+  # Stage 14: the local run tooling (scripts/setup-local, sentinel-start/-status/-stop) on a
+  # fresh checkout, for real: Linux runs Demo and Dev mode (Docker PostgreSQL and Redis),
+  # Windows runs Demo mode from a checkout path containing spaces. Logs are uploaded on
+  # failure (no secrets in them: the tooling redacts API keys and never logs passwords).
+  local-scripts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck (the shell wrappers)
+        run: |
+          pip install shellcheck-py==0.10.0.1
+          shellcheck -x scripts/setup-local.sh scripts/sentinel-*.sh scripts/_sentinel.sh
+      - name: PSScriptAnalyzer (the PowerShell wrappers; warnings and errors fail)
+        shell: pwsh
+        run: |
+          Install-Module PSScriptAnalyzer -RequiredVersion 1.23.0 -Force -Scope CurrentUser
+          $found = Invoke-ScriptAnalyzer -Path scripts -Filter '*.ps1' -Severity Warning,Error `
+            -ExcludeRule PSAvoidUsingWriteHost
+          $found | Format-Table -AutoSize | Out-String -Width 200 | Write-Output
+          if ($found) { exit 1 }
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: setup-local (fresh checkout; timed)
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+        run: |
+          start=$(date +%s)
+          ./scripts/setup-local.sh
+          echo "SETUP_SECONDS=$(( $(date +%s) - start ))" | tee -a "$GITHUB_STEP_SUMMARY"
+          ./scripts/setup-local.sh | tee second-setup.log   # idempotent: nothing reinstalled
+          grep -q "backend: already current" second-setup.log
+          grep -q "console dependencies: already current" second-setup.log
+          grep -q "console production build: already current" second-setup.log
+      - name: Demo mode (first start builds the demo world; timed)
+        run: |
+          start=$(date +%s)
+          ./scripts/sentinel-start.sh --mode demo --no-browser
+          echo "DEMO_FIRST_START_SECONDS=$(( $(date +%s) - start ))" | tee -a "$GITHUB_STEP_SUMMARY"
+          ./scripts/sentinel-status.sh --json | tee status.json
+          python - <<'PY'
+          import json
+          s = json.load(open("status.json"))
+          assert s["session"] == "ready" and s["demo_mode"], s
+          assert s["api"]["status"] == "ONLINE" and s["console"]["status"] == "ONLINE", s
+          assert s["redis"] == "NOT USED", s
+          assert all(m["signature_verified"] for m in s["models"]) and len(s["models"]) == 2, s
+          PY
+          ./scripts/sentinel-stop.sh
+          test -z "$(ls -A .runtime/pids)"
+          start=$(date +%s)
+          ./scripts/sentinel-start.sh --no-browser
+          echo "DEMO_WARM_START_SECONDS=$(( $(date +%s) - start ))" | tee -a "$GITHUB_STEP_SUMMARY"
+          ./scripts/sentinel-reset-demo.sh --confirm "RESET DEMO"
+          ./scripts/sentinel-status.sh
+          ./scripts/sentinel-stop.sh
+          test -z "$(ls -A .runtime/pids)"
+      - name: Dev mode (Docker PostgreSQL 16 and Redis 7)
+        run: |
+          ./scripts/sentinel-start.sh --mode dev --no-browser
+          ./scripts/sentinel-status.sh --json | tee status.json
+          python - <<'PY'
+          import json
+          s = json.load(open("status.json"))
+          assert s["session"] == "ready" and not s["demo_mode"], s
+          assert s["postgres"] == "ONLINE" and s["redis"] == "ONLINE", s
+          assert s["api"]["checks"]["shared_state"] == "ok", s
+          PY
+          ./scripts/sentinel-stop.sh
+          test -z "$(docker compose -p sentinel-local ps -q --status running)"
+      - name: Playwright end to end (fresh demo world, real service, WCAG audit, clean console)
+        working-directory: sentinel-console
+        run: |
+          npx playwright install --with-deps chromium
+          npm run e2e
+      - name: StagingLike refuses clearly without Docker
+        run: |
+          set +e
+          DOCKER_HOST=unix:///nonexistent ./scripts/sentinel-start.sh --mode staginglike \
+            > refusal.log 2>&1
+          code=$?
+          set -e
+          cat refusal.log
+          test "$code" -eq 2 && grep -q "StagingLike needs Docker" refusal.log
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: local-scripts-linux-logs
+          path: |
+            .runtime/logs/
+            .runtime/e2e/logs/
+            sentinel-console/test-results/
+          if-no-files-found: ignore
+
+  local-windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: "sentinel test dir"
+    env:
+      PIP_EXTRA_INDEX_URL: ""   # Windows PyPI wheels of PyTorch are CPU-only already
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: "sentinel test dir"   # a checkout path containing spaces, on purpose
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: setup-local.ps1 (fresh checkout; timed; then idempotent)
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+        run: |
+          $t = [Diagnostics.Stopwatch]::StartNew()
+          .\scripts\setup-local.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "SETUP_SECONDS_WINDOWS=$([int]$t.Elapsed.TotalSeconds)" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+          $second = .\scripts\setup-local.ps1 | Out-String
+          Write-Output $second
+          if ($second -notmatch 'backend: already current') { throw 'second setup reinstalled the backend' }
+      - name: Windows file branches and local tooling tests (native Windows)
+        run: |
+          .\.venv\Scripts\python.exe -m pip install -q pytest
+          .\.venv\Scripts\python.exe -m pytest -q -p no:cacheprovider --noconftest tests/test_windows_files.py tests/test_localrun.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: sentinel-start.ps1 -Mode Demo, status, stop (timed)
+        run: |
+          $t = [Diagnostics.Stopwatch]::StartNew()
+          .\scripts\sentinel-start.ps1 -Mode Demo -NoBrowser
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "DEMO_FIRST_START_SECONDS_WINDOWS=$([int]$t.Elapsed.TotalSeconds)" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+          .\scripts\sentinel-status.ps1
+          # Windows 11's default shell is Windows PowerShell 5.1: the wrappers must work there too
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\sentinel-status.ps1
+          if ($LASTEXITCODE -ne 0) { throw "sentinel-status.ps1 failed under Windows PowerShell 5.1" }
+          $status = .\scripts\sentinel-status.ps1 -Json | Out-String | ConvertFrom-Json
+          if ($status.session -ne 'ready' -or $status.api.status -ne 'ONLINE' -or $status.console.status -ne 'ONLINE') {
+            throw "not ready: $($status | ConvertTo-Json -Depth 5)"
+          }
+          if ($status.redis -ne 'NOT USED') { throw 'Redis must be NOT USED in Demo mode' }
+          $t = [Diagnostics.Stopwatch]::StartNew()
+          .\scripts\sentinel-stop.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "STOP_SECONDS_WINDOWS=$([int]$t.Elapsed.TotalSeconds)" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+          if (Get-ChildItem .runtime\pids) { throw 'PID records left behind' }
+          foreach ($port in 8080, 3000) {
+            if (Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue) { throw "port $port still in use" }
+          }
+          $t = [Diagnostics.Stopwatch]::StartNew()
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\sentinel-start.ps1 -NoBrowser
+          if ($LASTEXITCODE -ne 0) { throw "sentinel-start.ps1 failed under Windows PowerShell 5.1" }
+          "DEMO_WARM_START_SECONDS_WINDOWS=$([int]$t.Elapsed.TotalSeconds)" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\sentinel-stop.ps1
+          if ($LASTEXITCODE -ne 0) { throw "sentinel-stop.ps1 failed under Windows PowerShell 5.1" }
+          if (Get-ChildItem .runtime\pids) { throw 'PID records left behind' }
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: local-scripts-windows-logs
+          path: "sentinel test dir/.runtime/logs/"
+          if-no-files-found: ignore
 
   test:
     runs-on: ubuntu-latest
@@ -93,7 +263,7 @@ jobs:
           cache: pip
       - name: System packages (redis-server for the shared-state tests, pg tools)
         run: sudo apt-get update && sudo apt-get install -y redis-server postgresql-client
-      - run: pip install -e ".[dev,postgres,stripe,anchors]"
+      - run: pip install -e ".[dev,postgres,stripe,anchors,local]"
       - name: Staging-profile database role (non-default password, for the staging E2E)
         run: |
           STAGING_PW="$(python -c 'import secrets; print(secrets.token_hex(16))')"

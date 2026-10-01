@@ -26,14 +26,36 @@ export const keys = {
   demoStatus: ["demo", "status"] as const,
 };
 
-const poll = (ms: number) => ({ refetchInterval: ms, refetchIntervalInBackground: false });
+/**
+ * Polling with backoff (Stage 14): while a view's last poll failed, its interval doubles per
+ * failure (up to 30 s) with up to 20 % jitter, so an outage does not turn every open view into
+ * a request loop, and recovery does not make every view fire at the same instant. The health
+ * poll keeps its own fixed interval: it is the signal that the service is back (see
+ * useRecovery). Polling stops in hidden tabs.
+ */
+export function backoff(ms: number, failures: number, random: () => number = Math.random): number {
+  if (failures <= 0) return ms;
+  const base = Math.min(ms * 2 ** Math.min(failures, 5), 30_000);
+  return Math.round(base * (1 + 0.2 * random()));
+}
+
+type PollQuery = { state: { status: string; fetchFailureCount: number } };
+const poll = (ms: number) => ({
+  refetchInterval: (query: PollQuery) => (query.state.status === "error" ? backoff(ms, query.state.fetchFailureCount) : ms),
+  refetchIntervalInBackground: false,
+});
 
 export function useSession() {
   return useQuery({ queryKey: keys.session, queryFn: () => apiGet("/api/session", S.Session), staleTime: 60_000 });
 }
 
 export function useHealth() {
-  return useQuery({ queryKey: keys.health, queryFn: () => apiGet("/api/fraud/health", S.Health, { retries: 0, timeoutMs: 5_000 }), ...poll(POLL.health) });
+  return useQuery({
+    queryKey: keys.health,
+    queryFn: () => apiGet("/api/fraud/health", S.Health, { retries: 0, timeoutMs: 5_000 }),
+    refetchInterval: POLL.health, // fixed: this is how recovery is noticed
+    refetchIntervalInBackground: false,
+  });
 }
 
 /** /v1/ready answers 503 with its checks when not ready; both are data, not errors. */
@@ -58,7 +80,7 @@ export function useFeed(limit = 100, decision?: string, paused = false) {
     queryKey: keys.feed(limit, decision),
     queryFn: () => apiGet("/api/fraud/analyst/feed", S.Feed, { query: { limit, decision } }),
     ...poll(POLL.feed),
-    refetchInterval: paused ? false : POLL.feed,
+    ...(paused ? { refetchInterval: false as const } : {}),
   });
 }
 

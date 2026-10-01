@@ -20,7 +20,7 @@ function ScenarioCard({ s, index }: { s: Scenario; index: number }) {
   const result = play.data?.label === s.label ? play.data : null;
   const assessmentId = result?.assessment_id ?? s.assessment_id;
   return (
-    <section className="panel scenario" aria-labelledby={`sc-${s.label}`} data-testid={`scenario-${s.label}`}>
+    <section className="panel scenario" id={`scenario-${s.label}`} aria-labelledby={`sc-${s.label}`} data-testid={`scenario-${s.label}`}>
       <div className="panel-head">
         <span className="mono faint">{String(index + 1).padStart(2, "0")}</span>
         <h3 id={`sc-${s.label}`}>{s.title}</h3>

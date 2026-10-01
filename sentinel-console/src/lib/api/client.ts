@@ -170,7 +170,25 @@ export function describeError(err: unknown): { title: string; detail: string; ki
     server: "Service error",
     schema: "Unexpected response",
   };
+  // Stage 14: name the component that failed when the service says which one it was
+  const specific: Record<string, string> = {
+    DATABASE_UNAVAILABLE: "Database unavailable",
+    STATE_UNAVAILABLE: "Redis shared state unavailable",
+    POLICY_UNAVAILABLE: "Risk policy unavailable",
+    SCORING_UNAVAILABLE: "Scoring unavailable",
+    SCORING_TIMEOUT: "Scoring timed out",
+    BACKEND_UNREACHABLE: "Fraud service unreachable",
+    BACKEND_NOT_CONFIGURED: "Console not configured",
+    NETWORK_ERROR: "Console server unreachable",
+    INSUFFICIENT_SCOPE: "Permission denied: missing scope",
+    OPERATOR_AUTH_FAILED: "Operator assertion refused",
+    OPERATOR_AUTH_REQUIRED: "Operator assertion required",
+    OPERATOR_AUTH_UNAVAILABLE: "Operator authentication unavailable",
+    ALREADY_RESOLVED: "Already resolved",
+  };
   let detail = `${err.message} (${err.code})`;
-  if (err.kind === "rate_limited" && err.retryAfterSeconds) detail += ` — retry in ${err.retryAfterSeconds}s`;
+  if (err.kind === "rate_limited") detail += err.retryAfterSeconds ? ` · retrying in ${err.retryAfterSeconds}s` : " · retrying automatically";
+  if (err.kind === "not_found") detail = `${err.message} (${err.code}) · it may belong to a demo world that was reset`;
+  if (specific[err.code]) return { title: specific[err.code]!, detail, kind: err.kind };
   return { title: titles[err.kind], detail, kind: err.kind };
 }

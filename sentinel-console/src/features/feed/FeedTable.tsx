@@ -22,11 +22,13 @@ const Row = memo(function Row({
   selected,
   fresh,
   onOpen,
+  compact,
 }: {
   item: FeedItemT;
   selected: boolean;
   fresh: boolean;
   onOpen: (item: FeedItemT) => void;
+  compact: boolean;
 }) {
   return (
     <tr
@@ -62,16 +64,21 @@ const Row = memo(function Row({
         <ReasonChips codes={item.reason_codes} />
       </td>
       <td>{item.review ? <StatusBadge kind="review" status={item.review.status} /> : <span className="faint">—</span>}</td>
-      <td>
-        <StatusBadge kind="auth" auth={item.authentication} />
-      </td>
-      <td className="num mono faint">{item.latency_ms === null ? "—" : `${Math.round(item.latency_ms)}`}</td>
+      {compact ? null : (
+        <>
+          <td>
+            <StatusBadge kind="auth" auth={item.authentication} />
+          </td>
+          <td className="num mono faint">{item.latency_ms === null ? "—" : `${Math.round(item.latency_ms)}`}</td>
+        </>
+      )}
     </tr>
   );
 });
 
-/** Assessments, newest first. References are pseudonymous ids; no personal data is shown. */
-export function FeedTable({ items, keyboard = true, caption }: { items: FeedItemT[]; keyboard?: boolean; caption: string }) {
+/** Assessments, newest first. References are pseudonymous ids; no personal data is shown.
+ * ``compact`` (the Overview panel) leaves out the step-up and latency columns. */
+export function FeedTable({ items, keyboard = true, caption, compact = false }: { items: FeedItemT[]; keyboard?: boolean; caption: string; compact?: boolean }) {
   const router = useRouter();
   const open = (item: FeedItemT) => router.push(`/investigations/${item.assessment_id}`);
   const nav = useListNavigation(items, (i) => i.assessment_id, open, keyboard);
@@ -88,15 +95,19 @@ export function FeedTable({ items, keyboard = true, caption }: { items: FeedItem
             <th scope="col">Decision</th>
             <th scope="col">Reasons</th>
             <th scope="col">Review</th>
-            <th scope="col">Step-up</th>
-            <th scope="col" className="num">
-              ms
-            </th>
+            {compact ? null : (
+              <>
+                <th scope="col">Step-up</th>
+                <th scope="col" className="num">
+                  ms
+                </th>
+              </>
+            )}
           </tr>
         </thead>
         <tbody>
           {items.map((item) => (
-            <Row key={item.assessment_id} item={item} selected={nav.selected === item.assessment_id} fresh={fresh.has(item.assessment_id)} onOpen={open} />
+            <Row key={item.assessment_id} item={item} selected={nav.selected === item.assessment_id} fresh={fresh.has(item.assessment_id)} onOpen={open} compact={compact} />
           ))}
         </tbody>
       </table>

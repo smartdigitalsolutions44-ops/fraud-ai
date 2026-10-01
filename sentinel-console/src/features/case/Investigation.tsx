@@ -1,7 +1,5 @@
 "use client";
 
-import { useEffect } from "react";
-
 import { Badge } from "@/components/Badge";
 import { formatValue } from "@/components/EvidencePanel";
 import { Icon } from "@/components/Icon";
@@ -15,13 +13,39 @@ import { utcDateTime } from "@/lib/format";
 type Inv = NonNullable<CaseT["investigation"]>;
 type Finding = { statement: string; evidence_ids: string[] };
 
-const SECTIONS: Array<{ key: keyof Inv["explanation"]; title: string }> = [
-  { key: "risk_factors", title: "Risk factors" },
-  { key: "protective_factors", title: "Protective factors" },
+const INTERPRETATION: Array<{ key: keyof Inv["explanation"]; title: string }> = [
+  { key: "risk_factors", title: "Points towards risk" },
+  { key: "protective_factors", title: "Points against risk" },
   { key: "model_disagreement", title: "Model agreement" },
-  { key: "temporal_findings", title: "Temporal findings" },
-  { key: "uncertainties", title: "Uncertainties" },
+  { key: "temporal_findings", title: "Timing" },
 ];
+
+function ObservedEvidence({ evidence }: { evidence: Inv["evidence"] }) {
+  if (!evidence.length) return <p className="faint" style={{ fontSize: "var(--text-sm)" }}>No evidence items were cited.</p>;
+  return (
+    <table className="table assist-evidence">
+      <caption className="sr-only">Evidence the draft was given</caption>
+      <thead>
+        <tr>
+          <th scope="col">Ref</th>
+          <th scope="col">Item</th>
+          <th scope="col">Value</th>
+          <th scope="col">Source</th>
+        </tr>
+      </thead>
+      <tbody>
+        {evidence.map((e) => (
+          <tr key={e.id} id={`evidence-${e.id}`}>
+            <td className="mono faint">{e.id}</td>
+            <td>{e.name ?? e.section ?? "—"}</td>
+            <td className="mono">{formatValue(e.value)}</td>
+            <td className="faint">{e.source ?? "—"}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
 
 function EvidenceRefs({ ids, evidence }: { ids: string[]; evidence: Inv["evidence"] }) {
   if (!ids.length) return null;
@@ -62,21 +86,6 @@ export function Investigation({ assessmentId, investigation }: { assessmentId: s
   const run = useInvestigate(assessmentId);
   const llm = useSystem().data?.llm;
   const unavailable = run.error instanceof ApiError && run.error.kind === "llm_unavailable";
-  const { mutate, isPending } = run;
-
-  // R runs the investigation (analyst assistance only: it never changes the decision)
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "r" && e.key !== "R") return;
-      if (e.ctrlKey || e.metaKey || e.altKey || document.querySelector("[aria-modal='true']")) return;
-      const t = e.target as HTMLElement | null;
-      if (t && (t.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(t.tagName))) return;
-      e.preventDefault();
-      if (!isPending) mutate();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [mutate, isPending]);
   return (
     <Panel
       title={
@@ -85,6 +94,9 @@ export function Investigation({ assessmentId, investigation }: { assessmentId: s
             <Icon name="spark" /> ANALYST ASSISTANCE
           </span>
           <span>Investigation</span>
+          <span className="assist-nodecide" title="Scores and decisions come only from the policy and its models">
+            Does not decide
+          </span>
         </span>
       }
       id="investigation"
@@ -95,9 +107,8 @@ export function Investigation({ assessmentId, investigation }: { assessmentId: s
           onClick={() => run.mutate()}
           disabled={run.isPending}
           data-testid="run-investigation"
-          aria-keyshortcuts="R"
         >
-          <Icon name="spark" /> {run.isPending ? "Running…" : investigation ? "Run again" : "Run investigation"} <kbd>R</kbd>
+          <Icon name="spark" /> {run.isPending ? "Running…" : investigation ? "Run again" : "Run investigation"}
         </button>
       }
       note={
@@ -134,41 +145,64 @@ export function Investigation({ assessmentId, investigation }: { assessmentId: s
             <span>· v{investigation.explanation_version}</span>
             <span>· {utcDateTime(investigation.created_at)}</span>
           </div>
-          <div className="finding" style={{ fontSize: "var(--text-md)" }}>
-            <span>{investigation.explanation.summary.statement}</span>
-            <EvidenceRefs ids={investigation.explanation.summary.evidence_ids} evidence={investigation.evidence} />
-          </div>
-          {SECTIONS.map(({ key, title }) => {
-            const items = investigation.explanation[key] as Finding[];
-            if (!items?.length) return null;
-            return (
-              <div key={key} className="finding-section">
-                <div className="label">{title}</div>
-                <FindingList items={items} evidence={investigation.evidence} />
-              </div>
-            );
-          })}
-          {investigation.explanation.recommended_review_questions.length ? (
-            <div className="finding-section">
-              <div className="label">Questions for the reviewer</div>
-              {investigation.explanation.recommended_review_questions.map((q, i) => (
-                <div key={i} className="finding">
-                  <span>{q.question}</span>
-                  <EvidenceRefs ids={q.evidence_ids} evidence={investigation.evidence} />
+          <section className="assist-section" aria-labelledby="assist-observed">
+            <h4 id="assist-observed" className="assist-heading">
+              <span className="assist-step">1</span> Observed evidence
+              <span className="faint">stored facts the draft was given; nothing else</span>
+            </h4>
+            <ObservedEvidence evidence={investigation.evidence} />
+          </section>
+          <section className="assist-section" aria-labelledby="assist-interpretation">
+            <h4 id="assist-interpretation" className="assist-heading">
+              <span className="assist-step">2</span> Interpretation
+              <span className="faint">a draft for the analyst to check, citing the refs above</span>
+            </h4>
+            <div className="finding" style={{ fontSize: "var(--text-md)" }}>
+              <span>{investigation.explanation.summary.statement}</span>
+              <EvidenceRefs ids={investigation.explanation.summary.evidence_ids} evidence={investigation.evidence} />
+            </div>
+            {INTERPRETATION.map(({ key, title }) => {
+              const items = investigation.explanation[key] as Finding[];
+              if (!items?.length) return null;
+              return (
+                <div key={key} className="finding-section">
+                  <div className="label">{title}</div>
+                  <FindingList items={items} evidence={investigation.evidence} />
                 </div>
-              ))}
-            </div>
-          ) : null}
-          {investigation.limitations.length ? (
-            <div className="finding-section">
-              <div className="label">Stated limitations</div>
-              <ul style={{ margin: "6px 0 0", paddingLeft: 18, color: "var(--text-1)", fontSize: "var(--text-sm)" }}>
-                {investigation.limitations.map((l) => (
-                  <li key={l.id}>{l.text}</li>
+              );
+            })}
+            {investigation.explanation.recommended_review_questions.length ? (
+              <div className="finding-section">
+                <div className="label">Questions for the reviewer</div>
+                {investigation.explanation.recommended_review_questions.map((q, i) => (
+                  <div key={i} className="finding">
+                    <span>{q.question}</span>
+                    <EvidenceRefs ids={q.evidence_ids} evidence={investigation.evidence} />
+                  </div>
                 ))}
-              </ul>
-            </div>
-          ) : null}
+              </div>
+            ) : null}
+          </section>
+          <section className="assist-section" aria-labelledby="assist-limits">
+            <h4 id="assist-limits" className="assist-heading">
+              <span className="assist-step">3</span> Limitations
+              <span className="faint">what this draft cannot tell you</span>
+            </h4>
+            {(investigation.explanation.uncertainties as Finding[]).length ? (
+              <FindingList items={investigation.explanation.uncertainties as Finding[]} evidence={investigation.evidence} />
+            ) : null}
+            <ul className="assist-limits">
+              {investigation.limitations.map((l) => (
+                <li key={l.id}>{l.text}</li>
+              ))}
+              <li>
+                {investigation.runtime === "reference"
+                  ? "Produced by the deterministic reference template, not a language model: it restates the stored evidence and adds no independent judgement."
+                  : "Drafted by a local language model, which can be wrong: check each cited ref against the case."}
+              </li>
+              <li>It did not score, decide or change anything; the decision above is the policy&apos;s, and yours is recorded separately.</li>
+            </ul>
+          </section>
         </div>
       ) : !run.isPending && !run.isError ? (
         <p className="muted" style={{ fontSize: "var(--text-sm)" }}>

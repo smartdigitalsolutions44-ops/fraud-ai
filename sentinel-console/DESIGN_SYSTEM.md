@@ -45,10 +45,25 @@ secondary text 8.4:1 and muted text 5.0:1.
 | UI text | **Inter** (variable, self-hosted via @fontsource; no external font requests) |
 | IDs, scores, times, hashes | **JetBrains Mono** (`.mono`) |
 
-* The scale runs from `--text-2xs` 10.5 px to `--text-3xl` 30 px, with body text at
-  13.5 px and a line height of 1.45.
-* Labels are small uppercase with 0.08 em tracking (`.label`).
-* Numbers use tabular figures, so columns and counters do not jitter while polling.
+The hierarchy (Stage 14), from largest to smallest:
+
+| Role | Size and weight | Example |
+|---|---|---|
+| Product title | `--text-3xl` 30 px, 700, 0.38 em tracking | SENTINEL on the start-up screen |
+| Page heading | `--text-xl` 18 px, 600 | "System" |
+| Case ID | `--text-xl` mono | the case header |
+| Section / panel heading | `--text-md` 13.5 px, 600 | "Why this decision" |
+| Reason title, case summary lead | `--text-md`, 600 | "Score in the high band" |
+| Body | `--text-md` 13.5 px / `--text-sm` 12.5 px, 400 | descriptions, notes |
+| Labels | `--text-2xs` 10.5 px, 600, uppercase, 0.08 em | `.label`, metric labels, group labels |
+| Technical metadata | `--text-2xs`–`--text-xs` **mono** | IDs, timestamps, scores, hashes, raw reason codes, key ids |
+
+* Monospace only where it helps technical reading: identifiers, times, numbers, hashes,
+  raw codes and the start-up sequence. Titles and prose are never monospace.
+* Raw enum codes are secondary: a reason shows its readable title first, the code in small
+  mono to the side.
+* The line height is 1.45. Numbers use tabular figures, so columns and counters do not
+  jitter while polling.
 
 ## 4. Space, radii, layout
 
@@ -59,13 +74,26 @@ secondary text 8.4:1 and muted text 5.0:1.
 | shell | nav 212 px, top bar 48 px, status bar 26 px |
 | rows | `--row-height` 36 px; 30 px in compact density, which the command palette toggles |
 
+**Density (Stage 14).** Comfortable is the default. Compact (palette → "Toggle compact
+density") reduces row height to 30 px and the 16 and 20 px spacing steps to 12 and 16 px,
+for long working sessions. **Presentation mode** (palette) raises the type scale by about
+1 px per step and hides build versions and keyboard hints, for a shared screen; it never
+hides system state. Both preferences are per browser.
+
 The console is desktop-first:
 
 * At 1920×1080 and 1440p it uses the full width, up to 1880 px.
 * The metric grid has 8 columns, dropping to 4 below 1560 px and 2 below 760 px.
 * The case workspace has three columns: timeline, investigation, decision. Below 1480 px
   it has two, with the timeline moving underneath. Below 1080 px it has one.
-* Below 900 px the navigation collapses to icons.
+* At 1440 px and below the top bar drops its tagline, the environment badge and the
+  palette label, and the status bar drops build versions. The status badge and DEMO MODE
+  always stay.
+* At 1380 px and below (1366×768 included) the navigation collapses to an icon rail, with
+  labels as tooltips and accessible names and the open-review count as a small marker, so
+  the investigation layout keeps its width.
+* Checked at 1920×1080, 2560×1440, 1440×900 and 1366×768: no horizontal page scroll, no
+  cut-off controls, charts drawn at their real pixel width (their text never scales).
 * Long IDs are shortened, with the full value on hover and a copy button. Long reasons
   and values wrap (`overflow-wrap: anywhere`) rather than overflow.
 
@@ -82,33 +110,51 @@ All use the easing `cubic-bezier(0.2, 0.7, 0.2, 1)`. Motion is functional only:
 * hover and press;
 * dialogs fading in;
 * new rows briefly tinted when they arrive in a poll;
-* the start-up trace line;
+* the start-up sequence: lines fade in 40 ms apart, a line still CHECKING pulses, and the
+  progress line fills as checks answer (cyan, then green, amber or red);
 * the pulse of the live dot.
 
-`prefers-reduced-motion: reduce` sets every duration to 0 and stops the shimmer, trace and
-pulse. There is no startup sound.
+**Start-up timing.** Nothing waits for an animation. The screen stays at least 0.48 s (long
+enough to register), holds "All systems online" for 0.26 s, then leaves. A slow check
+simply stays CHECKING until it answers; after 10 s the screen says it is still waiting and
+offers to enter. It shows how long the checks took.
+
+`prefers-reduced-motion: reduce` sets every duration to 0 and stops the shimmer, the
+sequence fade and the pulses. There is no startup sound.
 
 ## 6. Components
 
 | Component | Purpose |
 |---|---|
 | `StatusBadge` | system checks (CHECKING / ONLINE / DEGRADED / OFFLINE / NOT USED), review status, resolution, step-up result |
-| `RiskBadge` | the policy's risk band, verbatim. Its title says it is a band, not a probability |
+| `RiskBadge` | the policy's risk band, verbatim. Its title says it is a band, not a probability. Also the severity of a `SCORE_BAND_*` reason |
 | `DecisionBadge` | the policy decision, verbatim. Unknown values are shown as-is |
 | `MetricCard` | one number from the API, with a tone rail, a unit and a sub-line; "—" when not reported |
 | `CaseRow` | one review-queue row. The row opens the case and carries no actions |
-| `TimelineEvent` | one account event. The case event is highlighted, events after the decision are dimmed, and VPN, proxy and Tor are marked as signals |
-| `ModelComparison` | each model's stored score against its own threshold, with calibrated score, role, shadow agreement and shadow policies. **No consensus score** |
-| `EvidencePanel` / `IndicatorPanel` | reason codes with the service's descriptions, rule evidence, and device, network and behaviour indicators |
+| `TimelineEvent` | one account event: time, type, offset from the case event. The case event is highlighted; events after the decision have a dashed node; events with a stored signal (new device, VPN/proxy/Tor/datacentre, account change, failed login) have an amber node |
+| `ModelComparison` | the deciding model apart from shadow models (recorded, never decide), each score against its own threshold, name and version split, agreement stated as a sentence. **No consensus score; not a vote** |
+| `EvidencePanel` / `IndicatorPanel` | reasons as cards (readable title, severity as stored, the service's description, the producing rule's evidence, raw code secondary), the rules evaluated, and device, network and behaviour indicators |
 | `SystemStatus` | the check list |
-| `CommandPalette` | Ctrl/⌘ K: navigation, ID lookup, refresh, density. No consequential commands |
-| `LoadingCheck` | one start-up check line |
+| `CommandPalette` | Ctrl/⌘ K: navigation, ID lookup, demo scenarios (navigation only), system status, refresh, density, presentation mode. No consequential commands |
+| `StartupScreen` | the seven-line start-up sequence, one line per health group |
+| System rail (`ops-tile`) | one tile per health group: state badge and the cause, coloured top rule |
 | `ConfirmDialog` | the modal for consequential actions. Cancel has default focus, Esc cancels, and focus is trapped |
 | `LiveIndicator` | Live, Stale, Offline or Paused, with the data's age |
 | `Skeleton` / `SkeletonRows` | loading placeholders shaped like the content. There are no full-screen spinners |
 | `ErrorState` / `Notice` / `Empty` | error, informational and empty states |
 
-## 7. Wording
+## 7. Risk semantics
+
+* **Decision** (`DecisionBadge`): what the policy did. **Risk band** (`RiskBadge`): where the
+  calibrated primary score fell in the policy's bands. Neither is a probability of fraud.
+* **Reason severity** is shown only as stored: a rule's own severity (Critical, High,
+  Medium, Low), or the band a `SCORE_BAND_*` code names. A reason the policy does not grade
+  says "Not graded"; the console never invents a severity.
+* **Model disagreement** is a fact to review, never resolved by the console.
+* **System state** uses the same five words everywhere: CHECKING, ONLINE, DEGRADED, OFFLINE,
+  NOT USED (Redis in Demo mode). DEGRADED always comes with its cause.
+
+## 8. Wording
 
 * **Say** "risk signal", "flagged for review", "model assessment", "model score",
   "analyst decision" and "policy decision".
@@ -118,9 +164,16 @@ pulse. There is no startup sound.
 * A VPN, proxy or Tor exit is "a signal, not proof of fraud".
 * The reference template is named as a template, not a language model.
 
-## 8. Accessibility
+## 9. Accessibility
 
-* Every control is reachable by keyboard and has a visible focus ring.
+* The end-to-end test runs an axe-core WCAG 2.1 A/AA audit on the start-up screen, the
+  overview, the queue, the case workspace and the System page; any serious or critical
+  finding fails it. Stage 14 fixed what the audit found: text dimmed by opacity (timeline
+  and shadow rows), faint help text on tinted buttons, a palette hint on the selected row,
+  and the main region not being keyboard-scrollable.
+* Every control is reachable by keyboard and has a visible focus ring; the main region is
+  focusable so long pages scroll from the keyboard.
+* Collapsed navigation keeps accessible names (`aria-label`, including the open-review count).
 * A skip link leads to the main content.
 * Tables have captions and scoped headers.
 * Live regions announce liveness and start-up progress.

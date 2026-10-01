@@ -79,7 +79,7 @@ export function LiveFeed() {
         ) : items.length ? (
           <FeedTable items={items} caption="Live assessments" />
         ) : (
-          <Empty>No assessments{decision ? ` with decision ${decisionLabel(decision).label}` : ""} yet.</Empty>
+          <Empty title={decision ? `No ${decisionLabel(decision).label.toLowerCase()} decisions yet` : "No assessments yet"}>Monitoring remains active: the feed refreshes every 5 seconds while this tab is open.</Empty>
         )}
       </Panel>
     </div>

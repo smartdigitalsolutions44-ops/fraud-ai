@@ -448,7 +448,26 @@ compliance or fraud-reduction claims. Details are in [TRUST_CHAIN.md](TRUST_CHAI
     verifier, proxy and demo guards, error states, components;
   * Playwright: the analyst flow on a freshly reset demo world.
 
-## After Stage 13: recommendations (no further backend stage is planned here)
+## Stage 14: local installation and product polish ✅
+
+* **One setup, one start** on Windows (PowerShell) and Linux/macOS: `setup-local`,
+  `sentinel-start` (Demo, Dev, StagingLike), `sentinel-status`, `sentinel-stop`,
+  `sentinel-reset-demo`, all thin wrappers over `scripts/localrun/` ([LOCAL_SETUP.md](LOCAL_SETUP.md)).
+* Pre-launch checks (dependencies, ports, database, migrations, signed models); process
+  records with creation times; lifelines so no service outlives its supervisor; rotating,
+  redacted logs; Dev mode on Docker PostgreSQL 16 and Redis 7 (`compose.local.yml`).
+* **Console polish:** a start-up sequence tied line by line to real checks; the case
+  summary, timeline offsets and signals, readable reasons with stored severity, primary
+  vs shadow models, assistance split into evidence, interpretation and limitations, a
+  deliberate resolve flow (R opens, never submits); a seven-group System page; polling
+  backoff and recovery; specific errors; presentation and compact modes; responsive
+  checks at four resolutions; a WCAG 2.1 AA audit in the end-to-end test.
+* **Backend:** Windows-only branches in key and model-file loading
+  ([TRUST_CHAIN.md](TRUST_CHAIN.md#windows)); nothing else changed.
+* **CI:** `local-scripts` (Linux: setup, Demo, Dev, Playwright end to end, shellcheck,
+  PSScriptAnalyzer) and `local-windows` (Windows, from a path with spaces).
+
+## After Stage 14: recommendations (no further backend stage is planned here)
 
 1. **External verification:**
    * the Stripe test-mode checklist;

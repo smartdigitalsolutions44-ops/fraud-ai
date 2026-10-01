@@ -7,7 +7,35 @@ import { RiskBadge } from "@/components/RiskBadge";
 import { StatusBadge } from "@/components/StatusBadge";
 import type { CaseT } from "@/lib/api/schemas";
 import { priorityLabel } from "@/lib/domain";
-import { shortId, utcDateTime } from "@/lib/format";
+import { score, shortId, utcDateTime } from "@/lib/format";
+import { reasonTitle } from "@/lib/reasons";
+
+const OUTCOME: Record<string, string> = {
+  ALLOW: "Allowed",
+  ALLOW_WITH_MONITORING: "Allowed with monitoring",
+  STEP_UP_AUTHENTICATION: "Step-up authentication requested",
+  MANUAL_REVIEW: "Sent to manual review",
+  TEMPORARY_BLOCK: "Temporarily blocked",
+};
+
+/** One line an analyst can read first: what the policy did and the stored facts behind it. */
+export function caseSummary(data: CaseT): string[] {
+  const a = data.assessment;
+  const parts = [OUTCOME[a.decision] ?? a.decision];
+  const primary = data.models.entries.find((m) => m.role === "primary");
+  const lead = data.reasons[0];
+  if (lead) {
+    const cal = primary?.calibrated_score;
+    parts.push(`${reasonTitle(lead.code).toLowerCase()}${lead.code.startsWith("SCORE_BAND_") && cal !== undefined && cal !== null ? ` (calibrated ${score(cal)})` : ""}`);
+  }
+  if (data.reasons.length > 1) parts.push(`${data.reasons.length - 1} more reason${data.reasons.length > 2 ? "s" : ""}`);
+  const matched = data.rules.filter((r) => r.matched).length;
+  parts.push(matched ? `${matched} of ${data.rules.length} rules matched` : `no rule matched (${data.rules.length} evaluated)`);
+  if (data.models.disagreement) parts.push("models disagree");
+  else if (data.models.rated > 1) parts.push("models agree");
+  if (a.fallback_used) parts.push("scoring fallback used");
+  return parts;
+}
 
 export function CaseHeader({ data }: { data: CaseT }) {
   const a = data.assessment;
@@ -29,6 +57,11 @@ export function CaseHeader({ data }: { data: CaseT }) {
         ) : null}
         {a.mode === "step_up_followup" ? <Badge tone="blue">Step-up follow-up</Badge> : null}
       </div>
+      <p className="case-summary" data-testid="case-summary">
+        {caseSummary(data).map((part, i) => (
+          <span key={i}>{part}</span>
+        ))}
+      </p>
       <div className="case-facts">
         <div className="case-fact">
           <span className="label">Assessed</span>

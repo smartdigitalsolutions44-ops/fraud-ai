@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { Icon } from "@/components/Icon";
@@ -32,7 +32,34 @@ export function Actions({ data }: { data: CaseT }) {
   const [pending, setPending] = useState<Resolution | null>(null);
   const [note, setNote] = useState("");
   const [assertion, setAssertion] = useState("");
+  const [called, setCalled] = useState(false);
   const submitting = useRef(false);
+  const firstChoice = useRef<HTMLButtonElement>(null);
+  const panel = useRef<HTMLDivElement>(null);
+  const open = review !== null && review.status !== "resolved";
+
+  // R opens the resolve panel: it brings the outcome choices into view and focuses the first.
+  // It never chooses or submits an outcome; that takes a click (or Enter) and a confirmation.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "r" && e.key !== "R") return;
+      if (e.ctrlKey || e.metaKey || e.altKey || e.repeat || document.querySelector("[aria-modal='true']")) return;
+      const t = e.target as HTMLElement | null;
+      if (t && (t.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(t.tagName))) return;
+      e.preventDefault();
+      panel.current?.scrollIntoView?.({ block: "nearest", behavior: "smooth" });
+      if (open) firstChoice.current?.focus();
+      setCalled(true);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open]);
+
+  useEffect(() => {
+    if (!called) return;
+    const t = setTimeout(() => setCalled(false), 1600);
+    return () => clearTimeout(t);
+  }, [called]);
 
   if (!review) {
     return (
@@ -71,7 +98,7 @@ export function Actions({ data }: { data: CaseT }) {
   const p = priorityLabel(review.priority);
   return (
     <Panel title="Analyst decision" id="actions" meta={<StatusBadge kind="review" status={review.status} />}>
-      <div className="stack" style={{ gap: "var(--space-3)" }}>
+      <div className="stack" style={{ gap: "var(--space-3)" }} ref={panel} data-called={called ? "" : undefined}>
         <dl className="kv" style={{ fontSize: "var(--text-xs)" }}>
           <dt>Case</dt>
           <dd className="mono" title={review.review_id}>
@@ -120,10 +147,11 @@ export function Actions({ data }: { data: CaseT }) {
           </p>
         ) : (
           <>
-            <div className="stack">
-              {ACTIONS.map((a) => (
+            <div className="stack" role="group" aria-label="Choose an outcome (confirmation follows)">
+              {ACTIONS.map((a, i) => (
                 <button
                   key={a.resolution}
+                  ref={i === 0 ? firstChoice : undefined}
                   type="button"
                   className={`btn btn-${a.tone}`}
                   style={{ justifyContent: "flex-start", height: "auto", padding: "8px 12px", flexDirection: "column", alignItems: "flex-start", gap: 2 }}
@@ -135,7 +163,7 @@ export function Actions({ data }: { data: CaseT }) {
                   data-testid={`resolve-${a.resolution}`}
                 >
                   <span>{a.label}</span>
-                  <span className="faint" style={{ fontSize: "var(--text-xs)", fontWeight: 400 }}>
+                  <span className="muted" style={{ fontSize: "var(--text-xs)", fontWeight: 400 }}>
                     {a.help}
                   </span>
                 </button>
@@ -162,11 +190,32 @@ export function Actions({ data }: { data: CaseT }) {
         }}
         onConfirm={submit}
       >
-        <p>
-          Case <span className="mono">{shortId(review.review_id, 12)}</span> will be recorded as{" "}
-          <strong className={`text-${action?.tone ?? "blue"}`}>{pending ? RESOLUTIONS[pending]?.label : ""}</strong>
-          {pending === "needs_more_information" ? ", and stay open." : ". This is final: resolved outcomes cannot be edited."}
-        </p>
+        <dl className="kv confirm-facts">
+          <dt>Outcome</dt>
+          <dd>
+            <strong className={`text-${action?.tone ?? "blue"}`}>{pending ? RESOLUTIONS[pending]?.label : ""}</strong>
+          </dd>
+          <dt>Case</dt>
+          <dd className="mono" title={review.review_id}>
+            {shortId(review.review_id, 12)}
+          </dd>
+          <dt>Recorded as</dt>
+          <dd className="mono">{demoKey ? `operator:${session?.operator.operator_id ?? "?"}` : "the operator in your signed assertion"}</dd>
+        </dl>
+        <div className="confirm-what">
+          <div className="label">What will happen</div>
+          <ul>
+            <li>The service records this outcome with your verified identity and the time.</li>
+            {pending === "needs_more_information" ? (
+              <li>The case stays open and in the queue for follow-up.</li>
+            ) : (
+              <li>
+                The case leaves the open queue. <strong>This is final</strong>: a resolved outcome cannot be edited or replaced.
+              </li>
+            )}
+            <li>The original assessment and its decision are not changed.</li>
+          </ul>
+        </div>
         <label className="field">
           <span className="label">Note (optional, max 500)</span>
           <textarea

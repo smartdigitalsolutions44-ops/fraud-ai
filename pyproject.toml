@@ -46,6 +46,8 @@ postgres = ["psycopg[binary]>=3.1"]
 stripe = ["stripe>=10", "urllib3>=2.7.0"]
 # Stage 12: write-once audit anchors on S3-compatible Object Lock (AWS S3, RustFS, MinIO).
 anchors = ["minio>=7.2"]
+# Stage 14: the local run tooling (scripts/localrun): process tracking and port owners
+local = ["psutil>=5.9"]
 # Stage 10 security tooling (run in CI; see HARDENING.md).
 security = ["pip-audit>=2.7", "bandit>=1.7", "detect-secrets>=1.5", "cyclonedx-bom>=4"]
 dev = [

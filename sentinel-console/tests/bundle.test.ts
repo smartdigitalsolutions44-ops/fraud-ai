@@ -30,6 +30,16 @@ describe.skipIf(!existsSync(STATIC))("client bundle", () => {
       /createHmac/,
       /BEGIN [A-Z ]*PRIVATE KEY/,
       /fak_[A-Za-z0-9]{6,}/,
+      // Stage 14: database, Redis and Vault material, and the local tooling's secrets
+      /postgres(?:ql)?(?:\+psycopg)?:\/\/[^"'\s]*@/,
+      /rediss?:\/\/[^"'\s]*@/,
+      /DATABASE_URL/,
+      /REDIS_URL/,
+      /VAULT_(?:TOKEN|ADDR)/,
+      /hvs\.[A-Za-z0-9]{20,}/,
+      /SERVICE_SIGNING_MASTER_KEY/,
+      /PSEUDONYMISATION_KEY/,
+      /dev-credentials\.json|demo-credentials\.json/,
     ]) {
       expect(text).not.toMatch(forbidden);
     }

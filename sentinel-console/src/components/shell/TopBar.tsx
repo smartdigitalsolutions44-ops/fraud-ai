@@ -15,7 +15,19 @@ const OVERALL: Record<Overall, { label: string; tone: string; glyph: string }> =
   offline: { label: "Offline", tone: "red", glyph: "○" },
 };
 
-export function TopBar({ session, overall, onPalette }: { session?: SessionT; overall: Overall; onPalette: () => void }) {
+export function TopBar({
+  session,
+  overall,
+  onPalette,
+  presentation = false,
+  onExitPresentation,
+}: {
+  session?: SessionT;
+  overall: Overall;
+  onPalette: () => void;
+  presentation?: boolean;
+  onExitPresentation?: () => void;
+}) {
   const pathname = usePathname();
   const o = OVERALL[overall];
   const operator = session?.operator;
@@ -23,7 +35,7 @@ export function TopBar({ session, overall, onPalette }: { session?: SessionT; ov
     <header className="topbar">
       <div className="topbar-title">
         <h1>{titleFor(pathname)}</h1>
-        <span className="faint topbar-hide-sm" style={{ fontSize: "var(--text-xs)" }}>
+        <span className="faint topbar-hide-md" style={{ fontSize: "var(--text-xs)" }}>
           SENTINEL — Fraud Intelligence &amp; Response
         </span>
       </div>
@@ -34,9 +46,14 @@ export function TopBar({ session, overall, onPalette }: { session?: SessionT; ov
             DEMO MODE · SYNTHETIC DATA
           </span>
         ) : null}
-        <span className="badge tone-neutral topbar-hide-sm" title="Environment reported by the console server">
+        <span className="badge tone-neutral topbar-hide-md" title="Environment reported by the console server">
           ENV {session?.environment ?? "—"}
         </span>
+        {presentation ? (
+          <button type="button" className="btn btn-sm btn-ghost" onClick={onExitPresentation} title="Presentation mode: larger text, fewer details. System state stays visible.">
+            Presentation · exit
+          </button>
+        ) : null}
         <span className={`badge tone-${o.tone}`} role="status" aria-label={`System status: ${o.label}`} data-testid="system-status">
           <span className="badge-glyph" aria-hidden="true">
             {o.glyph}
@@ -45,10 +62,10 @@ export function TopBar({ session, overall, onPalette }: { session?: SessionT; ov
         </span>
         <button type="button" className="btn btn-sm btn-ghost" onClick={onPalette} aria-keyshortcuts="Control+K Meta+K">
           <Icon name="search" />
-          <span className="topbar-hide-sm">Search / commands</span>
+          <span className="topbar-hide-md">Search / commands</span>
           <kbd>Ctrl K</kbd>
         </button>
-        <span className="flex topbar-hide-sm" style={{ fontSize: "var(--text-xs)" }} title={operator?.note}>
+        <span className="flex topbar-hide-sm topbar-operator" style={{ fontSize: "var(--text-xs)" }} title={operator?.note}>
           <Icon name="user" />
           {operator?.mode === "demo_key" ? (
             <span>

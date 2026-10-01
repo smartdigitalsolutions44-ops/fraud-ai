@@ -25,7 +25,13 @@ export function Nav({ session, apiVersion }: { session?: SessionT; apiVersion?: 
       <ul className="nav-list">
         {NAV.filter((n) => !n.demoOnly || session?.demo_mode).map((n) => (
           <li key={n.href}>
-            <Link href={n.href} className="nav-link" aria-current={isActive(pathname, n.href) ? "page" : undefined} title={n.label}>
+            <Link
+              href={n.href}
+              className="nav-link"
+              aria-current={isActive(pathname, n.href) ? "page" : undefined}
+              title={n.label}
+              aria-label={n.href === "/queue" && open !== undefined ? `${n.label}, ${open} open` : n.label}
+            >
               <Icon name={n.icon} />
               <span>{n.label}</span>
               {n.href === "/queue" && open !== undefined ? (

@@ -158,6 +158,36 @@ read refuses the swap.
 **Cost:** signature verification runs only at load (start-up, cache miss or the readiness
 re-check), never per request. Measurements are in HARDENING.md §23.
 
+### Windows (Stage 14)
+
+Two of the checks above use operating-system features that Windows Python does not provide:
+`os.open` cannot open a directory, `dir_fd` and `O_NOFOLLOW` do not exist, and the permission
+bits Windows reports do not describe NTFS access control. So that SENTINEL runs natively on a
+Windows development machine, Stage 14 adds two narrow branches, taken **only** when
+`os.name == "nt"` (`fraud_ai/utils/winfs.py`). Linux, macOS and every container run exactly
+the code they ran before.
+
+| | POSIX (unchanged) | Windows branch |
+|---|---|---|
+| Private key file permissions | refused if readable by group or others | **not checked**: the bits are meaningless; NTFS permissions on the file (normally the user profile) are the control |
+| Key file: regular file, no symlink, size limit, PKCS#8 Ed25519 format | yes | yes, plus junctions and hard links refused |
+| Artefact directory | opened once, `O_DIRECTORY \| O_NOFOLLOW` | symlinks and junctions refused (`lstat`, reparse-point attribute) |
+| Artefact files | opened relative to the directory handle, `O_NOFOLLOW`, regular files only | opened by path after refusing links, junctions and hard links; the opened file must be the inspected one (volume, file index, size) |
+| Size cap, changed-during-read detection | yes | yes (size, modification time and file index re-checked after the read) |
+| Digest and Ed25519 signature on the bytes read; load from those bytes | yes | **yes, unchanged** |
+
+**The weaker guarantee.** On Windows a process able to write to the model directory could in
+principle replace a file between the check and the open (time of check to time of use). It
+cannot make a different model load: the digest and the signature are verified over the bytes
+actually read, and those same bytes are deserialised, so replaced content is refused. What
+is lost is the stronger POSIX property that every file comes from one opened directory.
+This is acceptable for the local Windows demo; staging and production run on Linux.
+
+`tests/test_windows_files.py` forces the Windows branch on Linux (symlinks, hard links,
+size cap, a file swapped between check and open, a file changed during the read, the
+permission check, format validation), and the CI `local-windows` job runs the same tests and
+a full SENTINEL start and stop on real Windows.
+
 ## 4. Safe serialisation review
 
 | Format | Where | Code execution on load? | Trust assumption / mitigation |

@@ -6,6 +6,7 @@ import { useState } from "react";
 import { Icon } from "@/components/Icon";
 import { LiveIndicator } from "@/components/LiveIndicator";
 import { MetricCard } from "@/components/MetricCard";
+import { splitModel } from "@/components/ModelComparison";
 import { Panel } from "@/components/Panel";
 import { Empty, ErrorState, SkeletonRows } from "@/components/States";
 import { SystemStatus } from "@/components/SystemStatus";
@@ -73,7 +74,7 @@ export function Overview() {
           label="System status"
           value={<span style={{ textTransform: "capitalize", fontSize: "var(--text-xl)" }}>{status.overall}</span>}
           tone={overallTone[status.overall]}
-          sub={checkSummary(status.checks)}
+          sub={checkSummary(status.groups)}
         />
         <MetricCard label={`Assessments · ${hours}h`} value={s ? count(s.assessments.total) : null} loading={loading} tone="cyan" sub="live decisions (follow-ups excluded)" />
         <MetricCard
@@ -89,7 +90,16 @@ export function Overview() {
         <MetricCard label="Scoring latency p95" value={s ? ms(s.latency_ms.p95) : null} unit="ms" loading={loading} tone="blue" sub={s ? `p50 ${ms(s.latency_ms.p50)} ms · ${count(s.latency_ms.samples)} samples` : undefined} />
         <MetricCard
           label="Primary model"
-          value={<span className="mono" style={{ fontSize: "var(--text-md)" }}>{primary?.ref ?? "—"}</span>}
+          value={
+            primary ? (
+              <span className="metric-model">
+                <span className="mono">{splitModel(primary.ref)[0]}</span>
+                {splitModel(primary.ref)[1] ? <span className="model-version mono">v{splitModel(primary.ref)[1]}</span> : null}
+              </span>
+            ) : (
+              "—"
+            )
+          }
           loading={status.system.isPending}
           tone={primary?.loaded && primary.signature?.matches_artifact ? "green" : "amber"}
           sub={primary ? `${primary.loaded ? "loaded" : "not loaded"} · signature ${primary.signature?.matches_artifact ? "verified" : "not verified"}` : undefined}
@@ -108,7 +118,7 @@ export function Overview() {
             flush
             note="Step-up, manual review and temporary block decisions from the latest 100 assessments. A flag is a risk signal for review, not a finding of fraud."
           >
-            {feed.isPending ? <SkeletonRows rows={5} /> : feed.isError && !feed.data ? <div className="panel-body"><ErrorState error={feed.error} compact /></div> : alerts.length ? <FeedTable items={alerts} keyboard={false} caption="Recent flagged assessments" /> : <Empty>No flagged assessments in the latest 100.</Empty>}
+            {feed.isPending ? <SkeletonRows rows={5} /> : feed.isError && !feed.data ? <div className="panel-body"><ErrorState error={feed.error} compact /></div> : alerts.length ? <FeedTable items={alerts} keyboard={false} caption="Recent flagged assessments" compact /> : <Empty title="No flagged assessments">None of the latest 100 assessments was stepped up, reviewed or blocked. Monitoring remains active.</Empty>}
           </Panel>
           <Panel title="Decision distribution" meta={<span>{hours}h window</span>} note="Counts of the risk policy's decisions on live assessments.">
             {s ? <DecisionDistribution byDecision={s.assessments.by_decision} total={s.assessments.total} /> : <SkeletonRows rows={5} />}
@@ -116,7 +126,7 @@ export function Overview() {
         </div>
         <div className="grid" style={{ alignContent: "start" }}>
           <Panel title="System health" flush meta={<Link href="/system" className="btn btn-sm btn-ghost">Details <Icon name="chevronRight" /></Link>}>
-            <SystemStatus checks={status.checks} />
+            <SystemStatus checks={status.groups.map((g) => ({ id: g.id, label: g.title, state: g.state, detail: g.cause }))} />
           </Panel>
           <Panel title="Review backlog" meta={<Link href="/queue" className="btn btn-sm btn-ghost">Queue <Icon name="chevronRight" /></Link>}>
             {s ? (

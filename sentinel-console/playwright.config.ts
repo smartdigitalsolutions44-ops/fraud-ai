@@ -4,8 +4,9 @@ import { defineConfig, devices } from "@playwright/test";
 
 /**
  * End-to-end tests against the real fraud-ai service on a freshly reset synthetic demo world.
- * `scripts/demo.mjs` runs the guarded `fraud-ai demo reset`, starts the service and serves the
- * production build of the console in DEMO MODE. Run `npm run build` first.
+ * `scripts/demo.mjs` (the shared Stage 14 tooling: `scripts/sentinel.py start --mode demo`) runs
+ * the guarded `fraud-ai demo reset`, starts the service and serves the production build of the
+ * console in DEMO MODE. Run `setup-local` first (it installs and builds).
  */
 const API_PORT = Number(process.env.E2E_API_PORT || 8181);
 const PORT = Number(process.env.E2E_CONSOLE_PORT || 3100);
@@ -32,6 +33,9 @@ export default defineConfig({
     url: `http://127.0.0.1:${PORT}/api/session`,
     timeout: 15 * 60_000, // a fresh demo world takes a few minutes to build
     reuseExistingServer: false,
+    // SIGTERM lets scripts/demo.mjs run `sentinel.py stop`; a bare kill would leave the
+    // supervisor's services to their lifelines (they still stop, a little later)
+    gracefulShutdown: { signal: "SIGTERM", timeout: 30_000 },
     stdout: "pipe",
     stderr: "pipe",
     env: {
@@ -41,7 +45,9 @@ export default defineConfig({
       FRAUD_API_PORT: String(API_PORT),
       CONSOLE_PORT: String(PORT),
       CONSOLE_MODE: "start",
-      PYTHON: process.env.PYTHON || "python3",
+      // its own runtime directory, so a test run never collides with an interactive session
+      SENTINEL_RUNTIME_DIR: path.resolve(__dirname, "..", ".runtime", "e2e"),
+      ...(process.env.PYTHON ? { PYTHON: process.env.PYTHON } : {}),
     },
   },
 });

@@ -68,6 +68,12 @@ export function Notice({ tone = "blue", title, children, icon = "info" }: { tone
   );
 }
 
-export function Empty({ children }: { children: ReactNode }) {
-  return <div className="empty">{children}</div>;
+/** A professional empty state: a short title in capitals, then a line of context. */
+export function Empty({ title, children }: { title?: string; children?: ReactNode }) {
+  return (
+    <div className="empty" role="status">
+      {title ? <div className="empty-title">{title}</div> : null}
+      {children ? <div>{children}</div> : null}
+    </div>
+  );
 }

@@ -28,7 +28,7 @@ const WINDOWS = [
 
 function Counts({ data, label }: { data: Record<string, number>; label: (k: string) => string }) {
   const entries = Object.entries(data);
-  if (!entries.length) return <Empty>None recorded in this window.</Empty>;
+  if (!entries.length) return <Empty title="None recorded">Nothing in this window.</Empty>;
   const total = entries.reduce((a, [, v]) => a + v, 0);
   return (
     <dl className="kv">

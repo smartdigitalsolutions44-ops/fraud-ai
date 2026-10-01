@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CommandPalette } from "@/components/CommandPalette";
 import { LiveIndicator } from "@/components/LiveIndicator";
 import { StartupScreen } from "@/components/shell/StartupScreen";
-import type { StartupCheck } from "@/features/system/checks";
+import type { GroupId, HealthGroup } from "@/features/system/groups";
 
 import { mockFetch, renderWithClient } from "./utils";
 
@@ -17,8 +17,8 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-const check = (id: string, state: StartupCheck["state"]): StartupCheck => ({ id, label: id, state, detail: "" });
-const ALL = ["database", "shared_state", "policy", "model", "signatures", "audit", "analyst"];
+const group = (id: GroupId, state: HealthGroup["state"]): HealthGroup => ({ id, title: id, action: `Checking ${id}`, state, cause: `${id} cause` });
+const ALL: GroupId[] = ["service", "trust", "data", "models", "policy", "audit", "analyst"];
 
 describe("command palette", () => {
   it("offers navigation and view actions only — nothing consequential", () => {
@@ -48,20 +48,31 @@ describe("command palette", () => {
 });
 
 describe("start-up screen", () => {
-  it("leaves by itself when every check is online", () => {
+  it("leaves by itself, quickly, when every group is online", () => {
     vi.useFakeTimers();
-    renderWithClient(<StartupScreen checks={ALL.map((id) => check(id, "online"))} overall="operational" versions="v" />);
-    expect(screen.getByText("INITIALIZING FRAUD INTELLIGENCE ENVIRONMENT")).toBeInTheDocument();
-    act(() => vi.advanceTimersByTime(1200));
-    expect(screen.queryByText("INITIALIZING FRAUD INTELLIGENCE ENVIRONMENT")).not.toBeInTheDocument();
+    renderWithClient(<StartupScreen groups={ALL.map((id) => group(id, "online"))} overall="operational" versions="v" demoMode={false} />);
+    expect(screen.getByText("SECURE ANALYST ENVIRONMENT")).toBeInTheDocument();
+    expect(screen.getByRole("progressbar")).toHaveAttribute("aria-valuenow", "7");
+    act(() => vi.advanceTimersByTime(800)); // never a long animation to sit through
+    expect(screen.queryByText("SECURE ANALYST ENVIRONMENT")).not.toBeInTheDocument();
     expect(sessionStorage.getItem("sentinel.startup.done")).toBe("1");
   });
 
-  it("stays, and says so, when a check is degraded", () => {
+  it("shows a line as CHECKING until its group has answered", () => {
+    renderWithClient(<StartupScreen groups={ALL.map((id) => group(id, id === "audit" ? "checking" : "online"))} overall="checking" versions="v" demoMode={true} />);
+    const audit = screen.getByTestId("startup").querySelector('[data-check="audit"]')!;
+    expect(audit).toHaveAttribute("data-state", "checking");
+    expect(audit.textContent).toContain("CHECKING");
+    expect(screen.getByRole("progressbar")).toHaveAttribute("aria-valuenow", "6");
+    expect(screen.getByText("DEMO MODE · SYNTHETIC DATA")).toBeInTheDocument();
+  });
+
+  it("stays, and says so, when a group is degraded", () => {
     vi.useFakeTimers();
-    renderWithClient(<StartupScreen checks={ALL.map((id) => check(id, id === "audit" ? "degraded" : "online"))} overall="degraded" versions="v" />);
+    renderWithClient(<StartupScreen groups={ALL.map((id) => group(id, id === "audit" ? "degraded" : "online"))} overall="degraded" versions="v" demoMode={false} />);
     act(() => vi.advanceTimersByTime(5000));
-    expect(screen.getByText(/1 check degraded/)).toBeInTheDocument();
+    expect(screen.getByText(/1 group degraded/)).toBeInTheDocument();
+    expect(screen.getByText("audit cause")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /Enter console \(degraded\)/ }));
     act(() => vi.advanceTimersByTime(400));
     expect(screen.queryByTestId("startup")).not.toBeInTheDocument();
@@ -69,7 +80,7 @@ describe("start-up screen", () => {
 
   it("is skipped once seen in this browser session", () => {
     sessionStorage.setItem("sentinel.startup.done", "1");
-    renderWithClient(<StartupScreen checks={[]} overall="checking" versions="v" />);
+    renderWithClient(<StartupScreen groups={[]} overall="checking" versions="v" demoMode={false} />);
     expect(screen.queryByTestId("startup")).not.toBeInTheDocument();
   });
 });

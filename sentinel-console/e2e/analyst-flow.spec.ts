@@ -1,3 +1,5 @@
+import path from "node:path";
+
 import { expect, test, type Page } from "@playwright/test";
 
 /**
@@ -7,6 +9,24 @@ import { expect, test, type Page } from "@playwright/test";
  * With SENTINEL_SCREENSHOTS=1 it also writes the README screenshots (demo data only).
  */
 const SHOTS = process.env.SENTINEL_SCREENSHOTS === "1";
+const AXE = path.join(process.cwd(), "node_modules", "axe-core", "axe.min.js"); // run from sentinel-console
+
+/** WCAG 2.1 A/AA audit of the current page (axe-core); any serious or critical issue fails. */
+async function accessible(page: Page, where: string) {
+  // audit settled colours, not an animation frame (a freshly polled row is briefly tinted)
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.waitForTimeout(350);
+  await page.addScriptTag({ path: AXE });
+  const violations = await page.evaluate(async () => {
+    // @ts-expect-error axe is injected above
+    const r = await window.axe.run(document, { runOnly: { type: "tag", values: ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"] } });
+    return r.violations
+      .filter((v: { impact: string }) => v.impact === "serious" || v.impact === "critical")
+      .map((v: { id: string; nodes: Array<{ target: string[] }> }) => `${v.id}: ${v.nodes.map((n) => n.target.join(" ")).join(" | ")}`);
+  });
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  expect(violations, `accessibility on ${where}`).toEqual([]);
+}
 
 async function shot(page: Page, name: string) {
   if (!SHOTS) return;
@@ -17,15 +37,22 @@ async function shot(page: Page, name: string) {
 test.describe.configure({ mode: "serial" });
 
 test("analyst flow", async ({ page }) => {
-  // --- start-up: real readiness checks
+  const problems: string[] = [];
+  page.on("console", (m) => {
+    if (m.type() === "error" || m.type() === "warning") problems.push(`${m.type()}: ${m.text()}`);
+  });
+  page.on("pageerror", (e) => problems.push(`pageerror: ${e.message}`));
+
+  // --- start-up: one line per group, each resolved by real readiness data
   await page.goto("/");
   const startup = page.getByTestId("startup");
-  await expect(startup.getByText("INITIALIZING FRAUD INTELLIGENCE ENVIRONMENT")).toBeVisible();
-  await expect(startup.locator('[data-check="database"][data-state="online"]')).toBeVisible();
-  await expect(startup.locator('[data-check="model"][data-state="online"]')).toBeVisible();
-  await expect(startup.locator('[data-check="signatures"][data-state="online"]')).toBeVisible();
-  await expect(startup.locator('[data-check="analyst"][data-state="online"]')).toBeVisible();
+  await expect(startup.getByText("SECURE ANALYST ENVIRONMENT")).toBeVisible();
+  for (const id of ["service", "trust", "data", "models", "policy", "analyst"]) {
+    await expect(startup.locator(`[data-check="${id}"][data-state="online"]`)).toBeVisible();
+  }
+  await expect(startup.locator('[data-check="data"]')).toContainText("Redis not used");
   await expect(startup.locator('[data-state="checking"]')).toHaveCount(0);
+  await accessible(page, "start-up");
   await shot(page, "01-startup");
   // a fresh demo world has no external audit anchor yet, so the console reports DEGRADED and waits
   const enter = page.getByRole("button", { name: /Enter console/ });
@@ -50,11 +77,13 @@ test("analyst flow", async ({ page }) => {
   const metrics = page.getByTestId("overview-metrics");
   await expect(metrics.getByRole("group", { name: /Assessments/ })).not.toContainText("—");
   await expect(page.getByTestId("feed-table")).toBeVisible();
+  await accessible(page, "overview");
   await shot(page, "02-overview");
 
   // --- queue: the new item, found by its assessment ID
   await page.getByRole("link", { name: /Review Queue/ }).click();
   await expect(page.getByTestId("queue-table")).toBeVisible();
+  await accessible(page, "queue");
   await shot(page, "03-queue");
   await page.getByLabel("Filter by case, assessment or event ID").fill(assessmentId.slice(0, 8));
   const rows = page.getByTestId("case-row");
@@ -65,14 +94,25 @@ test("analyst flow", async ({ page }) => {
   await expect(page).toHaveURL(new RegExp(`/queue\\?case=${assessmentId}`));
   const ws = page.getByTestId("case-workspace");
   await expect(ws.getByTestId("case-header")).toContainText("Manual review");
+  await expect(ws.getByTestId("case-summary")).toContainText("Sent to manual review");
   await expect(ws.getByTestId("timeline-event").filter({ hasText: "This case" })).toHaveCount(1);
   await expect(ws.getByTestId("model-comparison")).toContainText("Shadow · never decides");
+  await expect(ws.getByTestId("model-comparison")).toContainText("Recorded for comparison · never decides");
+  await accessible(page, "case workspace");
   await shot(page, "04-case");
+
+  // --- keyboard: R opens the resolve panel and never submits
+  await page.locator("body").click({ position: { x: 5, y: 5 } });
+  await page.keyboard.press("r");
+  await expect(ws.getByTestId("resolve-legitimate")).toBeFocused();
+  await expect(page.getByRole("alertdialog")).toHaveCount(0);
 
   // --- analyst assistance
   await ws.getByTestId("run-investigation").click();
   await expect(ws.getByTestId("investigation-result")).toBeVisible({ timeout: 90_000 });
   await expect(ws.getByTestId("investigation-result")).toContainText("Reference template");
+  await expect(ws.getByTestId("investigation-result")).toContainText("Observed evidence");
+  await expect(ws.getByTestId("investigation-result")).toContainText("Limitations");
   await ws.getByTestId("model-comparison").scrollIntoViewIfNeeded();
   await shot(page, "05-model-comparison");
 
@@ -80,6 +120,7 @@ test("analyst flow", async ({ page }) => {
   await ws.getByTestId("resolve-legitimate").click();
   const dialog = page.getByRole("alertdialog");
   await expect(dialog).toContainText("This is final");
+  await expect(dialog).toContainText("What will happen");
   await dialog.getByRole("textbox").first().fill("Demo walkthrough: known device and home network.");
   await dialog.getByTestId("confirm-action").click();
   await expect(dialog).toBeHidden();
@@ -96,7 +137,12 @@ test("analyst flow", async ({ page }) => {
   // --- system health
   await page.getByRole("link", { name: "System" }).click();
   await expect(page.getByTestId("models-table")).toContainText("Verified");
+  await expect(page.getByTestId("ops-rail").locator('[data-group="trust"][data-state="online"]')).toBeVisible();
+  await accessible(page, "system");
   await shot(page, "06-system");
+
+  // a clean browser console through the whole flow: no React, hydration or runtime errors
+  expect(problems).toEqual([]);
 });
 
 test("the proxy refuses routes outside the allow-list", async ({ request }) => {

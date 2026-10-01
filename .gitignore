@@ -44,3 +44,7 @@ deploy/staging/backups/
 /demo-out/
 cosign.key
 *.pem
+
+# Stage 14: local run tooling (logs, PID records, session files, generated Dev secrets)
+.runtime/
+sentinel.local.env

@@ -45,8 +45,12 @@ describe("badges never rely on colour alone", () => {
 
 describe("error states", () => {
   it.each<[ApiErrorKind, string, number, string]>([
-    ["unavailable", "BACKEND_UNREACHABLE", 503, "Service unavailable"],
-    ["forbidden", "INSUFFICIENT_SCOPE", 403, "Permission denied"],
+    ["unavailable", "BACKEND_UNREACHABLE", 503, "Fraud service unreachable"],
+    ["unavailable", "UNAVAILABLE", 503, "Service unavailable"],
+    ["unavailable", "DATABASE_UNAVAILABLE", 503, "Database unavailable"],
+    ["unavailable", "STATE_UNAVAILABLE", 503, "Redis shared state unavailable"],
+    ["forbidden", "INSUFFICIENT_SCOPE", 403, "Permission denied: missing scope"],
+    ["forbidden", "FORBIDDEN", 403, "Permission denied"],
     ["rate_limited", "RATE_LIMITED", 429, "Rate limited"],
     ["not_found", "NOT_FOUND", 404, "Not found"],
     ["llm_unavailable", "LLM_UNAVAILABLE", 503, "Local analyst model unavailable"],
