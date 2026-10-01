@@ -136,7 +136,8 @@ def docker_state() -> tuple[bool, str]:
         )
     except (OSError, subprocess.TimeoutExpired):
         return False, "Docker did not answer (is Docker Desktop running?)"
-    if info.returncode != 0:
+    # Some Docker versions exit 0 with an empty ServerVersion when the daemon is unreachable
+    if info.returncode != 0 or not info.stdout.strip():
         return False, "Docker is installed but not running: start Docker Desktop"
     compose = subprocess.run(  # noqa: S603  # nosec B603
         [docker, "compose", "version", "--short"], capture_output=True, text=True, check=False

@@ -326,3 +326,20 @@ def test_console_modules_never_differ_only_in_case() -> None:
                     clashes.append(f"{folder}: {seen[stem]} / {name}")
                 seen.setdefault(stem, name)
     assert clashes == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a POSIX shell stands in for docker")
+def test_docker_without_a_daemon_is_not_usable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Docker 29 prints the connection error and exits 0 with an empty server version
+    fake = tmp_path / "docker"
+    fake.write_text(
+        '#!/bin/sh\nif [ "$1" = info ]; then echo "failed to connect" >&2; exit 0; fi\n'
+        "echo 2.38.2\n"
+    )
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    usable, why = bootstrap.docker_state()
+    assert not usable
+    assert "not running" in why
