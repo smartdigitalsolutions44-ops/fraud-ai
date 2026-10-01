@@ -1,0 +1,1 @@
+{"status":"ready","api_version":"fraud-api-1.0.0","checks":{"database":"ok","migrations":"ok","active_policy":"ok","primary_model":"ok","shared_state":"not_required","signing_key":"ok","llm":"not_required"}}

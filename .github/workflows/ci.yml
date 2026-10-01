@@ -1,4 +1,4 @@
-# fraud-ai CI (Stages 10-12). Benchmarks are NOT run here (they need a quiet, comparable
+# fraud-ai CI (Stages 10-13). Benchmarks are NOT run here (they need a quiet, comparable
 # machine); see scripts/check_regression.py and HARDENING.md.
 # Artefacts: coverage, SBOM, security summary, container scan and smoke results. Never
 # uploaded: .env files, secrets, signing keys or test credentials (the smoke test's keys are
@@ -46,6 +46,30 @@ jobs:
       - run: python -m ruff check .
       - run: python -m ruff format --check fraud_ai tests migrations
       - run: python -m mypy
+
+  # Stage 13: the SENTINEL analyst console (sentinel-console/). The Playwright end-to-end
+  # test needs the Python service and a freshly built demo world; it runs locally
+  # (`npm run e2e`), not here.
+  console:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: sentinel-console
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: sentinel-console/package-lock.json
+      - run: npm ci
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npm test   # after the build, so the client-bundle secret check runs too
 
   test:
     runs-on: ubuntu-latest

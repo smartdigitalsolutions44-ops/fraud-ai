@@ -57,6 +57,9 @@ SCOPES: dict[str, str] = {
     "webauthn:write": "register passkeys for a user",
     "investigation:write": "POST /v1/assessments/{id}/investigate (analyst-triggered LLM)",
     "metrics:read": "GET /v1/metrics",
+    # Stage 13: read-only analyst views for the Sentinel console (model scores, rule
+    # evidence, timelines, system status). Grants no write or decision capability.
+    "analyst:read": "GET /v1/analyst/* (read-only analyst console views)",
 }
 _DUMMY_SALT = "0" * 32
 _DUMMY_HASH = hashlib.sha256(b"fraud-ai-dummy").hexdigest()

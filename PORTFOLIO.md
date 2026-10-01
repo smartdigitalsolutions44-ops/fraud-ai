@@ -1,6 +1,6 @@
 # fraud-ai: portfolio summary
 
-A fraud-prevention platform, built in twelve stages as a learning and portfolio project.
+A fraud-prevention platform, built in thirteen stages as a learning and portfolio project.
 It scores payment and account events in real time, decides what to do about them under a
 versioned policy, and keeps every decision verifiable afterwards.
 
@@ -44,7 +44,8 @@ flowchart LR
     POL --> PG
     REV --> PG
 
-    AN[Analyst<br/>signed operator assertion] -- resolve --> REV
+    AN[Analyst<br/>signed operator assertion] -- "SENTINEL console<br/>(server-side signing)" --> API
+    AN -- resolve --> REV
     AN -- investigate --> LLM[Local LLM<br/>explains only · cites evidence]
     LLM -. "reads stored evidence;<br/>never scores or decides" .-> PG
 
@@ -72,6 +73,21 @@ flowchart LR
 Shadow models and policies are scored and recorded, but never decide. Every failure has an
 explicit conservative fallback: a failing secondary model means at least a step-up, and an
 unavailable database means "not decided", never an allow.
+
+### The analyst console (Stage 13)
+
+**SENTINEL — Fraud Intelligence & Response** (`sentinel-console/`: Next.js, React,
+TypeScript) is the analyst interface: start-up checks, overview, live feed, review queue,
+a case workspace, system, metrics and demo pages.
+
+It is a *client* of the `/v1` API:
+
+* its server holds the API key and signs requests, so the browser never sees a secret;
+* it shows models side by side, with no invented consensus score;
+* it marks the LLM output as analyst assistance;
+* resolutions are authenticated, and final once made.
+
+![SENTINEL case workspace](sentinel-console/docs/screenshots/04-case.png)
 
 ## 3. The ML approach
 
@@ -180,14 +196,17 @@ unavailable database means "not decided", never an allow.
   integration.
 * **Base-image CVEs.** Eight HIGH CVEs in Debian base packages have no upstream fix yet.
   They are documented, not suppressed.
-* **No analyst UI.** ANALYST_WORKFLOW.md is a contract only.
+* **The analyst console is a single-analyst tool.** SENTINEL (Stage 13) has no case
+  assignment, because the service has none, and no multi-user session layer. Outside the
+  demo, each resolution needs the analyst's own signed assertion, pasted in. There is no
+  hardware-token or single-sign-on integration.
 * **No erasure execution.** The design is in PRIVACY.md §6.
 
 ## 8. CV and GitHub summary
 
 **GitHub (repository description):**
 > Real-time fraud scoring platform (Python, FastAPI, PostgreSQL, Redis, scikit-learn,
-> PyTorch) built as a portfolio project on synthetic data: point-in-time features,
+> PyTorch; Next.js analyst console) built as a portfolio project on synthetic data: point-in-time features,
 > versioned risk policies, step-up authentication, and a verifiable trust chain (signed
 > models, images and releases; WORM audit anchors; two-person, authenticated policy
 > changes). Not production software.
@@ -206,6 +225,9 @@ unavailable database means "not decided", never an allow.
 >   * signed model artefacts;
 >   * a hash-chained audit log with WORM anchors;
 >   * authenticated two-person approval.
+> * Built SENTINEL, a Next.js and TypeScript analyst console: a backend-for-frontend with
+>   server-side request signing, schema-validated API responses, an honest degraded mode,
+>   and Playwright end-to-end tests against the real service.
 > * Ran it on a staging stack (Docker Compose, TLS, Vault, S3 Object Lock) with CI
 >   covering tests, type checks, dependency, secret and container scanning, and signed
 >   container images with SBOM and provenance.

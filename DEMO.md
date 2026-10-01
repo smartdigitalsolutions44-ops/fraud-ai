@@ -130,7 +130,33 @@ The run writes `walkthrough.json`. The Stage 12 run on the default world:
 `tests/test_demo.py` repeats this end to end on a 200-user world against the real service
 process.
 
-## 5. Talking points and honest limits
+## 5. The same demo in the SENTINEL console (Stage 13)
+
+```bash
+cd sentinel-console && npm ci && npm run demo      # → http://127.0.0.1:3000
+```
+
+* **What `npm run demo` starts.** It builds the world if needed, starts
+  `fraud-ai demo start` and serves the console in **DEMO MODE**. The top bar says so
+  (DEMO MODE · SYNTHETIC DATA).
+* **Start-up.** The start-up screen shows the real readiness checks. On a fresh world the
+  audit chain shows DEGRADED, because no external anchor exists until
+  `fraud-ai audit anchor-now` (or the walkthrough's step 8) runs.
+* **Demo page.** It lists the ten cases with their measured decision and a developer note,
+  kept separate from model output. **Score this scenario** sends the case's events
+  through the real service (server-side, signed); the page then shows the service's
+  decision against the measured one.
+* **Resolving a case.** Open the case from the Review Queue and run the investigation.
+  This is the reference template unless a tested local model is configured. Then resolve
+  it. In DEMO MODE the console server signs as demo reviewer `rita`, and the outcome
+  records `operator:rita`.
+* **RESET DEMO.** It needs the typed phrase `RESET DEMO`. It runs the same guarded
+  `fraud-ai demo reset` through the local supervisor and is refused outside DEMO MODE.
+
+The Playwright test (`sentinel-console/e2e/`) runs exactly this flow on a freshly reset
+world, and captures the screenshots in `sentinel-console/docs/screenshots/`.
+
+## 6. Talking points and honest limits
 
 * The demo shows **mechanisms**: authenticated operators, signed artefacts, immutable
   decisions, fail-closed checks. It does not show fraud-detection performance.

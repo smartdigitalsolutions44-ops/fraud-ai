@@ -75,6 +75,7 @@ SCOPES = [
     "webauthn:write",
     "investigation:write",
     "metrics:read",
+    "analyst:read",
 ]
 
 

@@ -59,6 +59,12 @@ recorded attempt → NEW immutable follow-up assessment (the original is never c
 | `GET /v1/health` | none | liveness (the process only) |
 | `GET /v1/ready` | none | readiness: database, migrations, policy, primary model; never the LLM |
 | `GET /v1/metrics` | `metrics:read` | Prometheus text format |
+| `GET /v1/analyst/feed?limit&since&decision` | `analyst:read` | Stage 13: recent assessments with review and step-up status |
+| `GET /v1/analyst/reviews?status&limit` | `analyst:read` | the queue joined with its assessments |
+| `GET /v1/analyst/cases/{assessment_id}` | `analyst:read` | the case view: reasons, rule evidence, stored model scores, indicators, timeline, step-up, activity, latest investigation |
+| `GET /v1/analyst/summary?hours` | `analyst:read` | counts, latency percentiles, shadow agreement, hourly series |
+| `GET /v1/analyst/system` | `analyst:read` | policy, models and signatures, migrations, security settings, audit chain and anchor, LLM runtime, reason catalogue |
+| `GET /v1/analyst/search?q` | `analyst:read` | exact or prefix lookup of review, assessment and event IDs (8-36 hex characters or a UUID; nothing else is searchable) |
 
 Special scopes:
 
@@ -372,6 +378,8 @@ POST /v1/reviews/{review_id}/resolve          {"resolution": "legitimate" | "fra
   | 401 `OPERATOR_AUTH_UNAVAILABLE` | authentication is required but no registry is loaded (the service normally refuses to start first) |
 
 * Notes that look like personal data or secrets get 422.
+* Each outcome carries `reviewer` (Stage 13): the verified `operator:<id>`, or the calling
+  key when operator authentication is off.
 * A resolved item gets 409 `ALREADY_RESOLVED`.
 * Resolving never changes the assessment.
 
@@ -387,6 +395,21 @@ with its own timeout (`LOCAL_LLM_TIMEOUT` + 10 s). It is never part of scoring.
 | output failed validation (nothing stored) | 502 `INVESTIGATION_FAILED` |
 | timeout | 504 `LLM_TIMEOUT` |
 | no stored predictions | 409 `INVESTIGATION_NOT_POSSIBLE` |
+
+## 8a. Analyst views (Stage 13, read-only)
+
+The `GET /v1/analyst/*` endpoints serve the SENTINEL console
+(`sentinel-console/ARCHITECTURE.md` §5). They:
+
+* write nothing;
+* return pseudonymous references only;
+* describe reason codes only from the service's catalogue (an unknown code gets
+  `description: null`);
+* list stored model scores per model against that model's own threshold, and never compute
+  a combined score.
+
+The system view verifies the audit chain only when it has at most 50,000 events.
+Otherwise it reports `verified: null`, with the reason.
 
 ## 9. Operations
 

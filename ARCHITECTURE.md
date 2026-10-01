@@ -21,7 +21,9 @@ It is deliberately *not* a website, dashboard, or browser application:
   (apps, payment gateways) and returns decisions. The natural interfaces are a library API,
   a CLI and a machine-to-machine scoring service (Stage 9) - not HTML.
 
-If an analyst UI is ever required (Stage 10 at the earliest), it will be a *client* of this core.
+The analyst UI came in Stage 13, as planned, as a *client* of this core: **SENTINEL**
+(`sentinel-console/`, §18). It calls the `/v1` API through its own server and contains no
+fraud logic.
 
 ## 2. Event flow
 
@@ -549,3 +551,32 @@ worker 1..N ─┬─► PostgreSQL  durable: events, assessments, reviews, labe
   are not duplicated), then run `fraud-ai db migrate`. The migration/model parity test will
   fail until they agree.
 
+## 18. The SENTINEL analyst console (Stage 13)
+
+```
+ analyst's browser ─► SENTINEL console server (Next.js, backend-for-frontend) ─signed v2─► /v1 API
+                         allow-listed proxy · resolve route · session · demo (DEMO MODE only)
+```
+
+* **Separate package.** `sentinel-console/` has its own `package.json`, lock file and
+  tests. It is Next.js 16, React 19 and TypeScript.
+* **No fraud logic in the console.** Scoring, policy, inference, review rules and operator
+  verification stay in the service. The console displays the service's answers and
+  forwards the analyst's resolution.
+* **Secrets stay server-side.** The console server holds the API key and v2 signing secret
+  and signs every call. The browser only reaches `/api/*` on the same origin
+  (`connect-src 'self'`). The proxy allows only the analyst routes; `POST /v1/score` and
+  administration are unreachable.
+* **Operator identity.**
+  * Outside the demo, each resolution needs the analyst's own signed assertion.
+  * In DEMO MODE only, the console server signs as the demo reviewer, and the UI labels
+    this as DEMO MODE.
+* **Read-only analyst views.** `GET /v1/analyst/{feed,reviews,cases/{id},summary,system,search}`
+  (`fraud_ai/service/analyst.py`, scope `analyst:read`) join what the console needs. They
+  write nothing and return pseudonymous references only. They describe reasons only from
+  the service's own catalogue and never compute a combined model score.
+* **Demo reset** goes through a local supervisor (`scripts/demo.mjs`) that runs the
+  existing guarded `fraud-ai demo reset`. The console never touches a database.
+
+Details: [sentinel-console/ARCHITECTURE.md](sentinel-console/ARCHITECTURE.md) and
+[sentinel-console/DESIGN_SYSTEM.md](sentinel-console/DESIGN_SYSTEM.md).

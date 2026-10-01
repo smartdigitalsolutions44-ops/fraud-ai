@@ -427,7 +427,28 @@ compliance or fraud-reduction claims. Details are in [TRUST_CHAIN.md](TRUST_CHAI
 * **Stripe:** REAL STRIPE TEST NOT PERFORMED (no credentials; network blocked). The
   checklist is in AUTHENTICATION.md §3.
 
-## After Stage 12: recommendations (no further backend stage is planned here)
+## Stage 13: SENTINEL analyst console ✅
+
+* `sentinel-console/`: Next.js 16, React 19 and TypeScript, isolated from the Python
+  package.
+* **Backend-for-frontend:** the API key and v2 signing secret stay on the console server.
+  An allow-listed proxy; same-origin checks; CSP `connect-src 'self'`.
+* **Pages:**
+  * start-up checks from real readiness data;
+  * overview, live feed and review queue (filters, sorts, J/K);
+  * the case workspace: timeline, reason and rule evidence, indicators, model comparison
+    with no consensus score, investigation as analyst assistance, step-up, audit trail;
+  * authenticated, immutable resolutions;
+  * metrics, system, and demo (DEMO MODE only, guarded reset).
+* **Backend (additive, read-only):** `GET /v1/analyst/*` under the `analyst:read` scope,
+  plus the verified `reviewer` on review outcomes. No scoring, policy or review logic
+  changed.
+* **Tests:**
+  * vitest: contract, signing parity with Python, the assertion accepted by the Python
+    verifier, proxy and demo guards, error states, components;
+  * Playwright: the analyst flow on a freshly reset demo world.
+
+## After Stage 13: recommendations (no further backend stage is planned here)
 
 1. **External verification:**
    * the Stripe test-mode checklist;
@@ -441,5 +462,8 @@ compliance or fraud-reduction claims. Details are in [TRUST_CHAIN.md](TRUST_CHAI
 3. **Models:** a non-executable format for the scikit-learn models, or sandboxed loading.
 4. **Privacy:** pseudonymisation-key rotation; erasure execution once the safeguards in
    PRIVACY.md §6.4 exist.
-5. **Only then**, and only if required, an analyst interface built on
-   ANALYST_WORKFLOW.md.
+5. **Console:**
+   * single sign-on for analysts, with hardware-backed operator keys signing assertions
+     in the browser (WebAuthn), instead of pasting a CLI assertion;
+   * case assignment in the service before the console shows it;
+   * streaming (SSE) only if polling proves insufficient.

@@ -1,9 +1,11 @@
 # fraud-ai
 
-A locally runnable fraud-prevention software platform written in Python. It is not a web
-application: Stage 9 adds a machine-to-machine HTTP API, not a website.
+A locally runnable fraud-prevention software platform written in Python. The fraud engine
+is not a web application: Stage 9 adds a machine-to-machine HTTP API. Stage 13 adds
+**SENTINEL**, a separate analyst console (`sentinel-console/`) that is a *client* of that
+API.
 
-The current release covers **Stages 1 to 12** (release candidate `v0.12.0-rc1`):
+The current release covers **Stages 1 to 13** (Stage 12 release candidate `v0.12.0-rc1`):
 
 * **Stage 1:** the software core, the event architecture, the fraud database (PostgreSQL in
   production, SQLite for local use), migrations, synthetic data and the CLI.
@@ -111,6 +113,21 @@ The current release covers **Stages 1 to 12** (release candidate `v0.12.0-rc1`):
   See [DEMO.md](DEMO.md), [PORTFOLIO.md](PORTFOLIO.md),
   [INTERVIEW_GUIDE.md](INTERVIEW_GUIDE.md) and [ANALYST_WORKFLOW.md](ANALYST_WORKFLOW.md).
   Still **REAL STRIPE TEST NOT PERFORMED**, and still not production software.
+
+* **Stage 13: SENTINEL — Fraud Intelligence & Response**, the analyst console
+  (Next.js 16, React 19 and TypeScript, in [`sentinel-console/`](sentinel-console/README.md)):
+  * start-up checks taken from the real readiness data;
+  * an overview, a live feed, the review queue and a three-column case workspace;
+  * model comparison with no consensus score;
+  * analyst-triggered investigation, labelled as analyst assistance;
+  * authenticated resolutions, which are final once made;
+  * system, metrics and demo pages.
+
+  A backend-for-frontend keeps the API key and signing secret on the console server. The
+  backend gained read-only `GET /v1/analyst/*` views under a new `analyst:read` scope; no
+  scoring, policy or review logic changed.
+
+  ![SENTINEL case workspace](sentinel-console/docs/screenshots/04-case.png)
 
 Decisions are **internal policy outputs** (`ALLOW`, `ALLOW_WITH_MONITORING`,
 `STEP_UP_AUTHENTICATION`, `MANUAL_REVIEW`, `TEMPORARY_BLOCK`). No payment or authentication
@@ -267,6 +284,9 @@ fraud-ai keys status ; fraud-ai keys rotate --purpose audit --operator-key sec.p
 fraud-ai privacy export <customer-ref> --out subject.json --operator-key sec.pem
 fraud-ai release verify-image image-evidence.json --key image.pub --commit <sha>
 DEMO_MODE=true fraud-ai demo start ; fraud-ai demo run            # the 9-step walkthrough
+
+# Stage 13 - the SENTINEL analyst console (see sentinel-console/README.md)
+cd sentinel-console && npm ci && npm run demo                     # demo world + service + console on :3000
 python -m fraud_ai --help        # equivalent entry point
 ```
 

@@ -1,0 +1,51 @@
+{
+ "generated_by": "fraud_ai.service.signatures (Python)",
+ "secret": "test-secret-not-real",
+ "vectors": [
+  {
+   "method": "GET",
+   "path": "/v1/analyst/feed",
+   "query": "limit=100&decision=MANUAL_REVIEW",
+   "ts": 1790000000,
+   "body": "",
+   "target": "/v1/analyst/feed?decision=MANUAL_REVIEW&limit=100",
+   "signature": "v2=ccf10d893ade0d61f709cc6eb4310cbec6701bfd97231ae215d567a4d6f35bdd"
+  },
+  {
+   "method": "GET",
+   "path": "/v1/analyst/search",
+   "query": "q=49044c7e",
+   "ts": 1790000001,
+   "body": "",
+   "target": "/v1/analyst/search?q=49044c7e",
+   "signature": "v2=0f09a52e51a9dcd48f16010ce45f0ca199dc633b8e0f93472b3ba46cf4d2dfe2"
+  },
+  {
+   "method": "POST",
+   "path": "/v1/assessments/49044c7e-adcc-448b-8633-c0c91edb1c4c/investigate",
+   "query": "",
+   "ts": 1790000002,
+   "body": "{}",
+   "target": "/v1/assessments/49044c7e-adcc-448b-8633-c0c91edb1c4c/investigate",
+   "signature": "v2=383c196d552e108be1f135fe5efa43ff60570909aaa0de8aadccb9f4e5d113c9"
+  },
+  {
+   "method": "POST",
+   "path": "/v1/reviews/abc/resolve",
+   "query": "",
+   "ts": 1790000003,
+   "body": "{\"resolution\": \"legitimate\", \"note\": \"checked — café ✓\"}",
+   "target": "/v1/reviews/abc/resolve",
+   "signature": "v2=50661101699baa3972703bb0a52f6501154f0bc597de53f7b7cad7664f0712e1"
+  },
+  {
+   "method": "GET",
+   "path": "/v1/a b/%7Ex",
+   "query": "z=2&a=1&a=0&empty=&sp=a+b&pct=%2F",
+   "ts": 1790000004,
+   "body": "",
+   "target": "/v1/a%20b/~x?a=0&a=1&empty=&pct=%2F&sp=a%20b&z=2",
+   "signature": "v2=15d70ae15d07e448c4825e176e8219d3640855c30aaf6f0c6194d8ae02d1d344"
+  }
+ ]
+}

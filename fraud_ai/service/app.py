@@ -44,6 +44,7 @@ from fraud_ai.models.signing import ModelTrust
 from fraud_ai.realtime.cache import ModelCache
 from fraud_ai.realtime.service import FraudScoringService
 from fraud_ai.security.keys import build_pseudonymiser
+from fraud_ai.service.analyst import router as analyst_router
 from fraud_ai.service.dependencies import ServiceContainer, SigningKey
 from fraud_ai.service.errors import install_handlers
 from fraud_ai.service.metrics import ServiceMetrics
@@ -289,6 +290,7 @@ def create_app(
     app.state.container = container
     install_handlers(app)
     app.include_router(router)
+    app.include_router(analyst_router)
     if settings.cors_origins:
         app.add_middleware(
             CORSMiddleware,
@@ -322,6 +324,7 @@ def openapi_document() -> dict[str, Any]:
 
     app = FastAPI(title="fraud-ai service", version=__version__)
     app.include_router(router)
+    app.include_router(analyst_router)
     return get_openapi(
         title="fraud-ai service",
         version=__version__,

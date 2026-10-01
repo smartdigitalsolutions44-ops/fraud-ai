@@ -202,6 +202,7 @@ def _outcome_view(o: ReviewOutcome) -> ReviewOutcomeView:
         resolution=o.resolution.value,
         note=o.note,
         created_at=ensure_utc(o.created_at),
+        reviewer=o.reviewer,
     )
 
 

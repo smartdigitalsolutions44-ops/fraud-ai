@@ -117,6 +117,9 @@ class ReviewOutcomeView(_Out):
     resolution: str
     note: str | None
     created_at: datetime
+    # Stage 13: the verified reviewer (``operator:<id>``, or the calling key when operator
+    # authentication is off). Outcomes are immutable, so this never changes.
+    reviewer: str | None = None
 
 
 class ReviewDetailView(_Out):

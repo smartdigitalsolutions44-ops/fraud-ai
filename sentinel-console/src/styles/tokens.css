@@ -1,0 +1,103 @@
+/*
+ * SENTINEL design tokens. Every colour, size, radius and duration used by the console comes
+ * from here (see DESIGN_SYSTEM.md). Accents are semantic, never decorative:
+ *   green  verified / allowed        amber  monitoring        orange  step-up
+ *   red    high risk / block / fault  blue, cyan  system and model information
+ */
+:root {
+  color-scheme: dark;
+
+  /* surfaces: dark graphite, layered from the page up */
+  --surface-0: #0a0c0f; /* page */
+  --surface-1: #0f1216; /* nav, top bar */
+  --surface-2: #13171c; /* panels */
+  --surface-3: #181d23; /* raised: rows on hover, inputs */
+  --surface-4: #1f252d; /* selected, pressed */
+  --overlay: rgba(5, 7, 9, 0.72);
+
+  /* borders */
+  --border-subtle: #1c2128;
+  --border: #262c35;
+  --border-strong: #353d48;
+  --focus: #6aa8ff;
+
+  /* text (contrast on --surface-2: 15.1, 8.4, 5.0 : 1) */
+  --text-0: #e7eaee;
+  --text-1: #a9b1bc;
+  --text-2: #7f8895;
+  --text-inverse: #0a0c0f;
+
+  /* semantic accents: text colour, and a faint tint for backgrounds */
+  --green: #45c287;
+  --green-tint: rgba(69, 194, 135, 0.1);
+  --amber: #e0b04a;
+  --amber-tint: rgba(224, 176, 74, 0.1);
+  --orange: #f08a4b;
+  --orange-tint: rgba(240, 138, 75, 0.11);
+  --red: #f0605d;
+  --red-tint: rgba(240, 96, 93, 0.11);
+  --blue: #6aa8ff;
+  --blue-tint: rgba(106, 168, 255, 0.1);
+  --cyan: #4cc3d4;
+  --cyan-tint: rgba(76, 195, 212, 0.09);
+  --neutral: #8b94a1;
+  --neutral-tint: rgba(139, 148, 161, 0.1);
+
+  /* type */
+  --font-sans: "Inter Variable", "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono Variable", "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  --text-2xs: 10.5px;
+  --text-xs: 11.5px;
+  --text-sm: 12.5px;
+  --text-md: 13.5px;
+  --text-lg: 15px;
+  --text-xl: 18px;
+  --text-2xl: 24px;
+  --text-3xl: 30px;
+  --leading: 1.45;
+  --tracking-label: 0.08em;
+
+  /* spacing: 4px grid */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+
+  /* radii */
+  --radius-xs: 3px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+
+  /* layout */
+  --nav-width: 212px;
+  --topbar-height: 48px;
+  --statusbar-height: 26px;
+  --row-height: 36px;
+
+  /* motion: short and functional; zeroed for reduced motion */
+  --dur-fast: 150ms;
+  --dur-base: 220ms;
+  --dur-slow: 300ms;
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+
+  --shadow-pop: 0 12px 40px rgba(0, 0, 0, 0.5), 0 0 0 1px var(--border);
+}
+
+[data-density="compact"] {
+  --row-height: 30px;
+  --space-4: 12px;
+  --space-5: 16px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-fast: 0ms;
+    --dur-base: 0ms;
+    --dur-slow: 0ms;
+  }
+}
