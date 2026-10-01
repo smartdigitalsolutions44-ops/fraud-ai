@@ -58,9 +58,18 @@ def write_stamp(rt: Runtime, name: str, value: str) -> None:
 
 
 def run(
-    command: list[str], *, cwd: Path = REPO, env: dict[str, str] | None = None, quiet: bool = False
+    command: list[str],
+    *,
+    cwd: Path = REPO,
+    env: dict[str, str] | None = None,
+    quiet: bool = False,
+    log: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Run a command, streaming its output unless ``quiet``. Raises SetupError on failure."""
+    """Run a command, streaming its output unless ``quiet``. Raises SetupError on failure.
+
+    A quiet command's whole output is kept in ``log`` when it fails, and the end of it (both
+    streams: ``next build`` prints its type errors on stdout) is shown with the error.
+    """
     result = subprocess.run(  # noqa: S603  # nosec B603 - fixed commands, no shell
         command,
         cwd=cwd,
@@ -70,7 +79,12 @@ def run(
         check=False,
     )
     if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "").strip().splitlines()[-8:] if quiet else []
+        output = "\n".join(part.strip() for part in (result.stdout, result.stderr) if part)
+        detail = output.splitlines()[-25:] if quiet else []
+        if quiet and log is not None:
+            log.parent.mkdir(parents=True, exist_ok=True)
+            log.write_text(output + "\n", encoding="utf-8")
+            detail.append(f"(full output: {log})")
         raise SetupError(
             f"`{' '.join(Path(command[0]).name if i == 0 else c for i, c in enumerate(command))}` "
             f"failed (exit {result.returncode})"
@@ -165,7 +179,12 @@ def console_deps(rt: Runtime, force: bool = False) -> str:
     if not force and installed and stamp_matches(rt, "console-deps", stamp):
         return "already current"
     ui.line("step", "installing the console (npm ci) ...")
-    run([npm_command(), "ci", "--no-audit", "--no-fund"], cwd=CONSOLE, quiet=True)
+    run(
+        [npm_command(), "ci", "--no-audit", "--no-fund"],
+        cwd=CONSOLE,
+        quiet=True,
+        log=rt.logs / "setup-npm-ci.log",
+    )
     write_stamp(rt, "console-deps", stamp)
     (rt.state / "console-build.sha256").unlink(missing_ok=True)
     return "installed"
@@ -184,7 +203,13 @@ def console_build(rt: Runtime, force: bool = False) -> str:
         return "already current"
     ui.line("step", "building the console (next build, about a minute) ...")
     env = {**os.environ, "NEXT_TELEMETRY_DISABLED": "1"}
-    run([npm_command(), "run", "build", "--silent"], cwd=CONSOLE, env=env, quiet=True)
+    run(
+        [npm_command(), "run", "build", "--silent"],
+        cwd=CONSOLE,
+        env=env,
+        quiet=True,
+        log=rt.logs / "setup-console-build.log",
+    )
     write_stamp(rt, "console-build", stamp)
     return "built"
 

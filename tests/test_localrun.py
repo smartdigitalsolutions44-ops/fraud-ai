@@ -17,7 +17,7 @@ import pytest
 psutil = pytest.importorskip("psutil")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-from localrun import cli, config, logs, modes, ports, procs  # noqa: E402
+from localrun import bootstrap, cli, config, logs, modes, ports, procs  # noqa: E402
 from localrun.paths import Runtime  # noqa: E402
 
 
@@ -259,3 +259,16 @@ def test_demo_reset_goes_through_the_guard(tmp_path: Path) -> None:
     )
     assert result.returncode != 0
     assert "points elsewhere" in result.stderr + result.stdout
+
+
+def test_failed_quiet_step_shows_stdout_and_keeps_the_full_log(tmp_path: Path) -> None:
+    # next build prints its type errors on stdout and only a summary on stderr
+    script = "import sys; print('src/x.ts:1:1 Type error: boom'); sys.exit('Failed to type check.')"
+    log = tmp_path / "logs" / "build.log"
+    with pytest.raises(bootstrap.SetupError) as failure:
+        bootstrap.run([sys.executable, "-c", script], quiet=True, log=log)
+    message = str(failure.value)
+    assert "Type error: boom" in message
+    assert "Failed to type check." in message
+    assert str(log) in message
+    assert "Type error: boom" in log.read_text(encoding="utf-8")

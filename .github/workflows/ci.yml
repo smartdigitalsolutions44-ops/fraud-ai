@@ -88,8 +88,9 @@ jobs:
         shell: pwsh
         run: |
           Install-Module PSScriptAnalyzer -RequiredVersion 1.23.0 -Force -Scope CurrentUser
-          $found = Invoke-ScriptAnalyzer -Path scripts -Filter '*.ps1' -Severity Warning,Error `
-            -ExcludeRule PSAvoidUsingWriteHost
+          $found = Get-ChildItem scripts -Filter '*.ps1' | ForEach-Object {
+            Invoke-ScriptAnalyzer -Path $_.FullName -Severity Warning,Error -ExcludeRule PSAvoidUsingWriteHost
+          }
           $found | Format-Table -AutoSize | Out-String -Width 200 | Write-Output
           if ($found) { exit 1 }
       - uses: actions/setup-python@v5
