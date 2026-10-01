@@ -50,11 +50,11 @@ def fingerprint(paths: Iterable[Path]) -> str:
 
 def stamp_matches(rt: Runtime, name: str, value: str) -> bool:
     path = rt.state / f"{name}.sha256"
-    return path.exists() and path.read_text().strip() == value
+    return path.exists() and path.read_text(encoding="utf-8").strip() == value
 
 
 def write_stamp(rt: Runtime, name: str, value: str) -> None:
-    (rt.state / f"{name}.sha256").write_text(value + "\n")
+    (rt.state / f"{name}.sha256").write_text(value + "\n", encoding="utf-8")
 
 
 def run(

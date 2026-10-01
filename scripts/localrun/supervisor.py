@@ -97,7 +97,7 @@ class Supervisor:
             self.state.update(changes)
             snapshot = json.dumps(self.state, indent=2)
         tmp = self.rt.run / "state.json.tmp"
-        tmp.write_text(snapshot)
+        tmp.write_text(snapshot, encoding="utf-8")
         os.replace(tmp, self.rt.run / "state.json")
 
     def service(self, name: str, status: str) -> None:
@@ -373,7 +373,7 @@ class Supervisor:
 
 def control(rt: Runtime) -> dict[str, str] | None:
     try:
-        data = json.loads((rt.run / "control.json").read_text())
+        data = json.loads((rt.run / "control.json").read_text(encoding="utf-8"))
         return {"url": str(data["url"]), "token": str(data["token"])}
     except (OSError, ValueError, KeyError):
         return None
@@ -397,6 +397,6 @@ def call(rt: Runtime, method: str, path: str, timeout: float = 5.0) -> tuple[int
 
 def session(rt: Runtime) -> dict[str, Any] | None:
     try:
-        return dict(json.loads((rt.run / "state.json").read_text()))
+        return dict(json.loads((rt.run / "state.json").read_text(encoding="utf-8")))
     except (OSError, ValueError):
         return None

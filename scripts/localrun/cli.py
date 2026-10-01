@@ -593,7 +593,10 @@ def cmd_reset(args: argparse.Namespace) -> int:
     if confirm is None:
         if not sys.stdin.isatty():
             raise bootstrap.SetupError(f'not confirmed: pass --confirm "{RESET_PHRASE}"')
-        confirm = input(f"\n  Type {RESET_PHRASE} to continue: ")
+        try:
+            confirm = input(f"\n  Type {RESET_PHRASE} to continue: ")
+        except EOFError:  # Windows reports NUL as a terminal: stdin can still be empty
+            raise bootstrap.SetupError(f'not confirmed: pass --confirm "{RESET_PHRASE}"') from None
     if confirm.strip() != RESET_PHRASE:
         ui.line("warn", "not confirmed; nothing was changed")
         return 1

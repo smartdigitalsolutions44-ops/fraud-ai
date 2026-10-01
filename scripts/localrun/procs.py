@@ -66,7 +66,7 @@ def record(pids: Path, name: str, proc: subprocess.Popen[bytes], command: list[s
 def load(pids: Path, name: str) -> Record | None:
     path = pids / f"{name}.json"
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
         return Record(
             name=str(data["name"]),
             pid=int(data["pid"]),

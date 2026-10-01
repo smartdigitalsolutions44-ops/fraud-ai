@@ -178,7 +178,8 @@ def test_logs_redact_keys_and_rotate(tmp_path: Path) -> None:
     path = tmp_path / "api.log"
     log = logs.LogFile(path, max_bytes=200)
     log.write("Authorization: Bearer fak_abc123.SECRETPART done")
-    assert "fak_abc123" not in path.read_text() and "fak_…" in path.read_text()
+    text = path.read_text(encoding="utf-8")  # the log is UTF-8 on every platform
+    assert "fak_abc123" not in text and "fak_…" in text
     for index in range(20):
         log.write(f"line {index} " + "x" * 40)
     log.close()
@@ -237,6 +238,9 @@ def test_reset_requires_the_exact_phrase(monkeypatch: pytest.MonkeyPatch, tmp_pa
     assert cli.main(["reset", "--confirm", "yes"]) == 1
     monkeypatch.setattr(sys, "stdin", open(os.devnull))  # noqa: SIM115
     assert cli.main(["reset"]) == 2  # non-interactive without --confirm: refused
+    # Windows reports NUL as a terminal: an empty "interactive" stdin is refused, not a crash
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    assert cli.main(["reset"]) == 2
     assert called == []
     assert cli.main(["reset", "--confirm", "RESET DEMO"]) == 0
     assert called == [True]
