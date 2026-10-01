@@ -6,7 +6,7 @@ import { Icon } from "@/components/Icon";
 import type { Overall } from "@/features/system/checks";
 import type { SessionT } from "@/lib/api/schemas";
 
-import { titleFor } from "./nav";
+import { titleFor } from "./routes";
 
 const OVERALL: Record<Overall, { label: string; tone: string; glyph: string }> = {
   checking: { label: "Checking", tone: "blue", glyph: "…" },

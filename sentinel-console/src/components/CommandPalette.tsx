@@ -4,7 +4,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 
-import { NAV } from "@/components/shell/nav";
+import { NAV } from "@/components/shell/routes";
 import { SEARCH_PATTERN, useDemoScenarios, useSearch } from "@/lib/api/queries";
 import { shortId } from "@/lib/format";
 

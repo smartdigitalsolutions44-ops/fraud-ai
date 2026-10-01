@@ -272,3 +272,53 @@ def test_failed_quiet_step_shows_stdout_and_keeps_the_full_log(tmp_path: Path) -
     assert "Failed to type check." in message
     assert str(log) in message
     assert "Type error: boom" in log.read_text(encoding="utf-8")
+
+
+def test_status_reads_the_service_without_httpx(monkeypatch: pytest.MonkeyPatch) -> None:
+    # setup installs .[postgres,local], which has no httpx: status must use the stdlib
+    import http.server
+    import threading
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            code = 200 if self.path == "/v1/ready" else 404
+            body = json.dumps({"status": "ready" if code == 200 else "missing"}).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args: object) -> None:
+            pass
+
+    monkeypatch.setitem(sys.modules, "httpx", None)  # importing httpx now fails
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        assert cli.api_get(base, "/v1/ready", None) == (200, {"status": "ready"})
+        assert cli.api_get(base, "/v1/other", None) == (404, {"status": "missing"})
+    finally:
+        server.shutdown()
+        server.server_close()
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        closed = probe.getsockname()[1]
+    assert cli.api_get(f"http://127.0.0.1:{closed}", "/v1/ready", None) == (None, None)
+
+
+def test_console_modules_never_differ_only_in_case() -> None:
+    # Windows (NTFS) and macOS resolve "./Nav" and "./nav" to the same file: a component
+    # Nav.tsx beside a module nav.ts broke the Windows build. Keep module names unique
+    # ignoring case and extension, in every console directory.
+    console = Path(__file__).resolve().parents[1] / "sentinel-console"
+    clashes = []
+    for directory in ("src", "tests", "e2e"):
+        for folder, _dirs, files in os.walk(console / directory):
+            seen: dict[str, str] = {}
+            for name in files:
+                stem = name.split(".")[0].lower()
+                if stem in seen and seen[stem].split(".")[0] != name.split(".")[0]:
+                    clashes.append(f"{folder}: {seen[stem]} / {name}")
+                seen.setdefault(stem, name)
+    assert clashes == []

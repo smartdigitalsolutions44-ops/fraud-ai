@@ -420,7 +420,9 @@ def cmd_stop(args: argparse.Namespace) -> int:
 
 # ================================================================== status
 def api_get(base: str, path: str, creds: Path | None) -> tuple[int | None, Any]:
-    import httpx
+    """GET from the local service with the standard library (setup installs no httpx)."""
+    import urllib.error
+    import urllib.request
 
     headers: dict[str, str] = {}
     if creds is not None:
@@ -434,14 +436,18 @@ def api_get(base: str, path: str, creds: Path | None) -> tuple[int | None, Any]:
             "X-Fraud-Timestamp": str(ts),
             "X-Fraud-Signature": sign_v2(data["signing_secret"], "GET", bare, ts, b"", query=query),
         }
+    request = urllib.request.Request(base + path, headers=headers)  # noqa: S310 - http(s) only
     try:
-        response = httpx.get(base + path, headers=headers, timeout=10)
-    except httpx.HTTPError:
+        with urllib.request.urlopen(request, timeout=10) as response:  # noqa: S310  # nosec B310
+            status, body = response.status, response.read()
+    except urllib.error.HTTPError as error:
+        status, body = error.code, error.read()
+    except (urllib.error.URLError, OSError):
         return None, None
     try:
-        return response.status_code, response.json()
+        return status, json.loads(body)
     except ValueError:
-        return response.status_code, None
+        return status, None
 
 
 def cmd_status(args: argparse.Namespace) -> int:

@@ -9,7 +9,7 @@ import { POLL, useQueue } from "@/lib/api/queries";
 import type { SessionT } from "@/lib/api/schemas";
 import { useLiveness } from "@/lib/hooks/useLiveness";
 
-import { NAV, isActive } from "./nav";
+import { NAV, isActive } from "./routes";
 
 export function Nav({ session, apiVersion }: { session?: SessionT; apiVersion?: string }) {
   const pathname = usePathname();
