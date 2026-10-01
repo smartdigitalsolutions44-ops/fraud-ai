@@ -127,10 +127,6 @@ def read_verified(
     return blob
 
 
-def verify_digest(directory: Path, names: tuple[str, ...], expected: str) -> None:
-    read_verified(directory, names, expected)
-
-
 def save_state(module: nn.Module, path: Path) -> None:
     state = {k: v.detach().cpu().contiguous() for k, v in module.state_dict().items()}
     torch.save(state, path)

@@ -89,9 +89,12 @@ See [../LOCAL_SETUP.md](../LOCAL_SETUP.md) and the repository's ARCHITECTURE.md 
 * **Liveness (`lib/hooks/useLiveness.ts`)** labels every polled view LIVE, STALE (a failed
   poll, or data older than three intervals), OFFLINE or PAUSED. Stale data is labelled
   with its age and never shown as live.
-* **Start-up checks (`features/system/checks.ts`)** are a pure function of `/v1/ready` and
-  `/v1/analyst/system`. No answer means CHECKING; a failed source means OFFLINE. The
-  screen leaves by itself only when every check is ONLINE or NOT USED.
+* **System health (`features/system/groups.ts`, `features/system/checks.ts`)** is a pure
+  function of `/v1/ready`, `/v1/analyst/system` and `/api/session`, and only of each
+  source's latest successful poll. No answer means CHECKING; a failed source means
+  OFFLINE. The start-up screen, top bar and Overview show the seven groups (`groups.ts`);
+  the System page adds the detailed checks (`checks.ts`). The start-up screen leaves by
+  itself only when every group is ONLINE or NOT USED.
 * **Code splitting.** Pages are split per route by the App Router. The chart is loaded with
   `next/dynamic`.
 

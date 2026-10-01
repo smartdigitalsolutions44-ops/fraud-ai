@@ -32,9 +32,6 @@ interface Inputs {
   systemError?: unknown;
 }
 
-const RANK: Record<CheckState, number> = { not_used: 0, online: 1, checking: 2, degraded: 3, offline: 4 };
-export const worst = (...states: CheckState[]): CheckState => states.reduce((a, b) => (RANK[b] > RANK[a] ? b : a), "not_used" as CheckState);
-
 function denied(err: unknown): string {
   if (err instanceof ApiError) {
     if (err.kind === "forbidden") return "permission denied: the console key lacks the analyst:read scope";

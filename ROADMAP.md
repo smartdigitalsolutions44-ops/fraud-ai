@@ -463,11 +463,34 @@ compliance or fraud-reduction claims. Details are in [TRUST_CHAIN.md](TRUST_CHAI
   backoff and recovery; specific errors; presentation and compact modes; responsive
   checks at four resolutions; a WCAG 2.1 AA audit in the end-to-end test.
 * **Backend:** Windows-only branches in key and model-file loading
-  ([TRUST_CHAIN.md](TRUST_CHAIN.md#windows)); nothing else changed.
+  ([TRUST_CHAIN.md](TRUST_CHAIN.md#windows-stage-14)); nothing else changed.
 * **CI:** `local-scripts` (Linux: setup, Demo, Dev, Playwright end to end, shellcheck,
   PSScriptAnalyzer) and `local-windows` (Windows, from a path with spaces).
 
-## After Stage 14: recommendations (no further backend stage is planned here)
+## Stage 15: final release, portfolio, demo and handoff ✅ (`v0.15.0-rc1`)
+
+The final planned stage. Feature freeze: only bugs, misleading UI, documentation accuracy,
+packaging, accessibility and security fixes.
+
+* **Release:** version `0.15.0rc1` (console `0.15.0-rc.1`), a signed release manifest, tag
+  `v0.15.0-rc1`. Not v1.0 and not production software.
+* **Acceptance:** a fresh-clone setup → Demo → full console walkthrough → reset → stop; the
+  ten demo scenarios re-verified against their measured decisions.
+* **Screenshots:** ten, captured by the end-to-end test, which now also audits the Live
+  Feed, analyst assistance and Metrics views for WCAG 2.1 AA.
+* **Docs:** a recruiter-first [README.md](README.md); [DEMO.md](DEMO.md) with a 5–8 minute
+  interview script, fallbacks and a video shot list; [PORTFOLIO.md](PORTFOLIO.md) with
+  what went wrong, a one-transaction technical walkthrough, CV, application and recruiter
+  versions; [INTERVIEW_GUIDE.md](INTERVIEW_GUIDE.md); [CLI.md](CLI.md) (the command
+  reference moved out of the README); [PROJECT_STATUS.md](PROJECT_STATUS.md),
+  [HANDOFF.md](HANDOFF.md) and [docs/ai-workflow.md](docs/ai-workflow.md).
+* **Clean-up:** unused code and one unused devDependency removed; broken documentation
+  anchors fixed; every documented command checked against the CLI.
+
+**The planned build is finished.** Anything further is optional and should be driven by
+real users, real data, real integrations or a security review.
+
+## Optional future work (not planned stages)
 
 1. **External verification:**
    * the Stripe test-mode checklist;

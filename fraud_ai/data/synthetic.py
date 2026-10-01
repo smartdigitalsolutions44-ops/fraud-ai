@@ -38,7 +38,6 @@ from __future__ import annotations
 
 import random
 import uuid
-from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -233,10 +232,6 @@ class SyntheticDataset:
     fraud_transaction_ids: set[uuid.UUID]
     scenario_counts: dict[str, int]
     reference_time: datetime
-
-    @property
-    def event_type_counts(self) -> dict[str, int]:
-        return dict(Counter(e.event_type.value for e in self.events))
 
 
 class SyntheticDataGenerator:

@@ -205,7 +205,7 @@ works. See [LLM_ANALYST.md](LLM_ANALYST.md).
 
 Two backend checks use operating-system features that Windows Python does not have. Stage 14
 adds narrow Windows-only branches (Linux, macOS and Docker run exactly the code they ran
-before); the trade-off is documented in [TRUST_CHAIN.md](TRUST_CHAIN.md#windows):
+before); the trade-off is documented in [TRUST_CHAIN.md](TRUST_CHAIN.md#windows-stage-14):
 
 * **Private key files:** the "not readable by group or others (chmod 600)" check is skipped
   on Windows, because the permission bits Windows Python reports do not describe NTFS access
@@ -232,6 +232,7 @@ before); the trade-off is documented in [TRUST_CHAIN.md](TRUST_CHAIN.md#windows)
 | Redis DEGRADED / `Redis unreachable` (Dev) | `docker compose -p sentinel-local ps`; the service reports shared state as failed until Redis answers. Demo mode does not use Redis. |
 | `model ... refused: ModelSignatureError` | A model artefact or its signature changed. Demo: run `sentinel-reset-demo`. Dev: delete `.runtime/dev/` (its models and marker) and start again. |
 | `database migrations outdated` | Demo: `sentinel-reset-demo`. Dev: `fraud-ai db migrate` with the Dev environment (start does this). |
+| Setup hangs on `Retrying … /whl/cpu/…` (Linux) | Your network blocks `download.pytorch.org`, where setup gets the CPU-only PyTorch wheel. Set the environment variable `SENTINEL_TORCH_INDEX_URL` to a reachable mirror of that index, or to an empty value to use PyPI's PyTorch (a much larger download, with CUDA libraries). Windows and macOS do not use this index. |
 | `console dependencies are missing or out of date` | `package-lock.json` changed (for example after `git pull`): run setup again. |
 | The console shows OFFLINE | The fraud service is not answering: `sentinel-status`, then `.runtime/logs/api.log`. |
 | `start failed` | The last lines of each log are printed; the full logs are in `.runtime/logs/`. |
@@ -240,7 +241,7 @@ before); the trade-off is documented in [TRUST_CHAIN.md](TRUST_CHAIN.md#windows)
 ## 11. Time to demo
 
 Measured on the Linux development container (8 vCPU) for this release; Windows and Linux
-fresh-checkout timings from CI are recorded in [DEMO.md](DEMO.md#time-to-demo).
+fresh-checkout timings from CI are recorded in [DEMO.md](DEMO.md#5-time-to-demo).
 
 | | Time |
 |---|---|

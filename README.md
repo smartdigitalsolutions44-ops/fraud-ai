@@ -1,382 +1,366 @@
-# fraud-ai
+# SENTINEL
 
-A locally runnable fraud-prevention software platform written in Python. The fraud engine
-is not a web application: Stage 9 adds a machine-to-machine HTTP API. Stage 13 adds
-**SENTINEL**, a separate analyst console (`sentinel-console/`) that is a *client* of that
-API.
+**Fraud Intelligence & Response** — a real-time fraud-decision service and the analyst
+console that investigates its decisions. Built from scratch as a portfolio and learning
+project, on synthetic data only.
 
-## Quick start (synthetic demo, no Docker needed)
+![SENTINEL case workspace: one suspicious case with its timeline, model comparison and evidence](sentinel-console/docs/screenshots/05-case.png)
 
-Windows 11 (PowerShell):
+**What it is.** When someone logs in or pays, a merchant has to decide in milliseconds
+whether to allow it, add friction (a passkey or card check), send it to an analyst, or
+block it. SENTINEL makes that decision with machine-learning models under a versioned
+policy, explains it, and lets an analyst investigate and resolve the case in a web
+console.
+
+**Why it exists.** I wanted to learn how a fraud system works end to end, and what it takes
+to make one *trustworthy*: decisions that cannot leak future data, models that cannot be
+swapped silently, an audit trail that cannot be rewritten, and an AI assistant that
+explains but never decides.
+
+**What it demonstrates.**
+
+* **Machine learning done carefully:** point-in-time features, time-ordered evaluation,
+  PR-AUC with confidence intervals, calibration, and honest comparisons in which the
+  neural and sequence models did *not* beat gradient boosting.
+* **Security engineering:** signed requests with replay protection, signed models, a
+  tamper-evident audit log with write-once anchors, authenticated two-person approval,
+  least-privilege database roles, signed releases and container images.
+* **Product engineering:** an analyst console with a backend-for-frontend, honest degraded
+  states, keyboard workflows, accessibility checks, and one-command local start-up on
+  Windows, Linux and macOS.
+
+**Built with:** Python 3.11 · FastAPI · SQLAlchemy and Alembic · PostgreSQL · Redis ·
+scikit-learn · PyTorch · Next.js 16 · React 19 · TypeScript · TanStack Query · Zod ·
+Playwright · Docker · GitHub Actions · HashiCorp Vault · S3 Object Lock · cosign.
+
+> **Status: portfolio release candidate `v0.15.0-rc1`.** Not production software, and not
+> certified for anything (no PCI DSS, SOC 2, ISO or GDPR claim). Every number in this
+> repository comes from **synthetic** data; none is a real-world fraud-detection rate.
+
+### Try it in two commands
 
 ```powershell
-git clone https://github.com/smartdigitalsolutions44-ops/fraud-ai.git
-cd fraud-ai
-.\scripts\setup-local.ps1
-.\scripts\sentinel-start.ps1 -Mode Demo     # opens http://127.0.0.1:3000
-.\scripts\sentinel-stop.ps1
+.\scripts\setup-local.ps1                       # Windows 11 (PowerShell)
+.\scripts\sentinel-start.ps1 -Mode Demo         # opens http://127.0.0.1:3000
 ```
-
-Linux / macOS:
 
 ```bash
-git clone https://github.com/smartdigitalsolutions44-ops/fraud-ai.git
-cd fraud-ai
-./scripts/setup-local.sh
-./scripts/sentinel-start.sh --mode demo        # opens http://127.0.0.1:3000
-./scripts/sentinel-stop.sh
+./scripts/setup-local.sh                        # Linux / macOS
+./scripts/sentinel-start.sh --mode demo         # opens http://127.0.0.1:3000
 ```
 
-Needs Python 3.11+, Node.js 22 LTS and Git. The first start builds the synthetic demo world
-(a few minutes); later starts take seconds. Status, reset, Dev mode (Docker PostgreSQL and
-Redis), logs and troubleshooting: [LOCAL_SETUP.md](LOCAL_SETUP.md). A timed interview
-walkthrough: [DEMO.md](DEMO.md#interview-walkthrough).
+Needs Python 3.11+, Node.js 22 LTS and Git; no Docker. The first start builds the synthetic
+demo world (3–5 minutes); later starts take seconds. Stop with `sentinel-stop`.
 
-The current release covers **Stages 1 to 14** (Stage 12 release candidate `v0.12.0-rc1`):
+---
 
-* **Stage 1:** the software core, the event architecture, the fraud database (PostgreSQL in
-  production, SQLite for local use), migrations, synthetic data and the CLI.
-* **Stage 2:** point-in-time feature engineering, feature snapshots and training-dataset
-  construction.
-* **Stage 3:** baseline fraud models (logistic regression, random forest, gradient
-  boosting), trained on time-ordered splits, evaluated with threshold analysis, versioned,
-  reproducible, and scored into `model_predictions`.
-* **Stage 4:** the evaluation framework, which covers:
-  * bootstrap confidence intervals and walk-forward evaluation;
-  * calibration and cost-sensitive threshold analysis;
-  * scenario, cohort and error analysis;
-  * paired model comparison, a drift baseline and reproducible JSON reports.
+## Contents
 
-* **Stage 5:** neural models on PyTorch:
-  * a feed-forward fraud classifier trained on the same split as the baselines, with
-    early stopping, hyperparameter experiments and safe, hash-verified checkpoints;
-  * an experimental autoencoder anomaly score (not a fraud probability);
-  * complementarity analysis against gradient boosting.
+[Overview](#overview) · [Demo](#demo) · [Screenshots](#screenshots) ·
+[Architecture](#architecture) · [How fraud scoring works](#how-fraud-scoring-works) ·
+[ML evaluation](#ml-evaluation) · [Security design](#security-design) ·
+[Analyst console](#analyst-console) · [Local setup](#local-setup) · [Testing](#testing) ·
+[Project stats](#project-stats) · [Limitations](#limitations) ·
+[What I learned](#what-i-learned) · [Roadmap and future work](#roadmap-and-future-work) ·
+[Documentation map](#documentation-map)
 
-* **Stage 6:** sequence models over each user's ordered, point-in-time event history:
-  * a GRU, a small causal Transformer and a hybrid (GRU plus static features);
-  * versioned and fingerprinted sequence definitions, with leakage-tested extraction;
-  * complementarity and stealthy-takeover analysis against gradient boosting.
+## Overview
 
-* **Stage 7:** local, offline analyst assistance:
-  * a local LLM (Ollama or llama.cpp) *explains* stored model outputs from a
-    privacy-checked evidence packet;
-  * every statement cites evidence, and output is validated before it is stored;
-  * the LLM never scores, decides, blocks, approves, or changes labels, thresholds or
-    rules.
+The repository has two parts:
 
-* **Stage 8:** real-time scoring and risk-decision orchestration:
-  * an idempotent hot path: event contract → ingestion (with arrival time) →
-    point-in-time features → cached, verified models → calibration → versioned rules →
-    a versioned, immutable risk policy → an immutable assessment;
-  * shadow models and policies that are recorded but never decide;
-  * explicit, conservative fallbacks for every failure;
-  * a manual-review queue, a policy simulator and comparison, and monitoring with drift
-    warnings;
-  * the LLM stays outside the decision path.
-
-* **Stage 9:** a secure service and authentication integration layer:
-  * a versioned machine-to-machine API (`fraud-api-1.0.0`, FastAPI) over the unchanged
-    Stage 8 engine;
-  * API keys (hashed, scoped, revocable), HMAC request signatures with persisted replay
-    protection, `Idempotency-Key`, per-key rate limits, size limits and strict
-    validation;
-  * sanitised errors, security headers, CORS off by default, and Prometheus metrics;
-  * step-up execution with standard WebAuthn passkeys (py_webauthn) or an *external*
-    payment-authentication provider adapter (a development fake only, not 3-D Secure).
-    Every result creates a new, immutable follow-up assessment; scores are never changed;
-  * Docker and docker-compose files.
-
-* **Stage 10:** deployment hardening for real deployment *testing*. The result is a
-  deployment-hardened prototype, not a production system. It adds:
-  * Redis shared state for distributed rate limiting and replay protection (atomic,
-    fail closed);
-  * API-key expiry and rotation, and signing-key versions with a grace period;
-  * `*_FILE` secrets;
-  * fail-closed start-up and configuration profiles, and stronger readiness;
-  * a hash-chained, immutable audit log;
-  * retention jobs and explicit policy promotion (shadow → evaluation → candidate);
-  * a Stripe **test-mode** adapter (never run against Stripe; no credentials);
-  * PostgreSQL load and pool benchmarks, multi-process and chaos tests, and a verified
-    backup/restore;
-  * dependency, static, secret and container scans, and an SBOM;
-  * CI, a staging stack, a threat model, disaster-recovery runbooks and a release
-    checklist.
-
-  See [HARDENING.md](HARDENING.md), [THREAT_MODEL.md](THREAT_MODEL.md),
-  [DISASTER_RECOVERY.md](DISASTER_RECOVERY.md) and
-  [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md).
-
-* **Stage 11:** trust, integrity and privacy. The result is a *security-hardened
-  prototype*, still not production-ready. It adds:
-  * request-signature v2 with downgrade protection;
-  * Ed25519-signed model artefacts, loaded from verified bytes;
-  * external signed audit anchors;
-  * two-person policy activation with approval expiry;
-  * least-privilege PostgreSQL roles;
-  * privacy inventory, free-text PII rules and a dry-run erasure plan;
-  * a signed release manifest;
-  * CI building and scanning the full PyTorch image.
-
-  See [TRUST_CHAIN.md](TRUST_CHAIN.md) and [PRIVACY.md](PRIVACY.md). The real Stripe test was
-  **not** performed (no test credentials).
-
-* **Stage 12:** makes the existing controls operational in staging, and hands over the
-  portfolio and demo. It adds:
-  * a staging stack running each job under its own least-privilege database role;
-  * **Vault transit** as KMS, with one non-exportable key per purpose and no fallback to
-    key files;
-  * **audit anchors in S3 Object Lock (COMPLIANCE)**, scheduled `audit anchor-now`, and a
-    tamper drill on a restored clone;
-  * **operator authentication**: per-person Ed25519 keys, signed single-use assertions,
-    roles, authenticated two-person approval;
-  * **cosign-signed images** with SLSA provenance and CycloneDX SBOM attestations,
-    verified with `release verify-image`;
-  * a pseudonym-scoped `privacy export`, an erasure-execution design (not implemented),
-    and a retention run in staging;
-  * a 5,000-user load test, a deterministic demo (`fraud-ai demo reset|start|run`), and a
-    real local LLM benchmark.
-
-  See [DEMO.md](DEMO.md), [PORTFOLIO.md](PORTFOLIO.md),
-  [INTERVIEW_GUIDE.md](INTERVIEW_GUIDE.md) and [ANALYST_WORKFLOW.md](ANALYST_WORKFLOW.md).
-  Still **REAL STRIPE TEST NOT PERFORMED**, and still not production software.
-
-* **Stage 13: SENTINEL — Fraud Intelligence & Response**, the analyst console
-  (Next.js 16, React 19 and TypeScript, in [`sentinel-console/`](sentinel-console/README.md)):
-  * start-up checks taken from the real readiness data;
-  * an overview, a live feed, the review queue and a three-column case workspace;
-  * model comparison with no consensus score;
-  * analyst-triggered investigation, labelled as analyst assistance;
-  * authenticated resolutions, which are final once made;
-  * system, metrics and demo pages.
-
-  A backend-for-frontend keeps the API key and signing secret on the console server. The
-  backend gained read-only `GET /v1/analyst/*` views under a new `analyst:read` scope; no
-  scoring, policy or review logic changed.
-
-  ![SENTINEL case workspace](sentinel-console/docs/screenshots/04-case.png)
-
-* **Stage 14: local installation and product polish.**
-  * One setup command and one start command on Windows (PowerShell) and Linux/macOS, with
-    Demo, Dev and StagingLike modes, status, stop and a guarded demo reset
-    ([LOCAL_SETUP.md](LOCAL_SETUP.md)). The tooling only ever stops what it started.
-  * Pre-launch checks (database, migrations, signed models, ports) and a console start-up
-    sequence tied line by line to real readiness data.
-  * A polished case workspace, System and Metrics pages, presentation mode, accessibility
-    (WCAG 2.1 AA audit in the end-to-end test), and failure and recovery handling.
-  * Native Windows support needed two narrow, Windows-only branches in key and model-file
-    loading; the trade-off is documented in [TRUST_CHAIN.md](TRUST_CHAIN.md#windows).
-    No scoring, policy, decision or API changes.
-
-Decisions are **internal policy outputs** (`ALLOW`, `ALLOW_WITH_MONITORING`,
-`STEP_UP_AUTHENTICATION`, `MANUAL_REVIEW`, `TEMPORARY_BLOCK`). No payment or authentication
-system is called by the engine itself, and there are no permanent bans. Step-up runs only
-through the Stage 9 adapters, and the platform never authenticates cardholders. Policy bands are synthetic-derived
-experimental defaults, and all bundled data is synthetic. Evaluation results
-describe synthetic data only; they are not real-world detection rates or savings. See
-[ARCHITECTURE.md](ARCHITECTURE.md), [FEATURES.md](FEATURES.md), [MODELS.md](MODELS.md),
-[EVALUATION.md](EVALUATION.md), [NEURAL_MODELS.md](NEURAL_MODELS.md),
-[SEQUENCE_MODELS.md](SEQUENCE_MODELS.md), [LLM_ANALYST.md](LLM_ANALYST.md),
-[REALTIME_SCORING.md](REALTIME_SCORING.md), [RISK_POLICY.md](RISK_POLICY.md),
-[API.md](API.md), [SERVICE_SECURITY.md](SERVICE_SECURITY.md),
-[AUTHENTICATION.md](AUTHENTICATION.md), [DEPLOYMENT.md](DEPLOYMENT.md) and
-[ROADMAP.md](ROADMAP.md).
-
-> Not production-ready. No payment-security certification, PCI DSS, GDPR, SOC 2 or ISO
-> compliance is claimed, and there are no real-world fraud-reduction or savings figures:
-> everything is measured on synthetic data.
-
-## Install
-
-```bash
-python -m venv .venv && . .venv/bin/activate
-pip install -e ".[dev,postgres]"
-cp .env.example .env        # optional; the defaults work for local SQLite
-```
-
-Python 3.11+ is required. The CLI finds migrations in the source checkout, so use an
-editable install (`-e`).
-
-## Run
-
-```bash
-fraud-ai db init                 # create the schema (SQLite at data/fraud_ai.db by default)
-fraud-ai db status               # connection, revision and row counts
-fraud-ai seed --users 60         # deterministic synthetic data via the ingestion pipeline
-fraud-ai demo-data stats         # per-scenario statistics
-fraud-ai ingest-event scripts/sample_events.jsonl   # ingest JSON / JSON-lines events (- = stdin)
-fraud-ai db migrate              # apply future migrations
-fraud-ai system-status           # component health
-
-# Stage 2 - features (always point-in-time: nothing after the event is used)
-fraud-ai features catalog                        # every feature: type, category, missing semantics
-fraud-ai features show <event-id>                # compute a vector (optionally --as-of)
-fraud-ai features snapshot --start 2026-08-01 --end 2026-09-01   # persist hashed snapshots
-fraud-ai features validate                       # re-verify snapshots (integrity + recompute)
-fraud-ai dataset build --start 2026-06-01 --end 2026-08-01 \
-    --label-cutoff 2026-09-01 --output out/ds    # features.jsonl + labels.jsonl + manifest
-python scripts/benchmark_features.py --users 100 # extraction throughput
-
-# Stage 3 - baseline models (synthetic data: results say nothing about real fraud rates)
-fraud-ai seed --users 300 --days 180            # enough history for a time-ordered split
-fraud-ai train all                              # LR + random forest + gradient boosting
-fraud-ai compare-models                         # same split, same dataset, side by side
-fraud-ai models show gradient-boosting-1.0.0    # reproducibility record + threshold analysis
-fraud-ai evaluate reproduce gradient-boosting-1.0.0   # re-evaluate; checks results reproduce
-fraud-ai score <event-id> --model gradient-boosting-1.0.0   # store a prediction (no decision)
-python scripts/benchmark_models.py --database-url sqlite:///data/fraud_ai.db
-
-# Stage 4 - evaluation (JSON artefacts under evaluation/<model-id>/)
-M=gradient-boosting-1.0.0
-fraud-ai evaluate confidence $M --bootstrap 1000 --seed 0   # 95% bootstrap CIs
-fraud-ai evaluate walk-forward $M --period-days 30          # retrain per fold, as-of labels
-fraud-ai evaluate calibration $M                            # sigmoid / isotonic, fitted on validation
-fraud-ai evaluate scenarios $M                              # per-scenario + cohort FPR checks
-fraud-ai evaluate errors $M --limit 50                      # pseudonymised FP / FN
-fraud-ai evaluate costs $M --fraud-loss 500 --review-cost 5 --friction 10
-fraud-ai evaluate compare                                   # paired tests, agreement, ensembles
-fraud-ai evaluate drift-baseline --model $M                 # PSI / Jensen-Shannon reference
-fraud-ai evaluate report $M                                 # every per-model artefact at once
-fraud-ai seed --users 300 --fraud-multiplier 2              # prevalence experiments
-python scripts/evaluation_benchmark.py --users 1000         # larger synthetic benchmark
-
-# Stage 5 - neural models (PyTorch, CPU by default; compared with the baselines, not trusted)
-fraud-ai neural experiments --quick                         # small grid, validation PR-AUC only
-fraud-ai train neural-network --hidden 128,64,32 --dropout 0.3
-fraud-ai neural training-history neural-network-1.0.0       # per-epoch losses and PR-AUC
-fraud-ai neural inspect neural-network-1.0.0                # architecture, params, importance
-fraud-ai evaluate report neural-network-1.0.0               # every Stage 4 report
-fraud-ai anomaly train-autoencoder                          # EXPERIMENTAL anomaly score
-fraud-ai anomaly evaluate 1.0.0 --compare-with gradient-boosting-1.0.0
-fraud-ai evaluate complementarity gradient-boosting-1.0.0 neural-network-1.0.0 --anomaly 1.0.0
-python scripts/neural_benchmark.py --seed-users 1000        # full Stage 5 benchmark
-
-# Stage 6 - sequence models (the user's events strictly before the scored event)
-fraud-ai sequence inspect <event-id>                        # the point-in-time sequence
-fraud-ai sequence build <event-id> --output seq.json        # deterministic JSON + digest
-fraud-ai train gru ; fraud-ai train transformer ; fraud-ai train hybrid
-fraud-ai sequence compare                                   # fraud caught only by each model
-fraud-ai sequence stealth-report                            # stealthy/temporal takeovers
-python scripts/sequence_benchmark.py --seed-users 1000      # full Stage 6 benchmark
-
-# Stage 7 - local analyst assistant (explanations only; never scores or decides)
-fraud-ai llm status                                         # runtime, versions, health
-fraud-ai llm models                                         # models installed locally
-fraud-ai score <event-id> --model gradient-boosting-1.0.0   # investigations never rescore
-fraud-ai investigate <event-id>                             # cited, validated explanation
-fraud-ai investigate <event-id> --runtime reference         # offline template (not an LLM)
-fraud-ai investigate show <investigation-id> --evidence     # provenance + evidence packet
-fraud-ai investigate validate <investigation-id>            # re-check a stored explanation
-fraud-ai llm benchmark --model gradient-boosting-1.0.0 --runtime reference \
-    --runtime ollama:qwen2.5:7b-instruct --score-latest 1500 --score-labelled 300
-# Stage 8 - real-time scoring (decisions are internal policy outputs; nothing is executed)
-fraud-ai seed --users 300 --days 180 --fraud-multiplier 2 \
-    --live-days 7 --live-output live.jsonl                  # history + held-out live stream
-fraud-ai train gradient-boosting ; fraud-ai train neural-network ; fraud-ai train logistic
-fraud-ai policy propose risk-policy-1.0.0 --primary gradient-boosting-1.0.0 \
-    --secondary neural-network-1.0.0                        # EXPERIMENTAL bands, stored inactive
-fraud-ai policy simulate risk-policy-1.0.0                  # test split; changes nothing
-fraud-ai policy compare risk-policy-1.0.0 risk-policy-1.1.0 # same events, paired
-fraud-ai deployment activate risk-policy-1.0.0 --shadow-model logistic-regression-1.0.0
-fraud-ai realtime replay live.jsonl                         # score in arrival order
-fraud-ai realtime score event.json                          # live: arrival = now
-fraud-ai review list ; fraud-ai review show <id> ; fraud-ai review resolve <id> --outcome fraud
-fraud-ai monitoring summary                                 # decisions, latency, drift warnings
-python scripts/realtime_benchmark.py --users 300            # full-path latency benchmark
-# Stage 9 - machine-to-machine service (TLS in front of it outside localhost)
-fraud-ai service-key create --name checkout --scope score:write --scope assessment:read \
-    --scope stepup:write                                    # the credential is shown ONCE
-fraud-ai service-key list ; fraud-ai service-key revoke <key-id> ; fraud-ai service-key scopes
-fraud-ai service status                                     # readiness + security config
-fraud-ai service run                                        # http://127.0.0.1:8080/v1/...
-fraud-ai service openapi --output openapi.json
-python scripts/service_benchmark.py                         # HTTP vs direct, 1/4/8/16 workers
-docker compose up --build                                   # fraud-ai + PostgreSQL (see DEPLOYMENT.md)
-
-# Stage 10 - hardening (see HARDENING.md)
-fraud-ai config check                                       # would the service start with these settings?
-fraud-ai service-key create --name c --scope score:write --expires-in-days 90
-fraud-ai service-key rotate <key-id> --grace-hours 24       # successor shown ONCE; old key expires
-fraud-ai audit list ; fraud-ai audit verify                 # hash-chained admin audit log
-fraud-ai retention plan ; fraud-ai retention run            # dry run unless --execute --yes
-fraud-ai policy promote <version> --to shadow|evaluation|candidate [--approve] --note "..."
-python scripts/security_checks.py pip-audit|bandit|secrets|sbom
-python scripts/pg_load_benchmark.py --help                  # PostgreSQL + Redis load test
-docker compose -f deploy/staging/docker-compose.staging.yml up -d   # staging stack (DEPLOYMENT.md §2a)
-
-# Stage 11 - trust chain and privacy (see TRUST_CHAIN.md, PRIVACY.md)
-fraud-ai keys generate --purpose model --out /secure/model.pem
-fraud-ai models sign <model> --key /secure/model.pem ; fraud-ai models verify-signature <model>
-OPERATOR_ID=alice fraud-ai policy approve <version> --note "..."   # two-person rule
-fraud-ai audit anchor --key /secure/audit.pem --store /mnt/worm ; fraud-ai audit verify-anchor --store /mnt/worm
-fraud-ai release manifest --out release.json --key /secure/release.pem ; fraud-ai release verify release.json
-fraud-ai privacy inventory ; fraud-ai privacy erasure-plan <customer-ref>   # dry run
-fraud-ai db create-roles --database fraud_ai ; fraud-ai db grant-roles      # PostgreSQL least privilege
-
-# Stage 12 - operational controls and the demo (see HARDENING.md §27-39, DEMO.md)
-deploy/staging/stack.sh up                                        # full staging stack
-fraud-ai db check-privileges --expect service                     # probe the connected role
-fraud-ai operators keygen --id alice --out alice.pem              # an operator's own key
-fraud-ai policy approve <version> --note "..." --operator-key alice.pem
-fraud-ai audit anchor-now ; fraud-ai audit anchor-status --max-age-minutes 30
-fraud-ai keys status ; fraud-ai keys rotate --purpose audit --operator-key sec.pem
-fraud-ai privacy export <customer-ref> --out subject.json --operator-key sec.pem
-fraud-ai release verify-image image-evidence.json --key image.pub --commit <sha>
-DEMO_MODE=true fraud-ai demo start ; fraud-ai demo run            # the 9-step walkthrough
-
-# Stages 13-14 - the SENTINEL analyst console (LOCAL_SETUP.md, sentinel-console/README.md)
-./scripts/setup-local.sh && ./scripts/sentinel-start.sh           # demo world + service + console on :3000
-./scripts/sentinel-status.sh ; ./scripts/sentinel-stop.sh         # Windows: the .ps1 equivalents
-python -m fraud_ai --help        # equivalent entry point
-```
-
-### PostgreSQL
-
-```bash
-sudo -u postgres scripts/dev_postgres.sh '<password>'
-export DATABASE_URL='postgresql+psycopg://fraud_ai:<password>@localhost:5432/fraud_ai'
-fraud-ai db init
-```
-
-## Configuration (environment variables)
-
-| Variable | Default | Notes |
+| Part | Directory | What it is |
 |---|---|---|
-| `ENVIRONMENT` | `development` | `development`, `test`, `staging`, `production` |
-| `DATABASE_URL` | `sqlite:///<DATA_DIRECTORY>/fraud_ai.db` | PostgreSQL is required in staging/production |
-| `LOG_LEVEL` | `INFO` | |
-| `DATA_DIRECTORY` | `data` | |
-| `MODEL_DIRECTORY` | `models` | |
-| `EVALUATION_DIRECTORY` | `evaluation` | Stage 4 report artefacts |
-| `PSEUDONYMISATION_KEY` | a generated dev key file | Required outside development/test; at least 32 characters |
-| `STORE_RAW_IP` | `false` | Store raw IPs alongside their keyed hash |
-| `LOCAL_LLM_RUNTIME` | unset | Stage 7: `ollama`, `llamacpp-server`, `llamacpp-process` or `reference` |
-| `LOCAL_LLM_MODEL`, `LOCAL_LLM_ENDPOINT` | unset; the runtime's localhost default | The endpoint must be local or private; proxies are never used |
-| `LOCAL_LLM_TIMEOUT` | `120` | Seconds |
-| `LOCAL_LLM_BINARY`, `LOCAL_LLM_MODEL_PATH` | `llama-cli`, unset | llama.cpp process mode |
-| `LOCAL_LLM_TEMPERATURE`, `LOCAL_LLM_TOP_P`, `LOCAL_LLM_SEED` | `0`, `1`, `0` | Deterministic by default |
-| `LOCAL_LLM_CONTEXT_WINDOW`, `LOCAL_LLM_MAX_TOKENS` | `8192`, `1200` | |
-| `SERVICE_HOST`, `SERVICE_PORT` | `127.0.0.1`, `8080` | Stage 9 service; put TLS in front outside localhost |
-| `TRUSTED_PROXIES` | empty | Only these IPs/CIDRs may set forwarding headers |
-| `REQUEST_SIZE_LIMIT`, `RATE_LIMIT`, `RATE_LIMIT_BURST` | `65536`, `120/minute`, `30` | Per API key and route |
-| `SERVICE_SIGNING_MASTER_KEY`, `SERVICE_REQUIRE_SIGNATURES`, `SIGNATURE_MAX_AGE` | unset, `false`, `300` | HMAC request signing |
-| `WEBAUTHN_RP_ID`, `WEBAUTHN_RP_NAME`, `WEBAUTHN_ORIGIN` | `localhost`, dev name, `http://localhost:8080` | https is required outside dev/test |
-| `PAYMENT_AUTH_PROVIDER`, `PAYMENT_AUTH_WEBHOOK_SECRET`, `PAYMENT_AUTH_TIMEOUT` | unset, unset, `5` | `fake` = development fake; `stripe` = test-mode adapter |
-| `STATE_BACKEND`, `REDIS_URL` | `memory`, unset | Stage 10: `redis` for several workers/instances |
-| `SERVICE_SIGNING_KEY_VERSION`, `SERVICE_SIGNING_PREVIOUS_KEY*` | `1`, unset | Signing-key rotation |
-| `POLICY_REQUIRE_PROMOTION` | on in staging/production | Promotion before activation |
-| `LOG_FORMAT` | `json` in staging/production | |
-| `DB_POOL_SIZE`, `DB_MAX_OVERFLOW` | `5`, `10` | Per worker (PostgreSQL) |
-| `NAME_FILE` | – | Read any secret from a file |
+| **fraud-ai** (backend) | `fraud_ai/` | The fraud-decision service: event ingestion, point-in-time features, models, risk policy, review queue, step-up authentication, audit log, and a `fraud-ai` CLI. |
+| **SENTINEL console** | `sentinel-console/` | The analyst web app. It is only a *client* of the service's `/v1` API: no scoring or decision logic lives in the browser. |
 
-All Stage 9 and 10 settings are listed in [DEPLOYMENT.md](DEPLOYMENT.md) §4 and
-`.env.example`.
+Decisions are internal policy outputs: `ALLOW`, `ALLOW_WITH_MONITORING`,
+`STEP_UP_AUTHENTICATION`, `MANUAL_REVIEW` and `TEMPORARY_BLOCK`. The service never moves
+money and never authenticates cardholders itself; step-up runs through WebAuthn passkeys or
+an external payment-authentication adapter.
 
-## Develop
+It was built in fifteen stages, each verified before the next; the history is in
+[ROADMAP.md](ROADMAP.md) and the current state in [PROJECT_STATUS.md](PROJECT_STATUS.md).
 
-```bash
-scripts/check.sh                 # ruff, ruff format --check, mypy --strict, pytest
-TEST_POSTGRES_URL='postgresql+psycopg://fraud_ai:<password>@localhost:5432/fraud_ai_test' pytest
+## Demo
+
+A deterministic synthetic world (seed `20260701`, 360 users) with ten scripted cases. Every
+expected decision was **measured** from the running service, not chosen, so a missed fraud
+is shown as missed:
+
+| Case | Measured decision | Honest reading |
+|---|---|---|
+| Normal purchase | ALLOW | correct |
+| Legitimate VPN customer | ALLOW | correct: a VPN is a signal, not proof |
+| House mover | ALLOW | correct |
+| Large legitimate purchase | ALLOW | correct |
+| High-velocity fraud | ALLOW | **missed** by the model |
+| Account takeover | STEP_UP_AUTHENTICATION | caught, with friction rather than a block |
+| Stealth (slow) takeover | ALLOW_WITH_MONITORING | weakly flagged |
+| Manual review | MANUAL_REVIEW | a **false positive**: a genuine customer |
+| Step-up, then success | STEP_UP_AUTHENTICATION → ALLOW_WITH_MONITORING | friction for a genuine customer |
+| Step-up, then failure | STEP_UP_AUTHENTICATION → stays STEP_UP | the provider result is simulated |
+
+The 5–8 minute interview walkthrough (exact clicks and what to say), fallbacks and a video
+shot list are in [DEMO.md](DEMO.md).
+
+## Screenshots
+
+All screenshots are of the synthetic demo world, captured by the end-to-end test.
+
+| | |
+|---|---|
+| ![Start-up checks](sentinel-console/docs/screenshots/01-startup.png) **1. Start-up:** seven trust and readiness checks, each resolved by the running service | ![Overview](sentinel-console/docs/screenshots/02-overview.png) **2. Overview:** live metrics, flagged assessments, system health |
+| ![Live feed](sentinel-console/docs/screenshots/03-live-feed.png) **3. Live feed:** every recent decision, newest first | ![Review queue](sentinel-console/docs/screenshots/04-review-queue.png) **4. Review queue:** cases waiting for an analyst |
+| ![Case workspace](sentinel-console/docs/screenshots/05-case.png) **5. Case:** a one-line summary of what happened and why | ![Timeline](sentinel-console/docs/screenshots/06-timeline.png) **6. Timeline:** the customer's history before the event |
+| ![Model comparison](sentinel-console/docs/screenshots/07-model-comparison.png) **7. Models:** primary vs shadow, never a vote | ![Analyst assistance](sentinel-console/docs/screenshots/08-analyst-assistance.png) **8. Analyst assistance:** cited evidence, interpretation, limitations |
+| ![System and trust](sentinel-console/docs/screenshots/09-system.png) **9. System:** signed models, policy, audit chain, trust settings | ![Metrics](sentinel-console/docs/screenshots/10-metrics.png) **10. Metrics:** decisions over time, reviews, step-up results |
+
+## Architecture
+
+```mermaid
+flowchart TD
+    APP["Merchant / app backend"] -->|"signed request (HMAC v2, API key)"| API
+
+    subgraph SVC["fraud-ai service (FastAPI)"]
+        API["Fraud API<br/>auth · replay check · rate limit · validation"]
+        FE["Feature engineering<br/>point-in-time snapshot"]
+        MOD["Models<br/>gradient boosting (primary) · shadows"]
+        POL["Risk policy<br/>calibrated score bands + rules"]
+        DEC["Decision<br/>immutable assessment"]
+        RS["Review queue · step-up<br/>(WebAuthn / payment auth)"]
+        API --> FE --> MOD --> POL --> DEC --> RS
+    end
+
+    PG[("PostgreSQL<br/>events · assessments · audit<br/>least-privilege roles")]
+    RD[("Redis<br/>replay · rate limits")]
+    SM["Signed models<br/>Ed25519, verified at load"]
+    AA[("Audit anchors<br/>S3 Object Lock (write-once)")]
+    UI["SENTINEL console<br/>Next.js · server-side signing"]
+    LLM["Local analyst layer<br/>explains only · never decides"]
+
+    API <--> RD
+    FE <--> PG
+    DEC --> PG
+    SM -.->|verified| MOD
+    PG -->|"hash-chained log, signed anchors"| AA
+    UI -->|"signed /v1 calls"| API
+    UI --> LLM
+    LLM -.->|reads stored evidence| PG
 ```
 
-Without `TEST_POSTGRES_URL`, the PostgreSQL variants of the database tests are skipped.
+Deeper: [ARCHITECTURE.md](ARCHITECTURE.md) (the backend) and
+[sentinel-console/ARCHITECTURE.md](sentinel-console/ARCHITECTURE.md) (the console).
+
+## How fraud scoring works
+
+One login or payment, end to end (the full technical walkthrough is in
+[PORTFOLIO.md](PORTFOLIO.md#technical-walkthrough-one-transaction)):
+
+1. **Validate and authenticate.** A merchant sends a signed request. The service checks the
+   API key and its scope, the HMAC signature over method, path, query and body, the
+   timestamp, and that the signature has never been used before (replay protection).
+2. **Ingest.** The event is stored once (idempotency key), with the time it *arrived*.
+3. **Point-in-time features.** 107 features (device history, velocity, network, account
+   changes) are computed only from data that had arrived *before* this event. The
+   snapshot is stored, so the decision can be replayed exactly.
+4. **Score.** The primary gradient-boosting model, loaded only after its signature is
+   verified, produces a score; shadow models are scored and recorded but never decide.
+5. **Calibrate.** The score is mapped to a calibrated probability.
+6. **Rules and policy.** A versioned, immutable risk policy maps the calibrated score and
+   any matched rules to one of five decisions, with reason codes.
+7. **Store an immutable assessment.** Nothing about it is ever updated; later events
+   (a step-up result, an analyst resolution) create *new* records.
+8. **Review or step-up.** `MANUAL_REVIEW` puts it in the analyst queue; `STEP_UP` asks the
+   customer for a passkey or card authentication.
+9. **Investigate.** In SENTINEL, an analyst sees the timeline, the models, the evidence and
+   an optional AI explanation, then resolves the case with an authenticated, final outcome.
+
+Every failure has a conservative fallback: an unavailable database means "not decided"
+(HTTP 503), never an allow.
+
+## ML evaluation
+
+Everything below is on **synthetic** data, written by me, so the models learn this
+generator, not real attackers.
+
+* **Point-in-time features.** Every feature uses only what was known when the event
+  arrived. Tests insert future data and check that features do not change. A *shortcut
+  check* makes sure no single feature gives the answer away: the strongest one has a
+  univariate ROC-AUC of 0.80.
+* **Baseline models:** logistic regression, random forest and **gradient boosting**, on a
+  time-ordered train / validation / test split.
+* **Neural model:** a feed-forward PyTorch network with early stopping.
+* **Sequence models:** a GRU and a small Transformer over each customer's ordered event
+  history, plus a hybrid of GRU and static features.
+* **Why PR-AUC.** About 1 % of events are fraud, so accuracy is meaningless ("allow
+  everything" scores 99 %) and ROC-AUC flatters. PR-AUC asks the operational question: of
+  what we flag, how much is fraud, and how much fraud do we catch. Every figure is reported
+  with a 95 % bootstrap interval, because the test split has only 52–60 frauds.
+
+| Model (Stage 6 world, 60 test frauds) | Test PR-AUC [95 % CI] |
+|---|---|
+| **Gradient boosting (primary)** | **0.905 [0.832, 0.958]** |
+| Hybrid GRU + static features | 0.879 [0.798, 0.941] |
+| Feed-forward neural network | 0.878 [0.796, 0.941] |
+| GRU (sequence) | 0.851 [0.755, 0.928] |
+| Transformer (sequence) | 0.831 [0.735, 0.913] |
+
+* **Why gradient boosting stayed primary.** The data is tabular, with engineered features
+  on very different scales, and has few positives (256–314 training frauds, depending on the world). Trees handle
+  that well. The neural network's paired PR-AUC difference against gradient boosting was
+  +0.054 [−0.004, +0.115] in GB's favour on the Stage 5 world: "stronger here", not
+  "better in general". The GRU caught one stealthy takeover gradient boosting missed, at a
+  cost in false positives, so it was not adopted.
+* **False positives** are measured per scenario and cohort (VPN users, house movers,
+  travellers), so that a signal like "uses a VPN" does not turn into a penalty on a group of
+  genuine customers.
+* **Calibration.** Logistic regression was badly over-confident; sigmoid calibration cut
+  its Brier score about seven-fold without changing its ranking. Gradient boosting was
+  already well calibrated.
+* **Walk-forward evaluation** shows how much the numbers depend on data volume: gradient
+  boosting's PR-AUC rose from 0.52 with 15 training frauds to 0.92 with 218.
+
+Details: [EVALUATION.md](EVALUATION.md), [MODELS.md](MODELS.md),
+[NEURAL_MODELS.md](NEURAL_MODELS.md), [SEQUENCE_MODELS.md](SEQUENCE_MODELS.md).
+
+## Security design
+
+| Control | What it prevents |
+|---|---|
+| **Request signing** (HMAC v2 over method, path, query, body digest and timestamp), downgrade refused | tampered API calls |
+| **Replay protection**: each signature accepted once, held in Redis; fails closed | a captured request being re-sent |
+| **API authentication**: hashed, scoped, expiring, rotatable keys; per-key rate limits | stolen or over-powered credentials |
+| **WebAuthn** passkeys for step-up (standard library, no custom crypto) | phishable one-time codes |
+| **Signed models** (Ed25519), verified over the exact bytes loaded | a swapped or tampered model file |
+| **Audit anchoring**: hash-chained audit log, signed anchors in S3 Object Lock | a database administrator rewriting history |
+| **Two-person activation** of risk policies, by authenticated operators with their own keys | one person changing how every event is decided |
+| **Least-privilege PostgreSQL roles** (migrator, service, backup, read-only) | the service rewriting its own decisions |
+| **Secret scanning** (detect-secrets, gitleaks over full history) | credentials in the repository |
+| **Container scanning** (Trivy) and **dependency auditing** (pip-audit) | known-vulnerable components |
+| **Release verification**: cosign-signed images with SLSA provenance and SBOM; a signed release manifest | an unverifiable or tampered release |
+
+The AI assistant is outside the decision path: it reads stored evidence, every claim must
+cite it, and its output is validated before storage. Each control was tested by attacking
+it (tampered models, replayed requests, a rewritten audit log, self-approval). Deeper:
+[TRUST_CHAIN.md](TRUST_CHAIN.md), [SERVICE_SECURITY.md](SERVICE_SECURITY.md),
+[AUTHENTICATION.md](AUTHENTICATION.md), [THREAT_MODEL.md](THREAT_MODEL.md),
+[HARDENING.md](HARDENING.md), [PRIVACY.md](PRIVACY.md).
+
+## Analyst console
+
+SENTINEL (`sentinel-console/`) is a Next.js 16 / React 19 / TypeScript app:
+
+* **Backend-for-frontend.** The console's own server holds the API key and signs every
+  call; the browser never sees a secret. Only allow-listed routes are proxied.
+* **Honest by construction.** Every response is schema-validated (Zod); health comes only
+  from the latest successful poll, so an unreachable service is never shown as healthy;
+  models are shown side by side with no invented consensus score.
+* **Analyst workflow.** Review queue, case workspace (summary, timeline, reasons and
+  evidence, model comparison, investigation), keyboard shortcuts (J/K/Enter/Esc, R opens
+  the resolve panel but never submits), and authenticated, final resolutions.
+* **Quality.** WCAG 2.1 A/AA audit (axe-core) on every page in the end-to-end test; works at
+  1366×768 to 2560×1440; presentation mode for screen sharing.
+
+Deeper: [sentinel-console/README.md](sentinel-console/README.md),
+[sentinel-console/DESIGN_SYSTEM.md](sentinel-console/DESIGN_SYSTEM.md).
+
+## Local setup
+
+| Command (Windows / Linux-macOS) | What it does |
+|---|---|
+| `setup-local.ps1` / `setup-local.sh` | creates `.venv`, installs the backend and console, builds the console; safe to re-run |
+| `sentinel-start.ps1 -Mode Demo` / `sentinel-start.sh --mode demo` | starts the service and console on the synthetic world |
+| `sentinel-status` | what is running, models, policy, ports |
+| `sentinel-reset-demo` | rebuilds the demo world (asks you to type `RESET DEMO`) |
+| `sentinel-stop` | stops only what SENTINEL started |
+
+Dev mode (Docker PostgreSQL + Redis), StagingLike mode, logs, ports and troubleshooting:
+[LOCAL_SETUP.md](LOCAL_SETUP.md). The full backend CLI: [CLI.md](CLI.md).
+
+## Testing
+
+| Layer | What runs |
+|---|---|
+| Backend | pytest on SQLite, PostgreSQL 16 and Redis, including least-privilege roles, multi-process and chaos tests; **coverage gate 95 %**; ruff and mypy (strict) |
+| Console | ESLint, TypeScript, Vitest unit and component tests, production build |
+| End to end | Playwright against the real service on a freshly built demo world, with a WCAG 2.1 AA audit and a clean-browser-console check |
+| Local tooling | setup, Demo, Dev and StagingLike on Linux; setup, Demo, status and stop on Windows (PowerShell 7 and 5.1, path with spaces) |
+| Security | pip-audit, bandit, detect-secrets, gitleaks, CycloneDX SBOM, Trivy, cosign sign-and-verify (a tampered image must fail) |
+
+All of it runs in GitHub Actions on every push ([.github/workflows/ci.yml](.github/workflows/ci.yml)).
+
+## Project stats
+
+Counted from the repository at `v0.15.0-rc1`:
+
+| | |
+|---|---|
+| Backend tests | 1,144 pytest tests: 1,140 passed and 4 skipped locally (they need a live Vault or signed-image evidence); line coverage 95.8 % (gate 95 %) |
+| Console tests | 144 Vitest tests, 2 Playwright end-to-end tests |
+| CI jobs | 7 (lint, test, security, container, console, local-scripts, local-windows) |
+| Model types | 7: logistic regression, random forest, gradient boosting, feed-forward NN, autoencoder (anomaly score), GRU, Transformer; plus a GRU + static hybrid |
+| Features | 107 point-in-time features (`fraud-features-1.0.0`) |
+| Databases | PostgreSQL 16 (staging, Dev) and SQLite (Demo, tests) |
+| API | 24 HTTP operations under `/v1` |
+| Database migrations | 10 |
+| Code | 173 Python modules (about 40,400 lines) in `fraud_ai/`; 86 TypeScript source files (about 6,700 lines) in `sentinel-console/src/` |
+| Largest synthetic benchmark | 5,000-user world for the load test; 1,000-user world for model evaluation |
+
+## Limitations
+
+* **Synthetic data only.** The scenarios were written by me; the models learned this
+  generator, not real attackers. No production fraud dataset was used.
+* **In the demo, most fraud is still allowed** at the hand-set bands; the demo says so.
+* **No real Stripe test.** The adapter exists but was never run against Stripe (no test
+  credentials); the demo's payment provider is a fake, not 3-D Secure.
+* **The local LLM benchmark failed.** Two small local models (Qwen2.5-3B, Llama-3.2-1B)
+  produced no schema-valid explanation on CPU, so the default is a deterministic reference
+  template, labelled as such.
+* **No penetration test** and no external security review.
+* **Single-host testing.** Load and staging tests ran on one machine; the write-once audit
+  store ran on the same host.
+* **Container image CVEs.** The Stage 12 review found HIGH (no CRITICAL) CVEs in Debian base
+  packages with no upstream fix; Trivy reports them on every CI build and none is
+  suppressed ([HARDENING.md](HARDENING.md#34-image-cves-image-size-and-the-sequence-runtime)).
+* **Windows trade-off.** Windows cannot open files relative to a directory handle, so model
+  and key loading there has a weaker check-to-open guarantee; digests and signatures are
+  still verified ([TRUST_CHAIN.md](TRUST_CHAIN.md#windows-stage-14)).
+* **Not deployed or certified.** No PCI DSS, SOC 2, ISO or GDPR claim; operator keys are
+  files (no hardware tokens); erasure is designed, not executed.
+
+## What I learned
+
+* **Suspiciously good results are a bug report.** My first models scored almost
+  perfectly because the generator leaked the answer; I added a shortcut check and the
+  numbers became believable.
+* **Simpler models can win.** Gradient boosting beat the neural and sequence models on this
+  tabular data, and I kept it primary instead of the more impressive-sounding option.
+* **An LLM should explain, not decide.** It is non-deterministic and attackable through
+  text; keeping it outside scoring, and validating its output, mattered more than which
+  model it was.
+* **Security controls need attacking.** A staging drill showed that a hash-chained log can
+  be re-chained by an administrator; only external write-once anchors caught it.
+* **Testing in real environments finds real bugs:** a privacy export leaking nested keys,
+  a CI step that could never fail, Windows file-system differences. Each became a
+  regression test. The full list is in [PORTFOLIO.md](PORTFOLIO.md#what-went-wrong-and-how-testing-found-it).
+
+## Roadmap and future work
+
+The planned build is complete: fifteen stages, history in [ROADMAP.md](ROADMAP.md). Future
+work would be driven by real users, real data, real integrations and a security review,
+not by more features. The most valuable next steps would be a real labelled dataset, a
+real payment-authentication integration, an external security review, and hardware-backed
+operator keys.
+
+## Documentation map
+
+| Topic | Documents |
+|---|---|
+| Start here | [PROJECT_STATUS.md](PROJECT_STATUS.md) · [DEMO.md](DEMO.md) · [LOCAL_SETUP.md](LOCAL_SETUP.md) |
+| Portfolio and interviews | [PORTFOLIO.md](PORTFOLIO.md) · [INTERVIEW_GUIDE.md](INTERVIEW_GUIDE.md) |
+| Backend | [ARCHITECTURE.md](ARCHITECTURE.md) · [API.md](API.md) · [CLI.md](CLI.md) · [FEATURES.md](FEATURES.md) · [REALTIME_SCORING.md](REALTIME_SCORING.md) · [RISK_POLICY.md](RISK_POLICY.md) |
+| Machine learning | [MODELS.md](MODELS.md) · [EVALUATION.md](EVALUATION.md) · [NEURAL_MODELS.md](NEURAL_MODELS.md) · [SEQUENCE_MODELS.md](SEQUENCE_MODELS.md) · [LLM_ANALYST.md](LLM_ANALYST.md) |
+| Security and privacy | [TRUST_CHAIN.md](TRUST_CHAIN.md) · [SERVICE_SECURITY.md](SERVICE_SECURITY.md) · [AUTHENTICATION.md](AUTHENTICATION.md) · [THREAT_MODEL.md](THREAT_MODEL.md) · [HARDENING.md](HARDENING.md) · [PRIVACY.md](PRIVACY.md) |
+| Operations | [DEPLOYMENT.md](DEPLOYMENT.md) · [DISASTER_RECOVERY.md](DISASTER_RECOVERY.md) · [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md) · [ANALYST_WORKFLOW.md](ANALYST_WORKFLOW.md) |
+| Console | [sentinel-console/README.md](sentinel-console/README.md) · [sentinel-console/ARCHITECTURE.md](sentinel-console/ARCHITECTURE.md) · [sentinel-console/DESIGN_SYSTEM.md](sentinel-console/DESIGN_SYSTEM.md) |
+| Handoff | [HANDOFF.md](HANDOFF.md) · [docs/ai-workflow.md](docs/ai-workflow.md) |

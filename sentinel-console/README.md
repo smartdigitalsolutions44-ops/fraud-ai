@@ -1,22 +1,26 @@
 # SENTINEL — Fraud Intelligence & Response
 
 **SENTINEL // Analyst Console** is the analyst interface for the `fraud-ai` service (Stages
-13 and 14). To run the whole product on your machine, use the repository's one-command
+13 to 15). To run the whole product on your machine, use the repository's one-command
 setup and start ([LOCAL_SETUP.md](../LOCAL_SETUP.md)); this README is for working on the
 console itself.
 It is a Next.js, React and TypeScript application. It is a **client** of the existing
 `/v1` API and duplicates none of the backend's logic: no scoring, risk policy, model
 inference, review logic or authentication happens in the console.
 
-![Case workspace](docs/screenshots/04-case.png)
+![Case workspace](docs/screenshots/05-case.png)
 
 | | |
 |---|---|
 | Start-up checks | ![Start-up](docs/screenshots/01-startup.png) |
 | Overview | ![Overview](docs/screenshots/02-overview.png) |
-| Review queue | ![Queue](docs/screenshots/03-queue.png) |
-| Model comparison and investigation | ![Models](docs/screenshots/05-model-comparison.png) |
-| System health | ![System](docs/screenshots/06-system.png) |
+| Live feed | ![Live feed](docs/screenshots/03-live-feed.png) |
+| Review queue | ![Review queue](docs/screenshots/04-review-queue.png) |
+| Case timeline | ![Timeline](docs/screenshots/06-timeline.png) |
+| Model comparison | ![Models](docs/screenshots/07-model-comparison.png) |
+| Analyst assistance | ![Analyst assistance](docs/screenshots/08-analyst-assistance.png) |
+| System and trust | ![System](docs/screenshots/09-system.png) |
+| Metrics | ![Metrics](docs/screenshots/10-metrics.png) |
 
 All screenshots show the **synthetic demo world** only. They are captured by the end-to-end
 test (`npm run screenshots`).

@@ -4,9 +4,10 @@ import { expect, test, type Page } from "@playwright/test";
 
 /**
  * The analyst flow on the synthetic demo world, end to end against the real service:
- * start the demo → overview → queue → open a case → timeline → run the investigation →
- * resolve → the resolution is final and shows the authenticated reviewer.
- * With SENTINEL_SCREENSHOTS=1 it also writes the README screenshots (demo data only).
+ * start the demo → overview → live feed → queue → open a case → timeline → models → run the
+ * investigation → resolve → the resolution is final and shows the authenticated reviewer →
+ * system → metrics. Every page visited is audited for WCAG 2.1 A/AA.
+ * With SENTINEL_SCREENSHOTS=1 it also writes the ten README screenshots (demo data only).
  */
 const SHOTS = process.env.SENTINEL_SCREENSHOTS === "1";
 const AXE = path.join(process.cwd(), "node_modules", "axe-core", "axe.min.js"); // run from sentinel-console
@@ -26,6 +27,10 @@ async function accessible(page: Page, where: string) {
   });
   await page.emulateMedia({ reducedMotion: "no-preference" });
   expect(violations, `accessibility on ${where}`).toEqual([]);
+  // the app shell is exactly one viewport: only the main region scrolls, never the document
+  // (a positioned element escaping .main once let a long case drag the whole shell away)
+  const overflow = await page.evaluate(() => document.documentElement.scrollHeight - window.innerHeight);
+  expect(overflow, `document-level overflow on ${where}`).toBeLessThanOrEqual(0);
 }
 
 async function shot(page: Page, name: string) {
@@ -80,11 +85,17 @@ test("analyst flow", async ({ page }) => {
   await accessible(page, "overview");
   await shot(page, "02-overview");
 
+  // --- live feed: every recent assessment, newest first
+  await page.getByRole("link", { name: "Live Feed", exact: true }).click();
+  await expect(page.getByTestId("feed-table")).toBeVisible();
+  await accessible(page, "live feed");
+  await shot(page, "03-live-feed");
+
   // --- queue: the new item, found by its assessment ID
   await page.getByRole("link", { name: /Review Queue/ }).click();
   await expect(page.getByTestId("queue-table")).toBeVisible();
   await accessible(page, "queue");
-  await shot(page, "03-queue");
+  await shot(page, "04-review-queue");
   await page.getByLabel("Filter by case, assessment or event ID").fill(assessmentId.slice(0, 8));
   const rows = page.getByTestId("case-row");
   await expect(rows).toHaveCount(1);
@@ -98,14 +109,22 @@ test("analyst flow", async ({ page }) => {
   await expect(ws.getByTestId("timeline-event").filter({ hasText: "This case" })).toHaveCount(1);
   await expect(ws.getByTestId("model-comparison")).toContainText("Shadow · never decides");
   await expect(ws.getByTestId("model-comparison")).toContainText("Recorded for comparison · never decides");
+  // DEMO.md's interview script relies on this: in the default world the models disagree here
+  await expect(ws.getByTestId("model-comparison")).toContainText("Models disagree");
   await accessible(page, "case workspace");
-  await shot(page, "04-case");
+  await shot(page, "05-case");
 
   // --- keyboard: R opens the resolve panel and never submits
   await page.locator("body").click({ position: { x: 5, y: 5 } });
   await page.keyboard.press("r");
   await expect(ws.getByTestId("resolve-legitimate")).toBeFocused();
   await expect(page.getByRole("alertdialog")).toHaveCount(0);
+
+  // --- the behavioural timeline: the whole history up to the case event
+  await ws.getByRole("button", { name: /Show \d+ earlier events?/ }).click();
+  await expect(ws.getByRole("button", { name: "Collapse earlier events" })).toBeVisible();
+  await ws.getByTestId("timeline-event").filter({ hasText: "This case" }).evaluate((el) => el.scrollIntoView({ block: "end" }));
+  await shot(page, "06-timeline");
 
   // --- analyst assistance
   await ws.getByTestId("run-investigation").click();
@@ -114,7 +133,10 @@ test("analyst flow", async ({ page }) => {
   await expect(ws.getByTestId("investigation-result")).toContainText("Observed evidence");
   await expect(ws.getByTestId("investigation-result")).toContainText("Limitations");
   await ws.getByTestId("model-comparison").scrollIntoViewIfNeeded();
-  await shot(page, "05-model-comparison");
+  await shot(page, "07-model-comparison");
+  await ws.getByText("ANALYST ASSISTANCE").evaluate((el) => el.scrollIntoView({ block: "start" }));
+  await shot(page, "08-analyst-assistance");
+  await accessible(page, "analyst assistance");
 
   // --- resolve (confirmation required), then it is final
   await ws.getByTestId("resolve-legitimate").click();
@@ -139,7 +161,14 @@ test("analyst flow", async ({ page }) => {
   await expect(page.getByTestId("models-table")).toContainText("Verified");
   await expect(page.getByTestId("ops-rail").locator('[data-group="trust"][data-state="online"]')).toBeVisible();
   await accessible(page, "system");
-  await shot(page, "06-system");
+  await shot(page, "09-system");
+
+  // --- metrics: the same service summary, over time
+  await page.getByRole("link", { name: "Metrics", exact: true }).click();
+  await expect(page.getByLabel("Main content").getByRole("heading", { name: "Metrics" })).toBeVisible();
+  await expect(page.getByText("Decision distribution")).toBeVisible();
+  await accessible(page, "metrics");
+  await shot(page, "10-metrics");
 
   // a clean browser console through the whole flow: no React, hydration or runtime errors
   expect(problems).toEqual([]);

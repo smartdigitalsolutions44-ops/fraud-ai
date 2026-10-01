@@ -76,11 +76,6 @@ class ServiceContainer:
     # Stage 12: the trusted operator registry (reviewer assertions on review resolution).
     operator_registry: Any = None
 
-    @property
-    def signing_master_key(self) -> str | None:
-        """The *current* master key (new signatures), if signing is configured."""
-        return self.signing_keys[0].master if self.signing_keys else None
-
     def verification_keys(self, now: datetime) -> list[SigningKey]:
         """Keys a signature may be checked against right now: the current key, plus the
         previous key until its grace period ends."""

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fraud-ai"
-version = "0.1.0"
+version = "0.15.0rc1"
 description = "Local fraud-prevention software platform: event store, feature foundation, risk engine and ML interfaces."
 readme = "README.md"
 requires-python = ">=3.11"

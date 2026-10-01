@@ -1,7 +1,9 @@
 # Interview guide
 
-Questions about fraud-ai you should be able to answer, with short answer guidance. Each
-answer is short enough to say in under a minute. The linked documents give the detail.
+Questions about SENTINEL (the `fraud-ai` service and its console) you should be able to
+answer, with short answer guidance. Each answer is short enough to say in under a minute.
+The linked documents give the detail; the 30-second, 2-minute and 5-minute descriptions of
+the whole project are in [PORTFOLIO.md](PORTFOLIO.md#13-cv-application-and-recruiter-versions).
 Keep two rules:
 
 * say "on synthetic data" whenever you quote a number;
@@ -46,7 +48,7 @@ Keep two rules:
 * The right response to uncertainty is proportionate: monitoring or a step-up, not a
   block.
 
-## Why keep the LLM outside scoring?
+## Why not use the LLM as the classifier?
 
 * **Determinism and auditability.** A decision must be reproducible from stored inputs,
   versioned models and a versioned policy. An LLM's output is neither stable nor
@@ -56,9 +58,40 @@ Keep two rules:
 * **Latency and availability.** Scoring must not depend on a slow, optional component.
   Scoring works with no LLM at all; the investigation endpoint returns 503, and "decisions
   are unaffected".
+* **It would also be a worse classifier.** On tabular features a calibrated gradient-boosting
+  model is cheap, fast, measurable with PR-AUC, and reproducible; an LLM is none of those.
 * **What it does instead:** it explains stored outputs to an analyst. Every claim must
   cite evidence, output is validated (schema, citations, privacy, no decision language),
   and it has no tools.
+
+## Why did the local LLM fail?
+
+* **What happened.** Stage 12 benchmarked two small local models on CPU against the same
+  validator production uses. Qwen2.5-3B (Q4_K_M): 0 of 10 valid; every answer was cut off
+  at the 1,200-token output limit, so the JSON never closed. Llama-3.2-1B (Q8_0): 0 of 10
+  valid; malformed JSON. Mean latency was 334 s and 133 s.
+* **Why.** Small quantised models on a CPU struggle to produce long, strictly structured,
+  citation-bearing JSON; the limit and the schema were deliberately strict.
+* **What the system did right.** The validator stored nothing invalid, and decisions were
+  unaffected because the LLM is outside scoring. The default stays a deterministic
+  reference template, labelled "not a language model" in the console.
+* **What I would try next:** a larger model or a GPU, constrained (grammar-based) decoding,
+  a shorter schema, and measuring citation and privacy rates once outputs parse
+  ([LLM_ANALYST.md](LLM_ANALYST.md)).
+
+## What is calibration?
+
+* A model's raw score ranks events, but "0.8" does not necessarily mean "80 % likely to be
+  fraud". **Calibration** maps scores to probabilities that match observed frequencies:
+  of all events given 0.1, about 10 % should be fraud.
+* It matters because the policy bands are thresholds on a probability, and costs
+  (fraud £500 vs review £5) only make sense on real probabilities.
+* Measured with the **Brier score**, log loss and expected calibration error, on test data,
+  after fitting the calibrator (sigmoid or isotonic) on validation data.
+* **Example from this project:** class-weighted logistic regression was badly
+  over-confident (its 0.9–1.0 bucket was only 45.5 % fraud). Sigmoid calibration cut its
+  Brier score about seven-fold without changing its ranking (PR-AUC unchanged). Gradient
+  boosting was already well calibrated ([EVALUATION.md](EVALUATION.md)).
 
 ## Why signed models?
 
@@ -90,6 +123,20 @@ Keep two rules:
   Redis resets counters but loses no decision. If Redis is unavailable, the service
   **fails closed**: 503, never unprotected.
 
+## Why audit anchors?
+
+* The audit log is **hash-chained**: each event includes the hash of the one before, so
+  editing a row breaks the chain. But someone with database-administrator access can
+  rewrite a row and **re-compute every later hash**; the chain then verifies again.
+* An **anchor** is a signed copy of the chain's head hash, written periodically to storage
+  the database cannot change: S3 **Object Lock in COMPLIANCE mode**, which even the account
+  owner cannot delete before the retention date.
+* Verification compares the live chain against the anchors. In the Stage 12 drill, a
+  restored backup was rewritten and re-chained: `audit verify` passed, **the anchors caught
+  it**.
+* **Limit:** in staging the object store ran on the same host, so a host administrator
+  could still delete its files; a separate account or provider is the real fix.
+
 ## Why WebAuthn?
 
 * It is **phishing-resistant**. The credential is bound to the site's origin and RP ID, so
@@ -100,10 +147,16 @@ Keep two rules:
   device, or a friendly fraudster (the real cardholder), passes. A success therefore leads
   to ALLOW_WITH_MONITORING, not a clean slate.
 
-## What are false positives?
+## What causes false positives?
 
-* A **genuine** customer treated as fraud: blocked, challenged or sent to review. In the
-  demo, the manual-review case is one: a normal customer.
+* A **false positive** is a genuine customer treated as fraud: blocked, challenged or sent
+  to review. In the demo, the manual-review case is one: a normal customer.
+* **Causes:**
+  * genuine behaviour that *looks* like fraud: a new device, a house move, a VPN, a large
+    one-off purchase, travel;
+  * thresholds set to catch more fraud, which always flags more genuine customers too;
+  * features or rules that act as proxies for a group of customers;
+  * poorly calibrated scores, so a band means something different from what was assumed.
 * They cost money (review time, lost sales) and trust. They also fall unevenly on groups
   such as VPN users, house movers and travellers, which the cohort analysis looks for.
 * Trade-off: lowering the threshold catches more fraud and creates more false positives.
@@ -143,7 +196,7 @@ Keep two rules:
   * a real Stripe/3-D Secure integration;
   * hardware-backed operator keys;
   * multi-host load testing;
-  * an analyst UI built on ANALYST_WORKFLOW.md.
+  * multi-analyst case assignment and single sign-on in SENTINEL.
 
 ## Harder follow-ups to expect
 
@@ -159,4 +212,4 @@ Keep two rules:
   * a database failure means 503 "not decided", with a MANUAL_REVIEW fallback hint;
   * nothing fails open.
 * **"Is this production-ready?"** No. It is a portfolio release candidate on synthetic
-  data. PORTFOLIO.md §7 lists the gaps.
+  data. [PORTFOLIO.md §10](PORTFOLIO.md#10-limitations) lists the gaps.

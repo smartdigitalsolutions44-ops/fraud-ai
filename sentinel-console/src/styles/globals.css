@@ -283,7 +283,12 @@ p {
 
 .main {
   grid-area: main;
+  /* The containing block for positioned descendants (e.g. .sr-only captions). Without it
+     they are placed relative to .shell, overflow it, and make the whole document
+     scrollable, so scrolling past the end of a long case moved the entire shell. */
+  position: relative;
   overflow: auto;
+  overscroll-behavior: contain;
   min-width: 0;
   scroll-padding-top: var(--space-4);
 }

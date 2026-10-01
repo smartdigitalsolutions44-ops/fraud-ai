@@ -241,10 +241,6 @@ class VerifiedAssertion:
         return f"operator:{self.operator_id}"
 
 
-def sha256_text(value: str) -> str:
-    return hashlib.sha256(value.encode()).hexdigest()
-
-
 def create_assertion(
     signer: tk.KeyPair,
     operator_id: str,

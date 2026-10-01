@@ -617,7 +617,7 @@ Details: [sentinel-console/ARCHITECTURE.md](sentinel-console/ARCHITECTURE.md) an
   variable can never point a demo at another database. StagingLike runs the unchanged
   `deploy/staging/stack.sh`.
 * **Backend change for Windows.** Key and model-file loading gained Windows-only branches
-  (`fraud_ai/utils/winfs.py`); see [TRUST_CHAIN.md](TRUST_CHAIN.md#windows). Nothing else in
+  (`fraud_ai/utils/winfs.py`); see [TRUST_CHAIN.md](TRUST_CHAIN.md#windows-stage-14). Nothing else in
   the backend changed in Stage 14.
 
 Details: [LOCAL_SETUP.md](LOCAL_SETUP.md).

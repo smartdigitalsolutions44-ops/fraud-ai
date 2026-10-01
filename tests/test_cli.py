@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner, Result
 
+from fraud_ai import __version__
 from fraud_ai.cli.main import cli
 from fraud_ai.config.settings import reset_settings_cache
 
@@ -133,7 +134,7 @@ def test_python_dash_m_entry_point() -> None:
     proc = subprocess.run(
         [sys.executable, "-m", "fraud_ai", "--version"], capture_output=True, text=True, check=True
     )
-    assert "fraud-ai, version 0.1.0" in proc.stdout
+    assert f"fraud-ai, version {__version__}" in proc.stdout
 
 
 # --------------------------------------------------------------------------- Stage 2

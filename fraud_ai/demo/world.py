@@ -93,10 +93,6 @@ def _txn(row: dict[str, Any]) -> bool:
     return bool(row["event_type"] == "TRANSACTION_CREATED")
 
 
-def _vpn(row: dict[str, Any]) -> bool:
-    return bool(((row["event"].get("metadata") or {}).get("network") or {}).get("is_known_vpn"))
-
-
 CASES: tuple[Case, ...] = (
     Case("normal_purchase", "Normal purchase",
          "A long-standing customer buys as usual: known device, home network.",

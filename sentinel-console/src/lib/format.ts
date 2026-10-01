@@ -69,10 +69,6 @@ export function score(n: number | null | undefined): string {
   return n.toFixed(3);
 }
 
-export function humanise(code: string): string {
-  return code.replace(/_/g, " ").toLowerCase();
-}
-
 export function money(minor: number, currency: string): string {
   try {
     return new Intl.NumberFormat("en-GB", { style: "currency", currency }).format(minor / 100);
