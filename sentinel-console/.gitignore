@@ -11,3 +11,6 @@ blob-report/
 *.tsbuildinfo
 next-env.d.ts
 # screenshots are captured from demo data on purpose and are committed from docs/screenshots
+# written by `next dev` (Next.js agent guidance); generated, not project docs
+AGENTS.md
+CLAUDE.md
