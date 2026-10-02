@@ -8,7 +8,7 @@
 | Build stages | 1–15 complete; no further stage is planned |
 | Branch | `claude/tender-lovelace-lplx5d` |
 | Release commit | the commit tagged `v0.15.0-rc1` |
-| Signed release manifest | `release/v0.15.0-rc1.json`, signed for the release commit and added by the release-record commit that follows it |
+| Signed release manifest | [`release/v0.15.0-rc1.json`](release/v0.15.0-rc1.json) ([notes](release/v0.15.0-rc1.md)), signed for the release commit `a8a5002` and added by the release-record commit that follows it |
 | Data | synthetic only |
 
 ## What works
@@ -31,7 +31,7 @@
 
 | Check | Result |
 |---|---|
-| CI (7 jobs: lint, test, security, container, console, local-scripts, local-windows) | run on the release commit; the run id and result are recorded by the release-record commit that follows it |
+| CI (7 jobs: lint, test, security, container, console, local-scripts, local-windows) | [run 36943689970](https://github.com/smartdigitalsolutions44-ops/fraud-ai/actions/runs/36943689970) on the release commit `a8a5002`: success, all 7 jobs green |
 | Backend tests (SQLite, PostgreSQL 16, Redis, least-privilege roles) | 1,140 passed, 4 skipped (need a live Vault or signed-image evidence); coverage 95.8 % (gate 95 %) |
 | Console | ESLint, TypeScript, 144 Vitest tests, production build; Playwright 2/2 with a WCAG 2.1 AA audit of 8 views |
 | Security scans | pip-audit, bandit, detect-secrets, gitleaks, SBOM, Trivy: see the CI security and container jobs |

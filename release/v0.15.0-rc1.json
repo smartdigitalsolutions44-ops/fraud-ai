@@ -1,0 +1,66 @@
+{
+  "manifest": {
+    "api_version": "fraud-api-1.0.0",
+    "audit_anchor": {
+      "anchor_number": 1,
+      "anchored_at": "2026-10-02T00:04:31.386662+00:00",
+      "destination": "file:///srv/sentinel-demo/anchors",
+      "head_sha256": "b047ffbb8e3fdd223c56f3173b0c436a42eb7c7706c07a5a64d75761f8fc0d78",
+      "key_id": "ed25519:1ddc0bf8c871c9ef",
+      "sequence": 7
+    },
+    "code_head_revision": "0010",
+    "container_image": null,
+    "created_at": "2026-10-02T00:04:33+00:00",
+    "feature_version": "fraud-features-1.0.0",
+    "git_commit": "a8a5002dba4240d338769897bf58b7380a53f8ce",
+    "image_evidence": null,
+    "manifest_version": 2,
+    "migration_revision": "0010",
+    "models": [
+      {
+        "artifact_sha256": "c4d35eb5268f1a05e8e62864722aae92d846c59d539ea1f5a02c7d32e9d7b114",
+        "feature_version": "fraud-features-1.0.0",
+        "model_id": "c0afa52b-ebd9-40d8-b7a4-8c794884556c",
+        "ref": "gradient-boosting-1.0.0",
+        "signature": {
+          "algorithm": "ed25519",
+          "key_id": "ed25519:94a86e8623256e97",
+          "signature": "oZg-Jajp5ovJKhFZ8-JRwhiKkLD9-vWgjHjDmgDZjJsNVeE6BnEL-fDy9GYqglxn6Bp2qUthiNQptgyvH-OTBQ"
+        }
+      },
+      {
+        "artifact_sha256": "e71784cb0b32c466f086fbdf76c9d49cc1dd58ee4b9223bf0cbbe12c8512b647",
+        "feature_version": "fraud-features-1.0.0",
+        "model_id": "fdc5db23-d0df-4f51-9a8b-0d480007be51",
+        "ref": "logistic-regression-1.0.0",
+        "signature": {
+          "algorithm": "ed25519",
+          "key_id": "ed25519:94a86e8623256e97",
+          "signature": "51tkUhbiwqOympqlcW-5WIHbcct3HvqOAeAae64xjNxnXnoS86v8krPJccV0MUdzz5Dd8tERAHFHW5sXzTIJBA"
+        }
+      }
+    ],
+    "package_version": "0.15.0rc1",
+    "policy": {
+      "definition_sha256": "6bc710b4ecb1e933c6f79b4e91cdedb920bc5d7a87c578a67dd6c7db68123024",
+      "deployment": 1,
+      "policy_version": "risk-policy-1.0.0",
+      "shadow_policies": [
+        "risk-policy-1.1.0"
+      ]
+    },
+    "product": "fraud-ai",
+    "sbom": {
+      "path": "fraud-ai.cdx.json",
+      "sha256": "b482f4dcb726e4afe1baf7776807010d2dcfabb8e7c8d98d51f87f3925bc03ac"
+    },
+    "sequence_version": "fraud-sequence-1.0.0"
+  },
+  "signature": {
+    "algorithm": "ed25519",
+    "key_id": "ed25519:466d67a01b7b6c24",
+    "purpose": "release",
+    "signature": "MOeAKVcq1uCMSUFaXu49KSILw-MRIagfTRPHXRfRTa6kszm7oloEIhK3ru9ulJ6_gkB91WP6RnnMzdKR4mYECw"
+  }
+}
